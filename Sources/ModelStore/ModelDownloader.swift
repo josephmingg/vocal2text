@@ -42,7 +42,13 @@ public actor ModelDownloader {
 
         let resumeOffset = Self.existingPartialBytes(at: partial)
         let request = Self.makeRequest(for: file, resumingFrom: resumeOffset)
+        // swift-corelibs-foundation has no URLSession.bytes; Linux (CI-only,
+        // never downloads real models) buffers the body instead.
+        #if canImport(Darwin)
         let (byteStream, response) = try await session.bytes(for: request)
+        #else
+        let (bodyData, response) = try await Self.legacyData(session: session, request: request)
+        #endif
         guard let http = response as? HTTPURLResponse else {
             throw ModelDownloadError.notAnHTTPResponse
         }
@@ -73,6 +79,7 @@ public actor ModelDownloader {
         var written = startOffset
         do {
             _ = try handle.seekToEnd()
+            #if canImport(Darwin)
             var buffer = Data(capacity: Self.writeChunkSize)
             for try await byte in byteStream {
                 buffer.append(byte)
@@ -87,6 +94,10 @@ public actor ModelDownloader {
                 try handle.write(contentsOf: buffer)
                 written += Int64(buffer.count)
             }
+            #else
+            try handle.write(contentsOf: bodyData)
+            written += Int64(bodyData.count)
+            #endif
             try handle.close()
         } catch {
             // Keep the partial file so a later attempt can resume it.
@@ -152,4 +163,26 @@ public actor ModelDownloader {
         }
         return digest.finalizedHex()
     }
+
+    #if !canImport(Darwin)
+    /// corelibs-foundation lacks `URLSession.bytes`/async `data(for:)`; wrap the
+    /// completion-handler API, which exists on every platform.
+    private static func legacyData(
+        session: URLSession,
+        request: URLRequest
+    ) async throws -> (Data, URLResponse) {
+        try await withCheckedThrowingContinuation { continuation in
+            let task = session.dataTask(with: request) { data, response, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if let response {
+                    continuation.resume(returning: (data ?? Data(), response))
+                } else {
+                    continuation.resume(throwing: ModelDownloadError.notAnHTTPResponse)
+                }
+            }
+            task.resume()
+        }
+    }
+    #endif
 }
