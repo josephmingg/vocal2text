@@ -31,20 +31,23 @@ optional AI cleanup as the Mac — all on-device.
 | Mode | How text reaches other apps | Constraints |
 |---|---|---|
 | **D1 Main-app dictation** (v1, M6) | Auto-copy to clipboard + share sheet + "recent transcripts" widget. Launch via app icon, Action Button (App Intent), Lock Screen widget, Control Center control, Back-Tap | One paste step. Rock-solid: full app resources for ASR + cleanup |
-| **D2 Custom keyboard** (M7) | Types directly into the host app's text field via `textDocumentProxy.insertText` | ⚠️RESEARCH: keyboard extensions and microphone access / memory limits (historically: no mic in extensions, ~60-80 MB RAM cap — both fatal to in-keyboard ASR). Fallback design in §3.1 |
+| **D2 Custom keyboard** (M7) | Types directly into the host app's text field via `textDocumentProxy.insertText` | Research resolved (2026-08-16): in-keyboard mic recording is **not reliable** (Apple QA1872 forbids it; current attempts fail with entitlement errors — open bug FB16791704 — despite an Apple-suggested config); keyboard jetsam ceiling ~48–80 MB means **no ASR model fits in-extension**. Design D2b (§3.1) is therefore the architecture; D2a is a feature-flagged progressive enhancement only. iOS 26 requires Full Access even to launch the container app from a keyboard. |
 | **D3 Share/Action extension** (M6) | Send audio files/voice notes *into* Vocal from any app's share sheet | Import path, not live dictation |
 
 ### 3.1 D2 keyboard — two designs, chosen by research outcome
 
-- **D2a (preferred if allowed)**: mic + small ASR model inside the keyboard extension.
-  Requires: extension mic access AND a usable model within the extension memory cap.
-- **D2b (fallback, always possible)**: the keyboard is a *delivery* surface, not a capture
-  surface — big mic key opens the main app (or the app was just used); main app records,
-  transcribes, writes result to the shared App Group container; user returns to the host app
-  (iOS back-link) and the keyboard inserts the pending transcript automatically.
-  Two app-switches, but every byte of ASR runs with full app resources.
-- Decision gate documented in `docs/04`; PRD requirement is D2b **must** work even if D2a
-  ships, as the degraded path.
+- **D2b (the architecture — Wispr Flow's own "session" pattern, made offline)**: the
+  keyboard is a *delivery + remote-control* surface, never a capture surface. The main app
+  arms a time-boxed **capture session** (background audio mode keeps it resident with the
+  screen on another app; auto-expiry 5/15/60 min). While a session is armed, the keyboard's
+  mic key signals the main app via App Group + Darwin notification — recording and ASR run
+  in the main app, the result is written to the App Group, and the keyboard inserts it via
+  `textDocumentProxy`. Only when **no** session is armed does the mic key deep-link to the
+  container app (allowed; DTS-confirmed) — one bounce per session, and iOS offers no API to
+  hop back automatically (system back-arrow; documented friction).
+- **D2a (progressive enhancement, feature-flagged)**: direct in-keyboard recording, enabled
+  only if a runtime probe succeeds on the installed iOS version. Never load ASR models
+  in-extension regardless (memory ceiling).
 
 ## 4. Functional requirements
 
@@ -75,10 +78,10 @@ optional AI cleanup as the Mac — all on-device.
 - FR-i3.2 Dictionary: same semantics (docs/05 §2); entries editable on phone.
 - FR-i3.3 Profiles: same model; routing by host-app bundle ID (keyboard) or manually chosen
   profile (main app); no hostname routing on iOS (documented limitation).
-- FR-i3.4 AI cleanup: off by default; providers = on-device local model and OpenAI-compatible
-  remote (⚠️RESEARCH: which local model/framework per docs/04 — Apple Foundation Models vs
-  MLX small model; Ollama is Mac-only, but the Mac can serve Ollama to the phone over LAN as
-  an "OpenAI-compatible" endpoint — optional, clearly network-labeled).
+- FR-i3.4 AI cleanup: off by default; providers = **Apple Foundation Models** (default —
+  out-of-process, EN/ZH, the only LLM engine documented to work from a backgrounded app),
+  optional in-app MLX small model (foreground-only), and OpenAI-compatible remote (incl. the
+  Mac serving Ollama over LAN — clearly network-labeled). See docs/04 §4.
 - FR-i3.5 Audio file import from Files app and share sheet; long-file chunked transcription
   with progress, Live Activity, and cancel.
 
@@ -101,11 +104,11 @@ optional AI cleanup as the Mac — all on-device.
 
 ## 6. Permissions (iOS)
 
-Microphone (first capture), Speech recognition **not** needed (we don't use SFSpeechRecognizer
-cloud path) unless Apple SpeechAnalyzer route requires it (⚠️RESEARCH), Notifications
-(optional, import completion), Full Keyboard Access for the keyboard's "allow full access"
-**only if** D2a/App-Group messaging requires it (minimize: D2b needs App Group, not network
-access).
+Microphone (first capture); Notifications (optional, import completion); keyboard **Full
+Access** — required (iOS 26 mandates it for the keyboard→container-app launch and for App
+Group writes; onboarding explains that despite the scary system prompt, the keyboard makes
+no network calls — verifiable in code). Speech-recognition permission only if the Apple
+Speech adapter requires it at runtime (checked in M0 spike).
 
 ## 7. Acceptance criteria (iOS v1 = M6+M7 exit)
 

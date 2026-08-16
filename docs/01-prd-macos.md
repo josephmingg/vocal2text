@@ -34,8 +34,13 @@ IDs are stable; acceptance criteria in §6 reference them.
 - FR-1.2 **Hold-to-talk**: press starts capture (< 100 ms perceived; pre-armed audio engine),
   release stops it and triggers transcription of the whole utterance.
 - FR-1.3 **Lock mode**: double-tap the hotkey to keep recording hands-free; single tap ends.
-- FR-1.4 Hotkey is configurable (default per interview Q-C8; target list: Right-⌥, Right-⌘,
-  Fn/Globe if technically supported — see docs/04 research, ⌥Space chord).
+- FR-1.4 Hotkey is configurable. **Default: hold-Fn/Globe** (Wispr Flow muscle memory;
+  research-confirmed viable via CGEventTap — requires onboarding step setting "Press 🌐
+  key to: Do Nothing", see docs/03 §3.1). **First-class fallback: Right-⌘ hold** (no system
+  conflict, works on all keyboards incl. third-party externals whose firmware swallows Fn).
+  Also offered: Right-⌥, Right-⌃ holds. Keyed chords (⌥Space) supported but discouraged
+  (they die under secure-input sessions; modifier-only hotkeys survive). Interview C8 can
+  override the default.
 - FR-1.5 A press shorter than 300 ms with no speech is discarded silently (accidental tap).
 - FR-1.6 Escape (or configurable key) during capture cancels — nothing is inserted; the audio
   still lands in History marked "cancelled" for 24 h (recoverable), then auto-deletes.
@@ -56,9 +61,12 @@ IDs are stable; acceptance criteria in §6 reference them.
 
 ### FR-3 Text delivery
 - FR-3.1 On completion, text is inserted at the cursor of the frontmost app's focused text
-  element. Insertion strategy is tiered (AX insertion → pasteboard+⌘V with save/restore →
-  clipboard + user notification) — details in docs/03; the requirement is: **works in** native
-  apps, Electron apps (Slack, VS Code), browsers (Safari/Chrome/Arc), terminals, and Java IDEs.
+  element. Insertion strategy is tiered — **paste-primary** (pasteboard+⌘V with full
+  snapshot/restore, transient+concealed pasteboard marking) → CGEvent Unicode-typing
+  fallback (terminals / clipboard-free mode) → clipboard + user notification; AX direct
+  insertion is deliberately *not* primary (Electron breakage; see docs/03 §3.2 and
+  docs/09). The requirement is: **works in** native apps, Electron apps (Slack, VS Code),
+  browsers (Safari/Chrome/Arc), terminals, and Java IDEs.
 - FR-3.2 If the focused element is a secure field (password), never insert or store; show a
   discreet "secure field" HUD notice; transcript remains in History.
 - FR-3.3 Smart spacing/capitalization relative to surrounding text (stage-4 formatter,

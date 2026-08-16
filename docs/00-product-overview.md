@@ -100,3 +100,4 @@ any OpenAI-compatible endpoint), which is **off by default**.
 | `docs/06-roadmap.md` | Milestones with acceptance criteria and verification steps |
 | `docs/07-risks.md` | Risk register with mitigations |
 | `docs/08-interview-questions.md` | Open questions for the product owner |
+| `docs/09-reference-codebases.md` | Engineering learnings from SpeakType (MIT), VoiceInk (GPL, study-only), Handy (MIT) |
