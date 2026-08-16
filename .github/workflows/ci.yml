@@ -89,4 +89,4 @@ jobs:
           tail -5 build.log
           exit $status
 
-# Retrigger marker: scheduled check-in probe 2026-08-16T21:47Z
+# Retrigger marker: scheduled check-in probe 2026-08-16T23:32Z
