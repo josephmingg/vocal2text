@@ -1,0 +1,309 @@
+import ASRKit
+import ASREngineWhisperKit
+import AudioPipeline
+import CleanupKit
+import Combine
+import CoreModels
+import Foundation
+import PersistenceKit
+import ProfileKit
+import SessionKit
+
+/// What the HUD (and menu-bar icon) renders. Owned by AppState; views only read it.
+struct HUDState: Equatable {
+    enum Mode: Equatable {
+        case hidden
+        case listening(startedAt: Date)
+        case processing
+        case error(String)
+    }
+
+    var mode: Mode
+    var partialText: String
+    var profileName: String
+    var languageLabel: String
+    var isRemoteCleanup: Bool
+}
+
+/// The macOS composition root: builds every engine seam once, owns the one
+/// `DictationSession`, and mirrors its phases into `hudState` for the UI.
+/// Views and the hotkey monitor call the three dictation methods; they never
+/// talk to the session directly (docs/03 §2).
+@MainActor
+final class AppState: ObservableObject {
+
+    let session: DictationSession
+    let settings: SettingsStore
+    let database: DatabaseStore?
+    @Published var hudState: HUDState
+
+    /// Whether the configured cleanup provider sends text off-device — drives
+    /// the HUD privacy badge (FR-7.4). Ollama at localhost: false.
+    private let cleanupLeavesDevice: Bool
+
+    private var phaseTask: Task<Void, Never>?
+    /// `session.lastError` snapshot taken at press, so only an error produced
+    /// by the current take is surfaced when the session returns to idle.
+    private var errorAtPress: TranscriptionError?
+
+    init() {
+        let settings = SettingsStore()
+        let database = AppState.makeDatabase()
+        settings.database = database
+
+        let resolver = ProfileResolver(profiles: AppState.loadProfiles(database: database))
+        let frontmost = FrontmostContext()
+        let relay = ResolutionRelay()
+
+        let model = settings.ollamaModel
+        let provider = OpenAICompatibleProvider(
+            baseURL: AppState.ollamaBaseURL,
+            model: model,
+            id: .ollama(model: model)
+        )
+
+        let dependencies = DictationSession.Dependencies(
+            audio: MicrophoneCaptureAdapter(microphone: MicrophoneCapture()),
+            engine: WhisperKitEngine(),
+            // The pipeline is wired unconditionally; the session's own
+            // precedence gating (docs/05 §0: master switch → per-profile
+            // opt-in) decides per dictation whether stage 3 runs, and an
+            // unreachable Ollama falls back to stage-2 text (FR-7.3).
+            cleanup: CleanupPipeline(provider: provider),
+            cleanupProviderID: .ollama(model: model),
+            prewarmCleanup: {
+                // Fired at press (docs/03 §2); skip the network touch entirely
+                // while the master switch is off.
+                guard await settings.cleanupMasterSwitch else { return }
+                guard await provider.isAvailable() else { return }
+                await provider.prewarm()
+            },
+            deliverer: MacTextDelivering(deliverer: TextDeliverer()),
+            store: DatabaseTranscriptStore(database: database),
+            config: settings,
+            profileResolution: {
+                // Snapshot the frontmost context at press; the profile stays
+                // pinned for the whole take (FR-3.6). Manual profile pinning
+                // (FR-8.3) is not wired in v1 of the composition root.
+                let snapshot = await frontmost.snapshot()
+                let resolution = resolver.resolve(
+                    frontmostBundleID: snapshot.bundleID,
+                    tabHostname: snapshot.tabHostname,
+                    manualPinProfileID: nil
+                )
+                await relay.noteResolved(profileName: resolution.profile.name)
+                return (
+                    profile: resolution.profile,
+                    routeKind: resolution.routeKind,
+                    pressTimeBundleID: snapshot.bundleID
+                )
+            }
+        )
+
+        self.settings = settings
+        self.database = database
+        self.cleanupLeavesDevice = provider.leavesDevice
+        self.hudState = HUDState(
+            mode: .hidden,
+            partialText: "",
+            profileName: "",
+            languageLabel: AppState.languageLabel(for: settings.languageMode),
+            isRemoteCleanup: false
+        )
+        self.session = DictationSession(dependencies: dependencies)
+
+        relay.appState = self
+        startPhaseMirror()
+    }
+
+    // MARK: - Dictation controls
+
+    func startDictation() {
+        hudState.partialText = ""
+        hudState.languageLabel = Self.languageLabel(for: settings.languageMode)
+        hudState.isRemoteCleanup = cleanupLeavesDevice && settings.cleanupMasterSwitch
+        let session = session
+        Task { await session.pressBegan() }
+    }
+
+    func stopDictation(isLockMode: Bool) {
+        let session = session
+        Task { await session.pressEnded(isLockMode: isLockMode) }
+    }
+
+    func cancelDictation() {
+        let session = session
+        Task { await session.cancel() }
+    }
+
+    // MARK: - Phase mirroring
+
+    private func startPhaseMirror() {
+        phaseTask = Task { [weak self] in
+            guard let session = self?.session else { return }
+            let phases = await session.phases
+            for await phase in phases {
+                guard let self else { return }
+                await self.handle(phase: phase, session: session)
+            }
+        }
+    }
+
+    private func handle(phase: DictationSession.Phase, session: DictationSession) async {
+        switch phase {
+        case .arming:
+            errorAtPress = await session.lastError
+            hudState.mode = .listening(startedAt: Date())
+        case .recording:
+            hudState.mode = .listening(startedAt: Date())
+        case .transcribing, .cleaning, .delivering:
+            hudState.mode = .processing
+        case .cancelled:
+            hudState.mode = .hidden
+            hudState.partialText = ""
+        case .idle:
+            // The session parks errors in `lastError` and returns to idle; a
+            // change since press means this take failed (short-tap discards
+            // and successful takes leave it untouched).
+            let error = await session.lastError
+            if let error, error != errorAtPress {
+                hudState.mode = .error(Self.message(for: error))
+                scheduleErrorDismiss()
+            } else {
+                hudState.mode = .hidden
+            }
+            hudState.partialText = ""
+        }
+    }
+
+    private func scheduleErrorDismiss() {
+        let shown = hudState.mode
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard let self else { return }
+            if self.hudState.mode == shown {
+                self.hudState.mode = .hidden
+            }
+        }
+    }
+
+    // MARK: - Composition helpers
+
+    private static func makeDatabase() -> DatabaseStore? {
+        let fileManager = FileManager.default
+        guard
+            let appSupport = fileManager.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first
+        else {
+            print("Vocal: Application Support directory unavailable — history disabled")
+            return nil
+        }
+        let directory = appSupport.appendingPathComponent("Vocal", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let path = directory.appendingPathComponent("vocal.sqlite").path
+            return try DatabaseStore(path: path)
+        } catch {
+            print("Vocal: failed to open database — history disabled: \(error)")
+            return nil
+        }
+    }
+
+    private static func loadProfiles(database: DatabaseStore?) -> [Profile] {
+        if let database {
+            do {
+                let stored = try database.profiles()
+                if !stored.isEmpty { return stored }
+            } catch {
+                print("Vocal: failed to load profiles — using built-ins: \(error)")
+            }
+        }
+        return BuiltInProfiles.makeAll()
+    }
+
+    /// Ollama server root; its OpenAI-compatible surface lives under /v1
+    /// (docs/05 §3.2).
+    private static let ollamaBaseURL: URL = {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "localhost"
+        components.port = 11_434
+        // scheme + host + port always compose a URL; the fallback only keeps
+        // this accessor total without a force unwrap.
+        return components.url ?? URL(fileURLWithPath: "/")
+    }()
+
+    private static func languageLabel(for mode: LanguageMode) -> String {
+        switch mode {
+        case .auto: return "Auto"
+        case .pinned(.english): return "EN"
+        case .pinned(.chinese): return "中文"
+        }
+    }
+
+    private static func message(for error: TranscriptionError) -> String {
+        switch error {
+        case .modelNotInstalled: return "Speech model not installed"
+        case .engineUnavailable: return "Transcription engine unavailable"
+        case .audioUnreadable: return "Could not capture microphone audio"
+        case .cancelled: return "Dictation cancelled"
+        }
+    }
+}
+
+// MARK: - Seam adapters
+
+/// Lets the press-time profile resolution (a Sendable closure that cannot
+/// capture the not-yet-initialized AppState) report the resolved profile name
+/// back to the HUD.
+@MainActor
+private final class ResolutionRelay {
+    weak var appState: AppState?
+
+    func noteResolved(profileName: String) {
+        appState?.hudState.profileName = profileName
+    }
+}
+
+/// `MicrophoneSession` mirrors SessionKit's `CaptureSession` field-for-field;
+/// AudioPipeline deliberately does not depend on SessionKit, so the app target
+/// bridges the two (comment in AudioPipeline.swift).
+private struct MicrophoneCaptureAdapter: AudioCapturing {
+    let microphone: MicrophoneCapture
+
+    func start() async throws -> CaptureSession {
+        let session = try await microphone.start()
+        return CaptureSession(
+            chunks: session.chunks,
+            finish: session.finish,
+            cancel: session.cancel
+        )
+    }
+}
+
+/// Hops delivery onto the main actor, where `TextDeliverer` (AppKit pasteboard
+/// + CGEvent synthesis) must run.
+private struct MacTextDelivering: TextDelivering {
+    let deliverer: TextDeliverer
+
+    func deliver(_ text: String, context: DeliveryContext) async -> DeliveryOutcome {
+        await deliverer.deliver(text, context: context)
+    }
+}
+
+/// Keeps the synchronous GRDB write off the main actor and the session actor.
+/// A missing database degrades to a no-op save; the delivered text already
+/// landed (DictationSession treats save failures as non-fatal by design).
+private actor DatabaseTranscriptStore: TranscriptStoring {
+    private let database: DatabaseStore?
+
+    init(database: DatabaseStore?) {
+        self.database = database
+    }
+
+    func save(_ record: TranscriptRecord) async throws {
+        guard let database else { return }
+        try database.save(record)
+    }
+}

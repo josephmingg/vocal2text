@@ -7,6 +7,9 @@ import WhisperKit
 
 /// Primary EN/ZH engine (docs/04 §1): Whisper large-v3-turbo via WhisperKit.
 /// One model covers both languages including mid-sentence code-switching.
+///
+/// Note: WhisperKit's own module exports a `TranscriptionResult` class, so this
+/// file qualifies ours as `ASRKit.TranscriptionResult` throughout.
 public actor WhisperKitEngine: TranscriptionEngine {
     public nonisolated let id = "whisperkit"
     public nonisolated let displayName = "WhisperKit (Whisper large-v3-turbo)"
@@ -14,7 +17,10 @@ public actor WhisperKitEngine: TranscriptionEngine {
     private let modelName: String
     private let modelFolder: URL?
     private var pipe: WhisperKit?
-    private var loadTask: Task<WhisperKit, Error>?
+    // WhisperKit is not Sendable, so concurrent loads coalesce with a
+    // waiter queue instead of a shared Task (docs/09 lesson, adapted).
+    private var isLoading = false
+    private var loadWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(modelName: String = "openai_whisper-large-v3-v20240930_turbo", modelFolder: URL? = nil) {
         self.modelName = modelName
@@ -30,24 +36,24 @@ public actor WhisperKitEngine: TranscriptionEngine {
         _ = try await loadedPipe()
     }
 
-    /// Concurrent loads coalesce onto one in-flight task (docs/09 lesson).
     private func loadedPipe() async throws -> WhisperKit {
-        if let pipe { return pipe }
-        if let loadTask { return try await loadTask.value }
-        let name = modelName
-        let folder = modelFolder
-        let task = Task {
-            let config = WhisperKitConfig(model: name, modelFolder: folder?.path)
-            return try await WhisperKit(config)
+        while isLoading {
+            await withCheckedContinuation { loadWaiters.append($0) }
         }
-        loadTask = task
+        if let pipe { return pipe }
+        isLoading = true
+        defer {
+            isLoading = false
+            let waiters = loadWaiters
+            loadWaiters = []
+            for waiter in waiters { waiter.resume() }
+        }
         do {
-            let loaded = try await task.value
+            let config = WhisperKitConfig(model: modelName, modelFolder: modelFolder?.path)
+            let loaded = try await WhisperKit(config)
             pipe = loaded
-            loadTask = nil
             return loaded
         } catch {
-            loadTask = nil
             throw TranscriptionError.engineUnavailable(String(describing: error))
         }
     }
@@ -56,7 +62,7 @@ public actor WhisperKitEngine: TranscriptionEngine {
         _ audio: PCMChunk,
         languageMode: LanguageMode,
         dictionaryTerms: [String]
-    ) async throws -> TranscriptionResult {
+    ) async throws -> ASRKit.TranscriptionResult {
         let pipe = try await loadedPipe()
         var options = DecodingOptions()
         options.task = .transcribe
@@ -74,21 +80,21 @@ public actor WhisperKitEngine: TranscriptionEngine {
         let results = try await pipe.transcribe(audioArray: audio.samples, decodeOptions: options)
         let text = results.map(\.text).joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let detected = detectLanguage(
+        let detected = Self.detectLanguage(
             reported: results.first?.language,
             text: text,
             mode: languageMode
         )
-        let segments: [TranscriptionResult.TimedSegment] = results.flatMap { result in
+        let segments: [ASRKit.TranscriptionResult.TimedSegment] = results.flatMap { result in
             result.segments.map {
-                .init(
+                ASRKit.TranscriptionResult.TimedSegment(
                     text: $0.text.trimmingCharacters(in: .whitespaces),
                     start: Double($0.start),
                     end: Double($0.end)
                 )
             }
         }
-        return TranscriptionResult(text: text, detectedLanguage: detected, segments: segments)
+        return ASRKit.TranscriptionResult(text: text, detectedLanguage: detected, segments: segments)
     }
 
     public nonisolated func transcribeStream(
@@ -123,11 +129,13 @@ public actor WhisperKitEngine: TranscriptionEngine {
 
     public func unload() async {
         pipe = nil
-        loadTask?.cancel()
-        loadTask = nil
     }
 
-    private nonisolated func detectLanguage(reported: String?, text: String, mode: LanguageMode) -> Language {
+    private nonisolated static func detectLanguage(
+        reported: String?,
+        text: String,
+        mode: LanguageMode
+    ) -> Language {
         if case .pinned(let lang) = mode { return lang }
         if let reported, let lang = Language(rawValue: reported) { return lang }
         return text.containsHanCharacters ? .chinese : .english
