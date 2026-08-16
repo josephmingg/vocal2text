@@ -80,9 +80,11 @@ jobs:
           restore-keys: xcode-spm-
       - name: Build app (unsigned)
         run: |
+          set +e
           xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1
           status=$?
+          set -e
           grep -E "error:" build.log | head -80 || true
           tail -5 build.log
           exit $status
