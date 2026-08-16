@@ -38,16 +38,25 @@ optional AI cleanup as the Mac — all on-device.
 
 - **D2b (the architecture — Wispr Flow's own "session" pattern, made offline)**: the
   keyboard is a *delivery + remote-control* surface, never a capture surface. The main app
-  arms a time-boxed **capture session** (background audio mode keeps it resident with the
-  screen on another app; auto-expiry 5/15/60 min). While a session is armed, the keyboard's
-  mic key signals the main app via App Group + Darwin notification — recording and ASR run
-  in the main app, the result is written to the App Group, and the keyboard inserts it via
-  `textDocumentProxy`. Only when **no** session is armed does the mic key deep-link to the
-  container app (allowed; DTS-confirmed) — one bounce per session, and iOS offers no API to
-  hop back automatically (system back-arrow; documented friction).
-- **D2a (progressive enhancement, feature-flagged)**: direct in-keyboard recording, enabled
-  only if a runtime probe succeeds on the installed iOS version. Never load ASR models
-  in-extension regardless (memory ceiling).
+  arms a time-boxed **capture session** (auto-expiry 5/15/60 min). Residency mechanism,
+  stated honestly: iOS only keeps a backgrounded app alive while its audio session is
+  **actively running** — a merely "armed" app gets suspended and would miss the keyboard's
+  signal. So an armed session holds a live audio session for the window, which means the
+  orange mic indicator is visible and battery is spent for the whole armed period; onboarding
+  says so explicitly, and the short 5-min default exists for exactly this reason. (This is
+  the same trade Wispr Flow ships; acceptable for a personal sideloaded app.)
+  **[verify — M6 spike]**: Darwin-notification delivery latency to a background-audio-active
+  app. While armed: keyboard mic key signals via App Group + Darwin notification; recording
+  and ASR run in the main app; result lands in the App Group; keyboard inserts via
+  `textDocumentProxy`. When **no** session is armed, the mic key deep-links to the container
+  app (allowed; DTS-confirmed) — one bounce per session; iOS offers no API to hop back
+  automatically (system back-arrow; documented friction).
+- **D2a (progressive enhancement, feature-flagged)**: direct in-keyboard *capture* (never
+  models), enabled only if a runtime probe succeeds on the installed iOS version. Its only
+  benefit is skipping the mic-key round-trip **while a session is armed**: the keyboard
+  writes captured PCM to the App Group and the armed main app transcribes it. With no armed
+  session, D2a audio is queued and processed the next time the app runs (with the pending
+  state shown on the keyboard) — or the key simply falls back to the D2b deep-link.
 
 ## 4. Functional requirements
 
@@ -68,8 +77,10 @@ optional AI cleanup as the Mac — all on-device.
   auto), Share, Clean up (re-run with profile picker), Delete. Auto-copy toggle in settings
   (default on).
 - FR-i2.2 Keyboard (M7): inserts pending/dictated text at cursor via textDocumentProxy;
-  respects host-app bundle-ID profile routing; shows a one-line preview before insert with
-  ✓/✗ (configurable to auto-insert).
+  profile routing by host-app bundle ID **if obtainable** (no public API exists — [verify]
+  M6 spike; private/heuristic approaches acceptable for a personal sideloaded build), else
+  via a manual profile-picker key on the keyboard + the armed session's default profile;
+  shows a one-line preview before insert with ✓/✗ (configurable to auto-insert).
 - FR-i2.3 Share extension accepts audio (and video) files and voice memos → import queue.
 
 ### FR-i3 Parity features
@@ -84,6 +95,9 @@ optional AI cleanup as the Mac — all on-device.
   Mac serving Ollama over LAN — clearly network-labeled). See docs/04 §4.
 - FR-i3.5 Audio file import from Files app and share sheet; long-file chunked transcription
   with progress, Live Activity, and cancel.
+- FR-i3.6 Global custom style prompt: same semantics as macOS FR-10.1 / docs/05 §5, editable
+  on the phone, applied to every cleanup-enabled dictation on iOS (independent copies until
+  M8 sync lands).
 
 ### FR-i4 Sync (M8, optional milestone)
 - FR-i4.1 CloudKit private-database sync of history, dictionary, profiles between Mac and
@@ -112,16 +126,25 @@ Speech adapter requires it at runtime (checked in M0 spike).
 
 ## 7. Acceptance criteria (iOS v1 = M6+M7 exit)
 
-1. **AC-i1**: Action Button press → speaking → transcript on clipboard, demonstrated ≤ 4 s
-   end-to-end for a 5 s utterance (screen recording + timing log).
+1. **AC-i1**: Action Button press → speaking → transcript on clipboard. Measured from the
+   timing log: cold-launch-to-listening ≤ 1.5 s AND release-to-clipboard ≤ 2.5 s for a 5 s
+   utterance (screen recording + timing log).
 2. **AC-i2**: Same 20+20 EN/ZH fixture sets meet the same WER/CER bars as macOS AC-2 on
    device (eval harness runs on-device via test target).
 3. **AC-i3**: Keyboard delivery works in Messages, WeChat, Safari form field, Mail (D2b path
-   at minimum), with host-app profile routing shown in history log.
+   at minimum), with profile selection shown in history log (host-app routing if the M6
+   spike verified bundle-ID acquisition; else the manual-picker fallback).
 4. **AC-i4**: Full flow in Airplane Mode (screen recording).
 5. **AC-i5**: Voice-note share-sheet import produces correct transcript in history.
 6. **AC-i6**: Lock-screen-continued capture: 3-min dictation with screen locked completes
    with Live Activity state correct throughout.
+7. **AC-i7 (FR-i3.4, FR-i3.6)**: A cleanup eval subset — including both showcase
+   self-correction cases and a style-prompt case — passes on-device with the Apple
+   Foundation Models provider (AC-4 results on the Mac's provider do not transfer).
+8. **AC-i8 (FR-i3.2)**: A dictionary entry corrects live dictation and a share-sheet import
+   on-device; case-insensitivity demonstrated.
+9. **AC-i9 (FR-i3.1)**: English and Chinese keyword searches each find a known history item
+   on-device.
 
 ## 8. Out of scope (iOS v1)
 

@@ -53,19 +53,23 @@ interview answers folded in.
   input pre-flight, spacing/capitalization stage-4 integration.
 - Dictionary UI (CRUD, CSV import/export, add-from-history) wired into the pipeline.
 - WhisperKit prompt-biasing experiment with dictionary terms (keep if it measurably helps).
-- Gate: **AC-1** (6/6 apps) demonstrated on recording; **AC-3** latency numbers from the
-  timings log; **AC-6** dictionary demo.
+- Gate: **AC-1** (7/7 apps) demonstrated on recording; **AC-3** latency numbers from the
+  timings log; **AC-6** live-dictation portion (the file-import portion re-verifies at M5,
+  once import exists).
 
 ## M4 — AI cleanup & profiles (≈1–2 weeks)
 
-- CleanupKit + three providers (FM, MLX, HTTP/Ollama+OpenAI-compat), prompt templates
-  v1 (EN/ZH), output validators, protected terms, prewarm-at-press.
+- CleanupKit + the four-provider roster of FR-7.2 as three adapters (Apple FM, MLX,
+  HTTP for Ollama + OpenAI-compat), global cleanup master switch (ships OFF), prompt
+  templates v1 (EN/ZH), output validators, protected terms, prewarm-at-press.
 - ProfileKit: routing (bundle ID + browser hostname via AppleScript with Automation
-  degradation), built-in profile set, profile CRUD UI, custom style prompt setting.
-- 60-case cleanup eval harness + committed baseline results.
-- Gate: **AC-4** (≥90% hard-rule pass incl. both self-correction showcase cases),
-  **AC-5** (profile routing shown via history log), cleanup-failure fallback demo
-  (kill Ollama mid-dictation → raw text still delivered).
+  degradation), built-in profile set, profile CRUD UI, menu-bar "pin profile" override,
+  custom style prompt setting.
+- 60-case cleanup eval harness (incl. style-prompt cases) + committed baseline results.
+- Gate: **AC-4** (≥90% hard-rule pass incl. both self-correction showcase cases through the
+  validator), **AC-5** (profile routing + pin override shown via history log), **AC-11**
+  (style prompt), cleanup-failure fallback demo (kill Ollama mid-dictation → stage-2 text
+  still delivered).
 
 ## M5 — macOS v1 polish & exit (≈1–2 weeks)
 
@@ -73,15 +77,19 @@ interview answers folded in.
   (formats, long-file chunked pipeline, progress/cancel), settings panes, onboarding
   playground, launch-at-login, logging/diagnostics, Reduce Motion/VoiceOver pass.
 - Soak + edge cases: secure fields, full-screen apps, multi-display, 100-dictation run.
-- Gate: **the full AC-1…AC-10 checklist** run and recorded; tag `v1.0-mac`.
+- Gate: **the full AC-1…AC-11 checklist** run and recorded; tag `v1.0-mac`.
 
 ## M6 — iOS core app (≈2 weeks)
 
 - iOS app shell: capture UI, session model (background audio + auto-expiry), App Intents
   ("Start Dictation"), Control Center control + Action Button, Live Activity, auto-copy
-  delivery, history/dictionary/profiles UI (shared DictationCore), share-extension import.
+  delivery, history/dictionary/profiles/style-prompt UI (shared DictationCore),
+  share-extension import.
 - iPhone engine defaults per M0 measurements; Apple FM cleanup path.
-- Gate: **AC-i1, AC-i2, AC-i4, AC-i5, AC-i6** demonstrated (recordings + on-device eval).
+- Spikes: Darwin-notification latency to a background-audio-active app; keyboard host
+  bundle-ID acquisition feasibility (feeds M7 design).
+- Gate: **AC-i1, AC-i2, AC-i4, AC-i5, AC-i6, AC-i7, AC-i8, AC-i9** demonstrated
+  (recordings + on-device eval).
 
 ## M7 — iOS keyboard (≈1–2 weeks)
 
@@ -93,8 +101,9 @@ interview answers folded in.
 
 ## M8 — Sync & niceties (optional, ≈1 week)
 
-- CloudKit private-DB sync (SQLiteData) for history/dictionary/profiles, off by default.
-- Menu-bar "pin profile", import-queue niceties, stats screen.
+- CloudKit private-DB sync (SQLiteData) for history/dictionary/profiles/style prompt, off
+  by default.
+- Import-queue niceties, stats screen.
 - Gate: two-device sync demo; airplane-mode regression run (everything still works).
 
 ## Later / parked

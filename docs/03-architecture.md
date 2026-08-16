@@ -96,10 +96,12 @@ issue-tracker forensics):
   Nothing**" (never `defaults write` it ourselves — ignored until re-login). Also surface
   the "press Fn twice = system Dictation" shortcut to disable. M0 runs the one unpublished
   experiment (suppress-and-see) to confirm **[verify]**.
-- Press semantics (VoiceInk-proven): hold ≥0.5 s = push-to-talk (release → transcribe);
-  tap <0.5 s = cancel/ignore; double-tap = hands-free lock (FR-1.3); any non-modifier
-  keyDown within ~1 s of Fn-down = chord → cancel (so Fn+F-key combos never false-trigger).
-  50 ms debounce on systemUptime.
+- Press semantics (VoiceInk-proven, unified with FR-1.5): hold ≥0.5 s = push-to-talk
+  (release → transcribe); a press <0.5 s is discarded **unless the VAD detected speech**
+  during it (then transcribe normally); double-tap = hands-free lock (FR-1.3, with the
+  15-min default cap + low-disk guard); any non-modifier keyDown within ~1 s of Fn-down =
+  chord → abort-before-start (distinct from cancelling an established recording, which only
+  Escape does). 50 ms debounce on systemUptime.
 - Tap hygiene: re-enable only from inside the callback on `tapDisabledByTimeout/ByUserInput`;
   emit a synthetic release for a held PTT on any tap interruption; reconcile modifiers from
   `CGEventSourceFlagsState(CombinedSessionState)`; **never poll `CGEventTapIsEnabled`**
@@ -126,11 +128,22 @@ Industry consensus is unanimous (VoiceInk, Handy, Wispr Flow, SpeakType all past
 3. **Last resort — clipboard + notification** "Copied — ⌘V to paste" (FR-3.4).
 4. **AX direct insertion** (`kAXSelectedTextAttribute`): *not* in the ladder for v1 —
    Electron/Chromium breakage is well-documented. Tracked as an optional fast-path
-   experiment for known-good native apps (roadmap "Later").
+   experiment for known-good native apps (roadmap "Later"). (A *read-only* AX query for the
+   preceding character is used by stage 4's spacing logic, with a degraded default when it
+   fails — docs/05 §6.)
 
-Pre-flight before any insertion: `IsSecureEventInputEnabled()` → if on, identify the
-culprit via `kCGSSessionSecureInputPID` and show the FR-3.2 secure-field notice (PID can
-be wrong when set by a background app — phrase the UI accordingly).
+**Tier selection is configuration-driven, not failure-driven**: a synthesized ⌘V produces
+no reliable success signal, so descent through the ladder cannot be detected at runtime.
+A per-bundle-ID strategy table ships with sane defaults (terminals → Unicode typing;
+Electron apps → paste with longer delays; default → paste) and is user-overridable per app
+in Advanced settings. Any runtime detection idea (pasteboard changeCount observation)
+is an M0 spike 0.4 experiment, not an assumption.
+
+Pre-flight **at delivery time** (not press — the ~1–3 s gap matters, FR-3.6):
+`IsSecureEventInputEnabled()` → if on, block insertion *and persistence* per FR-3.2,
+identify the culprit via `kCGSSessionSecureInputPID` for the HUD notice (PID can be wrong
+when set by a background app — phrase the UI accordingly). Profile stays pinned from press;
+lock-mode deliveries into a different app than at press fall back to clipboard (FR-3.6).
 
 ### 3.3 Profile detection
 
@@ -138,9 +151,10 @@ be wrong when set by a background app — phrase the UI accordingly).
   `didActivateApplicationNotification` for the menu-bar status display.
 - Browser hostname: per-browser compiled AppleScript via `/usr/bin/osascript` with a
   **1.5 s timeout** (hung browser must not stall dictation). Bundle-ID→dialect table covers
-  Safari + the Chromium family (Chrome/Arc/Edge/Brave/Vivaldi/Opera/…). Requires per-browser
-  Automation permission; degrade to app-level routing when denied (FR-8.2). Reduce to
-  hostname immediately; never persist the URL.
+  Safari + the Chromium family (Chrome/Arc/Edge/Brave/Vivaldi/Opera/…). Firefox exposes no
+  scriptable tab URL → app-level routing only (documented in FR-8.2). Requires per-browser
+  Automation permission; degrade to app-level routing when denied. Reduce to hostname
+  immediately; never persist the URL (history stores profile name + route type only).
 
 ### 3.4 App shell
 
@@ -174,10 +188,10 @@ be wrong when set by a background app — phrase the UI accordingly).
   degrades system-wide in HFP). iOS 26: opt into
   `AVAudioSession.CategoryOptions.bluetoothHighQualityRecording` (AirPods 4/Pro 2+ get the
   studio-quality link). Mic picker in settings; mid-recording device swap keeps the session.
-- **VAD**: FluidAudio Silero v6 CoreML (256 ms hops, ANE). Uses: trim leading/trailing
-  silence before ASR (anti-hallucination), discard zero-speech takes (FR-1.5), auto-stop
-  in hands-free lock mode (min silence ~1.5–2 s, optional), and VAD-boundary chunking for
-  long file imports.
+- **VAD**: FluidAudio Silero v6 CoreML (256 ms hops, ANE). v1 uses: trim leading/trailing
+  silence before ASR (anti-hallucination), discard zero-speech takes (FR-1.5), and
+  VAD-boundary chunking for long file imports. (Silence auto-stop in lock mode is post-v1 —
+  roadmap "Later"; the v1 lock-mode guard is the time cap + low-disk stop, FR-1.3.)
 - File import: `AVAudioFile` decodes wav/m4a/mp3/flac/caf; **ogg/opus needs a bundled
   decoder** (libopus). Long files: VAD-boundary chunks with concurrent workers
   (WhisperKit `chunkingStrategy: .vad`), never fixed 30 s windows.

@@ -34,7 +34,7 @@ any OpenAI-compatible endpoint), which is **off by default**.
 | Language | Status |
 |---|---|
 | English | ✅ v1 |
-| Mandarin Chinese (Simplified + Traditional output) | ✅ v1 |
+| Mandarin Chinese (Simplified output; Traditional via optional conversion toggle, per interview B5) | ✅ v1 |
 | Burmese (Myanmar) | ⏸ **Deferred** — explicitly out of v1 scope per user decision (2026-08-16). The language layer must remain pluggable so it can be added later. Research findings preserved in `docs/04-asr-engines-and-languages.md` appendix. |
 
 ### v1 feature set (from user requirements)
@@ -69,9 +69,10 @@ any OpenAI-compatible endpoint), which is **off by default**.
 2. **Raw transcript is never lost.** AI cleanup, dictionary overrides, and profiles transform a
    copy. History stores the raw ASR output alongside the delivered text, so trust in the tool
    never depends on trust in the LLM.
-3. **Degrade gracefully.** If the LLM provider is down/slow → deliver the raw transcript. If
-   accessibility insertion fails → fall back to paste; if that fails → clipboard + notification.
-   The user should never lose spoken words.
+3. **Degrade gracefully.** If the LLM provider is down/slow → deliver the stage-2 text
+   (normalized + dictionary applied — overrides apply to *every* transcription, even
+   fallbacks). If paste insertion isn't possible → fall back to Unicode-typing; if that
+   fails → clipboard + notification. The user should never lose spoken words.
 4. **Local first, pluggable always.** ASR engines, cleanup providers, and languages sit behind
    protocol interfaces. Today's best model is next year's fallback; nothing is hard-wired.
 5. **Clean code, boring architecture.** Small modules, explicit data flow, tests on the pure

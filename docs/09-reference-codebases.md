@@ -28,8 +28,8 @@ macOS menu-bar dictation app, ~15k lines Swift/SwiftUI, WhisperKit 0.9.x + Fluid
 
 | Idea | Where | Why |
 |---|---|---|
-| **Fn-key hotkey via suppressing CGEventTap** (`headInsertEventTap`, return `nil` for the hotkey's `flagsChanged`, self-re-enable on `tapDisabledByTimeout/ByUserInput`) | `AppDelegate.swift:230` | Makes Globe/Fn usable as push-to-talk without terminals receiving CSI garbage; the re-enable dance is mandatory |
-| **Emoji-picker suppression via synthetic F19**, gated on the real `AppleFnUsageType` pref (`com.apple.HIToolbox`) and skipped for terminal bundle IDs | `AppDelegate.swift:127-198` | Solves the "Fn opens emoji picker" conflict properly |
+| **Fn-key hotkey via suppressing CGEventTap** (`headInsertEventTap`, return `nil` for the hotkey's `flagsChanged`, self-re-enable on `tapDisabledByTimeout/ByUserInput`) | `AppDelegate.swift:230` | The re-enable dance is mandatory. Note: whether returning `nil` actually stops the *system* Globe action is **unverified** — the broader research (docs/03 §3.1) says it cannot; suppression here targets terminal CSI leakage, which is real |
+| **Emoji-picker suppression via synthetic F19**, gated on the real `AppleFnUsageType` pref (`com.apple.HIToolbox`) and skipped for terminal bundle IDs | `AppDelegate.swift:127-198` | **Unverified on macOS 26** and contradicts the fleet finding that the Globe action fires below the tap — this is exactly M0 experiment 0.3. Plan of record remains the "Press 🌐 key to: Do Nothing" onboarding step (docs/03 §3.1); if the F19 trick survives the experiment, it removes that onboarding step |
 | **50 ms hotkey debounce on systemUptime** when multiple event sources overlap | `AppDelegate.swift:354` | Event tap + NSEvent monitors both fire |
 | **Full-fidelity clipboard snapshot/restore**: every NSPasteboardItem, every UTI's Data; restore refuses if pasteboard string ≠ what we pasted | `ClipboardService.swift:63-99` | Images/RTF survive; never clobbers user's new copy |
 | **Fixed-size borderless NSPanel, content morphs in SwiftUI** (`minSize == maxSize`, `.nonactivatingPanel`, `.canJoinAllSpaces`, `.fullScreenAuxiliary`); click-through when idle via `ignoresMouseEvents` per phase | `MiniRecorderWindowController.swift:164` | Spring animations never clip; HUD never steals focus or blocks clicks |
@@ -38,20 +38,23 @@ macOS menu-bar dictation app, ~15k lines Swift/SwiftUI, WhisperKit 0.9.x + Fluid
 | **Hardware-aware model recommendation** (sysctl chip parse → perf tier → speed/accuracy weighted score) | `DeviceCapability` | Good defaults per machine |
 | **Output-format pinning on the capture connection** so level metering never sees an unexpected layout (Zoom/FaceTime mid-call switches) | `AudioRecordingService.swift:204` | Real-world bug fix |
 | **Model-cache deletion hardening**: deletes restricted to exact per-variant dirs under repo-owned roots, unit-tested | `ModelDownloadService.swift:19` | Never `rm -rf` a user path by substring |
-| **Escape-to-cancel still transcribes in background** and saves to history, only skips paste | `MiniRecorderView` cancel flow | Matches our FR-1.6 exactly |
+| **Escape-to-cancel keeps the take recoverable** instead of destroying it | `MiniRecorderView` cancel flow | We adapt rather than copy: SpeakType transcribes cancelled takes immediately; our FR-1.6 stores the *audio* for 24 h and transcribes only on an explicit "Recover" (and not at all when audio retention is "never") |
 | **Dev script installs under separate bundle ID** (`SpeakType-Dev.app`) + `make uninstall` runs `tccutil reset` | `Makefile`, `scripts/run-dev.sh` | TCC-permission hygiene during development |
 | **Stats split from history** so "clear all history" keeps usage statistics | `HistoryService` | Privacy wipe without losing the fun numbers |
 
 ### Mistakes to avoid (each maps to a requirement of ours)
 
-1. **Paste-only insertion** — no AXUIElement path at all; clipboard round-trip is the sole
-   mechanism, with a silent do-nothing when Accessibility isn't granted. → Our FR-3.1 tiered
-   insertion (AX first) stands.
+1. **Paste-only insertion with silent failure** — one mechanism, no fallbacks, and a silent
+   do-nothing when Accessibility isn't granted. → Our FR-3.1 ladder is *also* paste-primary
+   (the consensus is right), but adds the Unicode-typing fallback for terminals, a
+   clipboard+notification last resort, secure-input pre-flight, and explicit failure
+   surfacing; AX direct insertion stays a post-v1 experiment (docs/03 §3.2).
 2. **~850 ms of blind fixed sleeps** in the commit path (500 ms post-activate + 350 ms before
    clipboard restore). → We poll/observe `didActivateApplicationNotification` and pasteboard
    `changeCount` instead of sleeping (docs/03).
 3. **No secure-input detection** (`IsSecureEventInput` never called): hotkey and paste die
-   silently in password fields. → FR-3.2 requires explicit detection + HUD notice.
+   silently in password fields. → FR-3.2 requires delivery-time detection + HUD notice, and
+   additionally blocks *persistence* (a secure-field dictation is likely a password).
 4. **No sleep/wake/lock re-arming** of the event tap or capture session; no recovery if
    `tapCreate` fails at launch and permission arrives later. → NFR-3 soak explicitly tests
    sleep/wake; tap creation must be retryable without relaunch.
@@ -63,14 +66,16 @@ macOS menu-bar dictation app, ~15k lines Swift/SwiftUI, WhisperKit 0.9.x + Fluid
 7. **Release-build debug logging of transcript prefixes to `/tmp`** — a privacy leak in a
    privacy app. → NFR-1: structured os_log only, no transcript content at default log level.
 8. **No VAD / max-duration guard** (defined error never thrown; stuck hotkey records until
-   disk fills). → FR-1.7 caps utterance length; lock-mode gets silence auto-stop (roadmap).
+   disk fills). → FR-1.3's lock-mode time cap (default 15 min) + low-disk guard, plus
+   FR-1.5's VAD zero-speech discard; silence-based auto-stop is post-v1 (roadmap "Later").
 9. **CJK-blind text handling**: ASCII-only trailing-punctuation logic (never `。`),
    English-only filler regex, `\b` word boundaries applied around Han characters (unreliable
    matches), whitespace word-count. → docs/05 language-aware stages; dictionary `.phrase`
    mode for CJK entries.
 10. **Left/right modifier detection by keycode only**, and any modifier+key press while
     holding the hotkey cancels the recording (so Fn+⌘C kills dictation). → Explicit
-    left/right handling and a conservative cancel rule (only Escape cancels).
+    left/right handling; only Escape cancels an *established* recording (the ~1 s
+    chord-abort window at press, docs/03 §3.1, is a distinct never-started case).
 11. **Self-update replaces the app bundle via `rm -rf` then copy** (failure = app gone). →
     We don't ship self-update at all (git-based personal updates, FR-11.3).
 12. **30–60 s first-model-load delay** surfaced as a known issue; no prewarm at login. →

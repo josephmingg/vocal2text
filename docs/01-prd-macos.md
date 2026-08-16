@@ -11,8 +11,9 @@ inserted at the cursor of the focused app. Fully offline. Searchable history. Au
 
 ## 2. User stories
 
-- **US-1**: As Joseph writing an email, I hold the hotkey, speak two sentences with a few
-  "um"s and one self-correction, release, and see polished prose appear in Gmail within ~1.5 s.
+- **US-1**: As Joseph writing an email (having turned AI cleanup on), I hold the hotkey,
+  speak two sentences with a few "um"s and one self-correction, release, and see polished
+  prose appear in Gmail within ~2–3 s (≤1.5 s when cleanup is off).
 - **US-2**: As Joseph in the terminal, I dictate a shell one-liner and get *verbatim* text —
   no auto-punctuation, no capitalization surprises (Terminal profile has cleanup off).
 - **US-3**: As Joseph chatting in WeChat, I dictate Chinese; output uses 。，？full-width
@@ -34,6 +35,9 @@ IDs are stable; acceptance criteria in §6 reference them.
 - FR-1.2 **Hold-to-talk**: press starts capture (< 100 ms perceived; pre-armed audio engine),
   release stops it and triggers transcription of the whole utterance.
 - FR-1.3 **Lock mode**: double-tap the hotkey to keep recording hands-free; single tap ends.
+  Hard cap: lock-mode recording auto-stops with a notification at a configurable limit
+  (default 15 min) — a stuck session must never record until the disk fills. A low-disk
+  guard (<1 GB free) stops any recording mode.
 - FR-1.4 Hotkey is configurable. **Default: hold-Fn/Globe** (Wispr Flow muscle memory;
   research-confirmed viable via CGEventTap — requires onboarding step setting "Press 🌐
   key to: Do Nothing", see docs/03 §3.1). **First-class fallback: Right-⌘ hold** (no system
@@ -41,9 +45,13 @@ IDs are stable; acceptance criteria in §6 reference them.
   Also offered: Right-⌥, Right-⌃ holds. Keyed chords (⌥Space) supported but discouraged
   (they die under secure-input sessions; modifier-only hotkeys survive). Interview C8 can
   override the default.
-- FR-1.5 A press shorter than 300 ms with no speech is discarded silently (accidental tap).
-- FR-1.6 Escape (or configurable key) during capture cancels — nothing is inserted; the audio
-  still lands in History marked "cancelled" for 24 h (recoverable), then auto-deletes.
+- FR-1.5 A press shorter than 500 ms is discarded silently (accidental tap) **unless** the
+  VAD detected speech during it, in which case it is transcribed normally. (Same rule and
+  threshold in docs/03 §3.1.)
+- FR-1.6 Escape (or configurable key) during capture cancels — nothing is inserted and
+  nothing is transcribed; the audio lands in History marked "cancelled" for 24 h, where a
+  "Recover" action transcribes it on demand; then it auto-deletes. If the audio-retention
+  setting is "never", cancelled audio is discarded immediately (no recovery window).
 - FR-1.7 Maximum utterance length ≥ 5 minutes without degradation (chunked internally).
 
 ### FR-2 On-device transcription (EN/ZH)
@@ -67,19 +75,29 @@ IDs are stable; acceptance criteria in §6 reference them.
   insertion is deliberately *not* primary (Electron breakage; see docs/03 §3.2 and
   docs/09). The requirement is: **works in** native apps, Electron apps (Slack, VS Code),
   browsers (Safari/Chrome/Arc), terminals, and Java IDEs.
-- FR-3.2 If the focused element is a secure field (password), never insert or store; show a
-  discreet "secure field" HUD notice; transcript remains in History.
+- FR-3.2 If secure input is active at delivery time (password field), **never insert and
+  never persist** — no transcript text, no audio, no history row beyond an anonymous
+  "blocked: secure field" event; show a discreet HUD notice naming the responsible app when
+  identifiable. (A secure-field dictation is very likely a password; storing it in plaintext
+  history would be a privacy leak.)
 - FR-3.3 Smart spacing/capitalization relative to surrounding text (stage-4 formatter,
   docs/05 §6) — consecutive dictations compose into flowing prose.
 - FR-3.4 If no text field has focus, fall back to clipboard + notification "Copied — ⌘V to
   paste".
 - FR-3.5 The clipboard is restored to its prior contents after paste-insertion (including
-  images/rich content) within 300 ms; a setting can disable clipboard use entirely (AX-only
-  mode).
+  images/rich content) within 300 ms; a setting can disable clipboard use entirely
+  (**typing-only mode** — CGEvent Unicode typing, docs/03 §3.2 tier 2).
+- FR-3.6 Timing anchors: the profile is resolved at hotkey **press** and stays pinned; the
+  secure-input check runs at **delivery** time; text is delivered to the app frontmost at
+  delivery. If the frontmost app changed between press and delivery, hold-to-talk still
+  delivers (the window is ~1–3 s and the switch was user-initiated), but **lock mode** falls
+  back to clipboard + notification instead of pasting into an app the user wandered into.
 
 ### FR-4 Recording HUD
 - FR-4.1 While capturing: a small floating HUD (bottom-center, above full-screen apps) shows
-  a live waveform + elapsed time + active profile name + language mode.
+  a live waveform + elapsed time + active profile name + language mode + **streaming
+  partial-transcript preview** (preview only — committed text always comes from the
+  full-utterance pass, docs/09 chunk-stitching lesson).
 - FR-4.2 While transcribing/cleaning: HUD shows progress state; result flashes briefly on
   insert. Total HUD footprint ≤ ~360×80 pt, never steals focus, click-through except its
   cancel button.
@@ -111,9 +129,13 @@ IDs are stable; acceptance criteria in §6 reference them.
 - FR-6.4 Import never blocks live dictation (separate queue/priority).
 
 ### FR-7 AI cleanup (spec: docs/05)
-- FR-7.1 Global default **off**; per-profile enablement.
-- FR-7.2 Providers: bundled local model, Ollama auto-detect, OpenAI-compatible custom
-  endpoint. Provider status (reachable? model loaded?) visible in Settings.
+- FR-7.1 A global cleanup master switch ships **OFF** and gates stage 3 entirely; when ON,
+  per-profile `cleanupEnabled` decides (precedence spec: docs/05 §0).
+- FR-7.2 Providers (both platforms unless noted): **Apple Foundation Models** (zero-install
+  default local provider on OS 26 Apple-Intelligence hardware), **downloadable MLX local
+  model** (the requirement's "downloadable Local model"; quality upgrade), **Ollama**
+  auto-detect (macOS), **OpenAI-compatible** custom endpoint. Provider status (reachable?
+  model loaded?) visible in Settings. Same roster in docs/04 §4 and docs/05 §3.2.
 - FR-7.3 Failure of the cleanup stage never loses the dictation: deliver stage-2 text and log.
 - FR-7.4 Remote providers display a persistent "cloud" badge on the HUD while active
   (privacy honesty).
@@ -122,7 +144,9 @@ IDs are stable; acceptance criteria in §6 reference them.
 - FR-8.1 Ship the 5 built-in profiles; full CRUD on profiles incl. custom prompt text,
   routes (app picker listing installed apps; hostname text entry), provider override.
 - FR-8.2 Automatic selection on hotkey press: app bundle ID → browser hostname when the app
-  is a browser (Safari, Chrome, Arc, Edge, Brave, Firefox) and Automation permission granted.
+  is a supported browser (Safari + Chromium family: Chrome, Arc, Edge, Brave, Vivaldi,
+  Opera) and Automation permission granted. Firefox has no scriptable tab-URL interface —
+  it degrades to app-level routing (documented limitation).
 - FR-8.3 Manual override: hold hotkey + press number keys 1-9? No — v1: menu-bar dropdown
   pins a profile ("Pin profile for next dictation / until unpinned").
 - FR-8.4 Hostname is reduced from the tab URL in memory, used only for route matching, never
@@ -140,9 +164,10 @@ IDs are stable; acceptance criteria in §6 reference them.
   unless a profile opts out.
 
 ### FR-11 Settings, onboarding, app lifecycle
-- FR-11.1 First-run onboarding: welcome → mic permission → accessibility/input-monitoring
-  permission (with live "granted ✓" detection) → model download → hotkey choice → test
-  dictation playground ("say this sentence…").
+- FR-11.1 First-run onboarding: welcome → mic permission → Accessibility permission (with
+  live "granted ✓" detection; Input Monitoring is never separately requested) → Fn "Press
+  🌐 key to: Do Nothing" check with Settings deep link (if Fn chosen) → model download →
+  hotkey choice → test dictation playground ("say this sentence…").
 - FR-11.2 Settings panes: General (hotkey, launch at login, sounds, HUD), Models, Cleanup
   (providers), Profiles, Dictionary, History & privacy, Advanced (timings overlay, logs).
 - FR-11.3 Launch at login (SMAppService), single-instance guard, Sparkle-style update **not**
@@ -155,7 +180,9 @@ IDs are stable; acceptance criteria in §6 reference them.
 
 - **NFR-1 Privacy**: no telemetry, no network in core path (verified by test), remote cleanup
   clearly badged and off by default. Mic indicator honesty: capture only between press and
-  release/stop — the orange mic dot must never appear at idle.
+  release/stop — the orange mic dot must never appear at idle. Logging: structured os_log
+  only; transcript content never appears at the default log level (debug capture is an
+  explicit, temporary toggle).
 - **NFR-2 Performance**: idle footprint ≤ ~150 MB RAM with model unloaded, ≤ 1% CPU idle;
   model kept warm in RAM is a setting (default: warm; "unload after N min" option). Latency
   per FR-2.5.
@@ -172,8 +199,8 @@ IDs are stable; acceptance criteria in §6 reference them.
 | Permission | Why | When asked |
 |---|---|---|
 | Microphone | capture | onboarding |
-| Accessibility | AX text insertion + ⌘V synthesis | onboarding |
-| Input Monitoring | global hotkey listener (depending on API used) | onboarding |
+| Accessibility | hotkey event tap + ⌘V/typing synthesis (also implies Input Monitoring) | onboarding |
+| Input Monitoring | **not requested** — covered by Accessibility (docs/03 §3.1) | — |
 | Automation (per browser) | tab hostname for website profiles | first time a website route is created (optional feature, degradable) |
 
 ## 6. Acceptance criteria (v1 exit)
@@ -181,15 +208,18 @@ IDs are stable; acceptance criteria in §6 reference them.
 Each is demonstrated by a recorded checklist run (see roadmap M5 gate):
 
 1. **AC-1 (FR-1, FR-3)**: In each of TextEdit, Safari (Gmail compose), Slack, VS Code,
-   iTerm2/Terminal, Notes: hold-key dictation inserts correct text at cursor. 6/6 apps.
+   iTerm2/Terminal, Notes, IntelliJ IDEA CE: hold-key dictation inserts correct text at
+   cursor. 7/7 apps.
 2. **AC-2 (FR-2)**: 20-utterance EN set and 20-utterance ZH set (fixtures) transcribe with
    ≤ 5% WER (EN) / ≤ 8% CER (ZH) on the chosen model, measured by scripts/eval-asr.
 3. **AC-3 (FR-2.5)**: p50 release→insert ≤ 1.5 s, p95 ≤ 2.5 s over 50 timed 10-s dictations
    (cleanup off), from the timings log.
-4. **AC-4 (FR-7)**: The 60-case cleanup eval passes ≥ 90% hard-rule checks with the bundled
-   local model; "Friday, sorry Saturday" and 「周五，啊不对，周六」cases pass.
+4. **AC-4 (FR-7)**: The 60-case cleanup eval passes ≥ 90% hard-rule checks with the default
+   local provider; "Friday, sorry Saturday" and 「周五，啊不对，周六」cases pass **through
+   the full pipeline including the output validator** (they are validator test fixtures).
 5. **AC-5 (FR-8)**: Focusing Slack then dictating uses Messages profile; Gmail tab in Chrome
-   uses Email profile; iTerm2 gets verbatim mode. Shown via history log entries.
+   uses Email profile; iTerm2 gets verbatim mode; menu-bar "pin profile" override works.
+   Shown via history log entries (profile name + route type — no hostname stored).
 6. **AC-6 (FR-9)**: A dictionary entry corrects a repeated ASR error in live dictation and
    in file import; case-insensitivity demonstrated.
 7. **AC-7 (FR-5)**: Chinese and English keyword searches each find a known history item;
@@ -198,12 +228,18 @@ Each is demonstrated by a recorded checklist run (see roadmap M5 gate):
    hallucinated repetition loops; progress and cancel work.
 9. **AC-9 (NFR-1)**: Little Snitch (or equivalent) session recording shows zero outbound
    connections during 20 dictations with local cleanup.
-10. **AC-10 (FR-1.6, FR-3.2, NFR-3)**: cancel works; secure-field guard works; sleep/wake +
+10. **AC-10 (FR-1.6, FR-3.2, FR-3.6, NFR-3)**: cancel works; secure-field guard blocks
+    insertion *and* persistence; lock-mode focus-change falls back to clipboard; sleep/wake +
     AirPods swap soak passes.
+11. **AC-11 (FR-10)**: With a global style prompt set ("British spelling; never use the word
+    'utilize'"), cleanup-enabled dictations in two different profiles demonstrably follow
+    it, and a profile with "ignore global style" does not.
 
 ## 7. Out of scope (v1) — tracked for later
 
 Command mode ("select last sentence, make it shorter"), Whisper-style whisper-detection,
 context awareness from screen content, per-app language pinning, voice activity auto-stop in
-lock mode, iCloud sync (M8+), Burmese (deferred), ASR biasing from dictionary, streaming
-partial-text insertion (type-as-you-speak).
+lock mode (the v1 lock-mode cap is time-based, FR-1.3), iCloud sync (M8+), Burmese
+(deferred), sherpa-onnx decode-time hotword boosting (note: the WhisperKit prompt-biasing
+experiment and Apple contextualStrings *are* v1 — docs/04 §3), streaming partial-text
+*insertion* (type-as-you-speak; the HUD *preview* is v1 per FR-4.1).

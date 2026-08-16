@@ -49,9 +49,10 @@ punctuation or script.
 Known failure modes: answering the dictation instead of cleaning it, hallucinating
 content, reasoning-trace leakage, over-eager "correction" removal, Apple FM guardrail
 false-positives.
-**Mitigation**: docs/05 §3.3 output validators (length ratio, meta-text markers, language
-match, protected terms) with automatic raw-text fallback; temperature ≤0.3; think-mode off;
-raw transcript always stored; cleanup off by default.
+**Mitigation**: docs/05 §3.3 output validators (length-aware ratio, meta-text markers,
+language match, protected terms) with automatic fallback to stage-2 (dictionary-applied)
+text; temperature ≤0.3; think-mode off; raw transcript always stored; cleanup off by
+default.
 **Signal**: validation-failure counter in diagnostics; eval-suite regressions on model or
 prompt changes.
 
@@ -87,9 +88,11 @@ model catalog manifest; pinned SPM versions with a scheduled quarterly bump.
 Each stage is fast; the sum can stop feeling instant (SpeakType shipped ~850 ms of pure
 sleeps).
 **Mitigation**: per-stage timings recorded on every dictation (FR-11.4); p50/p95 budget in
-AC-3 enforced at the M5 gate; no fixed sleeps allowed in the delivery path (poll/observe
-instead — code-review rule).
-**Signal**: timings overlay trend; any new `Task.sleep` in review.
+AC-3 enforced at the M5 gate; no *blind app-activation* sleeps in the delivery path (the
+SpeakType mistake — poll/observe instead); the paste ladder's small configurable timing
+delays (docs/03 §3.2) are permitted, and clipboard restore is changeCount-observed where
+possible.
+**Signal**: timings overlay trend; any new unexplained `Task.sleep` in review.
 
 ## R10 — Scope creep vs. shipping (Low / Medium)
 
