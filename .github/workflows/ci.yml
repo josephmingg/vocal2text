@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast + cheap: pure-logic targets on Linux. Apple-only targets compile to
+  # guarded stubs here, so this job proves the whole package parses and the
+  # text pipeline / cleanup / profile / session logic passes its tests.
+  linux-core:
+    name: Linux — core tests
+    runs-on: ubuntu-latest
+    container: swift:6.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-linux-
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test
+
+  # The real thing: full dependency graph (GRDB, WhisperKit) + all tests on macOS.
+  macos-full:
+    name: macOS — full build & tests
+    runs-on: macos-15
+    needs: linux-core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-macos-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-macos-
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test
