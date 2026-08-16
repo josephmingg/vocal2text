@@ -38,6 +38,25 @@ enum ZhText {
         return String(result)
     }
 
+    /// Stage 4's stricter enforcement (docs/05 §6): converts a half-width mark
+    /// whose *preceding* character is Han when the following character is Han,
+    /// whitespace, or absent — so sentence-final "今天天气很好." becomes 。 while
+    /// "3.14" and "U.S." stay safe (Han-left-neighbor guard).
+    static func enforceFullWidthPunctuationAfterHan(_ text: String) -> String {
+        let characters = Array(text)
+        guard characters.count >= 2 else { return text }
+        var result = characters
+        for index in 1..<characters.count {
+            guard let fullWidth = halfToFullWidthMap[characters[index]] else { continue }
+            guard isHan(characters[index - 1]) else { continue }
+            let isLast = index == characters.count - 1
+            if isLast || characters[index + 1].isWhitespace || isHan(characters[index + 1]) {
+                result[index] = fullWidth
+            }
+        }
+        return String(result)
+    }
+
     /// Removes a single ASCII space wedged between two Han characters (a Whisper
     /// artifact, docs/05 §1). A run of two or more spaces is left alone: only a
     /// space whose immediate neighbors are both Han is spurious with confidence.

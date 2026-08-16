@@ -30,15 +30,45 @@ public enum ProtectedTermsVerifier {
         guard !term.isEmpty, !output.isEmpty else { return false }
         let exactRanges = exactOccurrenceRanges(of: term, in: output)
         let loweredTerm = lowercasedCharacters(term[...])
-        for length in max(1, term.count - 1)...(term.count + 1) where length <= output.count {
+        // Single-character terms: only a pure case mutation can be "altered
+        // spelling"; any other character is unrelated content, not a mutation
+        // (a substitution rule here would flag essentially every output).
+        if term.count == 1 {
+            let exact = term[0]
+            for character in output where character != exact {
+                if lowercasedCharacters([character][...]) == loweredTerm {
+                    return true
+                }
+            }
+            return false
+        }
+        for length in max(2, term.count - 1)...(term.count + 1) where length <= output.count {
             for start in 0...(output.count - length) {
                 let windowRange = start..<(start + length)
                 if exactRanges.contains(where: { $0.overlaps(windowRange) }) { continue }
                 let window = lowercasedCharacters(output[windowRange])
+                // A proper substring of the term itself (e.g. 微 from 微信, "ob"
+                // from "Bob") is ordinary language reuse, not the term in
+                // altered spelling — deletion-variant windows that the term
+                // fully contains are skipped (docs/05 §3.4 catches mutation,
+                // and this was the CJK false-positive path).
+                if window.count < loweredTerm.count, isSubsequenceRun(window, of: loweredTerm) {
+                    continue
+                }
                 if isWithinDistanceOne(window, loweredTerm) {
                     return true
                 }
             }
+        }
+        return false
+    }
+
+    /// True when `candidate` appears as a contiguous run inside `whole`.
+    private static func isSubsequenceRun(_ candidate: [Character], of whole: [Character]) -> Bool {
+        guard candidate.count <= whole.count else { return false }
+        for start in 0...(whole.count - candidate.count)
+        where whole[start..<(start + candidate.count)].elementsEqual(candidate) {
+            return true
         }
         return false
     }

@@ -25,6 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Hands-free lock (FR-1.3). The monitor is stateless about lock mode; it
     /// reports edges and this flag reinterprets them while a locked take runs.
     private var isLockModeActive = false
+    /// FR-1.3 hard cap: a forgotten hands-free take auto-stops (default 15 min)
+    /// instead of recording until the disk fills.
+    private var lockCapTask: Task<Void, Never>?
+    /// First run: Accessibility isn't granted yet, so the tap fails to arm;
+    /// this poll re-arms the moment the user grants it during onboarding.
+    private var armRetryTimer: Timer?
 
     override init() {
         appState = AppState()
@@ -44,33 +50,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.onPressEnded = { [weak self] in
             guard let self else { return }
             let wasLocked = self.isLockModeActive
-            self.isLockModeActive = false
+            self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: wasLocked)
         }
         monitor.onCancel = { [weak self] in
             guard let self else { return }
             if self.isLockModeActive {
-                // A short tap finishes a hands-free take and transcribes it
-                // (FR-1.3) — only Escape discards, which the monitor reports
-                // while a press is held, and the session ignores when idle.
-                self.isLockModeActive = false
-                self.appState.stopDictation(isLockMode: true)
-            } else {
-                self.appState.cancelDictation()
+                // Escape/chord during a hands-free take discards it (FR-1.6);
+                // finishing-and-transcribing is the tap path (onPressEnded).
+                self.endLockMode(stopping: false)
             }
+            self.appState.cancelDictation()
         }
         monitor.onLockToggle = { [weak self] in
             guard let self else { return }
             if self.isLockModeActive {
-                self.isLockModeActive = false
-                self.appState.stopDictation(isLockMode: true)
+                self.endLockMode(stopping: true)
             } else {
                 // The second tap's down-edge already started the recording;
                 // it now runs hands-free until the next tap (FR-1.3).
                 self.isLockModeActive = true
+                self.startLockCapTimer()
             }
         }
-        _ = monitor.start()
+        if !monitor.start() {
+            scheduleArmRetry()
+        }
         hotkeyMonitor = monitor
 
         // Hotkey choice changes take effect immediately, not at relaunch.
@@ -97,6 +102,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             center.removeObserver(observer)
         }
         workspaceObservers = []
+        lockCapTask?.cancel()
+        armRetryTimer?.invalidate()
+    }
+
+    // MARK: - Lock-mode cap + first-run arming
+
+    private func startLockCapTimer() {
+        lockCapTask?.cancel()
+        lockCapTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15 * 60))
+            guard !Task.isCancelled, let self, self.isLockModeActive else { return }
+            self.endLockMode(stopping: false)
+            self.appState.stopDictation(isLockMode: true)
+            self.appState.hudState.mode = .notice("Hands-free capped at 15 min — take saved")
+        }
+    }
+
+    private func endLockMode(stopping: Bool) {
+        isLockModeActive = false
+        lockCapTask?.cancel()
+        lockCapTask = nil
+        if stopping {
+            appState.stopDictation(isLockMode: true)
+        }
+    }
+
+    private func scheduleArmRetry() {
+        armRetryTimer?.invalidate()
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.hotkeyMonitor?.start() == true {
+                    self.armRetryTimer?.invalidate()
+                    self.armRetryTimer = nil
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        armRetryTimer = timer
     }
 
     // MARK: - Sleep/wake/lock (docs/03 §3.4)

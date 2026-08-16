@@ -126,7 +126,10 @@ public actor OpenAICompatibleProvider: CleanupProvider {
     /// 2× the input token estimate (chars/3 heuristic), floored at 16 so tiny
     /// dictations still leave the model room to answer.
     static func maxTokens(forInputCharacterCount count: Int) -> Int {
-        max(16, 2 * (count / 3))
+        // max_tokens is a cap, not a target; overshoot is free on local
+        // endpoints. Chinese tokenizes near 1–2 tokens per character, so a
+        // chars/3 estimate silently truncated ZH output mid-sentence.
+        max(64, 2 * count)
     }
 
     nonisolated func makeURLRequest(

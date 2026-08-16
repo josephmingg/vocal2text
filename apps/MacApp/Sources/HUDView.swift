@@ -40,7 +40,20 @@ struct HUDView: View {
             processing
         case .error(let message):
             errorContent(message)
+        case .notice(let message):
+            noticeContent(message)
         }
+    }
+
+    private func noticeContent(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(.secondary)
+            Text(message)
+                .font(.callout)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 4)
     }
 
     private func listening(startedAt: Date) -> some View {

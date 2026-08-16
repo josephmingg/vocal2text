@@ -203,7 +203,10 @@ private struct AccessibilityStep: View {
     }
 
     private func promptForAccessibility() {
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        // The header exposes kAXTrustedCheckOptionPrompt as a mutable global,
+        // which Swift 6 rejects as non-concurrency-safe; its documented value
+        // is the literal key string.
+        let promptKey = "AXTrustedCheckOptionPrompt"
         let options = [promptKey: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
     }
@@ -247,6 +250,7 @@ private struct ModelDownloadStep: View {
     let appState: AppState
     @State private var isWarming = false
     @State private var warmedUp = false
+    @State private var warmUpError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -277,15 +281,27 @@ private struct ModelDownloadStep: View {
                 }
             }
             .disabled(isWarming || warmedUp)
+            if let warmUpError {
+                Text(warmUpError)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
     private func warmUp() {
         isWarming = true
+        warmUpError = nil
         Task {
-            try? await appState.warmUp()
+            do {
+                try await appState.warmUp()
+                warmedUp = true
+            } catch {
+                // A failed download must not show "Model ready" — the user
+                // would finish onboarding believing the model is installed.
+                warmUpError = "Download failed — check your connection and retry."
+            }
             isWarming = false
-            warmedUp = true
         }
     }
 }

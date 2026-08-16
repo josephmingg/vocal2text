@@ -392,10 +392,12 @@ private final class HotkeyTapMachine: @unchecked Sendable {
             lastShortTapDownTime = nil
             sink(.lockToggled)
         } else {
-            // Short tap: cancel here; SessionKit applies the has-speech
-            // override on its side (FR-1.5, docs/03 §3.1).
+            // Short tap: report it as an ended press so SessionKit's FR-1.5
+            // heuristic decides (a sub-500 ms take WITH speech transcribes;
+            // without speech it discards silently — docs/03 §3.1). Routing it
+            // to cancel would make the has-speech override a dead path.
             lastShortTapDownTime = pressStartTime
-            sink(.cancelled)
+            sink(.pressEnded)
         }
     }
 }

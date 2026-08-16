@@ -101,6 +101,11 @@ public actor DictationSession {
     private var phaseValue: Phase = .idle
     private var phaseSubscribers: [UUID: AsyncStream<Phase>.Continuation] = [:]
     private var take: ActiveTake?
+    /// Release/cancel edges that arrived during the `.arming` suspension
+    /// window; honored the moment recording starts (a lost release would
+    /// leave the mic running — NFR-1).
+    private var pendingRelease: Bool?
+    private var pendingCancel = false
 
     /// The most recent transcription (or capture) failure. Documented v1
     /// choice: a failed transcription produces no text worth a history row —
@@ -159,6 +164,9 @@ public actor DictationSession {
     /// the session returns to idle.
     public func pressBegan() async {
         guard phaseValue == .idle else { return }
+        lastError = nil
+        pendingRelease = nil
+        pendingCancel = false
         transition(to: .arming)
 
         let resolved = await deps.profileResolution()
@@ -177,23 +185,46 @@ public actor DictationSession {
                 pressedAt: pressedAt
             )
             transition(to: .recording(startedAt: pressedAt))
+            // A release or Escape that arrived while we were suspended in
+            // profile resolution / audio start (the .arming window) must not
+            // be lost — the mic would run until the next full press cycle.
+            if pendingCancel {
+                pendingCancel = false
+                pendingRelease = nil
+                await cancel()
+            } else if let release = pendingRelease {
+                pendingRelease = nil
+                await finishPress(isLockMode: release, heldDurationOverride: nil)
+            }
         } catch {
             take = nil
+            pendingRelease = nil
+            pendingCancel = false
             lastError = .audioUnreadable("capture failed to start: \(error)")
             transition(to: .idle)
         }
     }
 
     /// Hotkey release: stop capture and run the full pipeline through delivery
-    /// and history. No-op unless recording.
+    /// and history. A release during `.arming` is latched and honored the
+    /// moment recording starts.
     public func pressEnded(isLockMode: Bool = false) async {
+        if phaseValue == .arming {
+            pendingRelease = isLockMode
+            return
+        }
         await finishPress(isLockMode: isLockMode, heldDurationOverride: nil)
     }
 
     /// Escape during capture (FR-1.6): abort the take — the session
     /// transcribes, delivers, and saves nothing. The capture layer owns the
-    /// 24 h recoverable-audio window for cancelled takes.
+    /// 24 h recoverable-audio window for cancelled takes. A cancel during
+    /// `.arming` is latched like a pending release.
     public func cancel() async {
+        if phaseValue == .arming {
+            pendingCancel = true
+            return
+        }
         guard case .recording = phaseValue, let active = take else { return }
         take = nil
         await active.capture.cancel()
@@ -269,7 +300,11 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .profileDisabled)
         } else if let pipeline = deps.cleanup {
             transition(to: .cleaning)
-            let providerID = active.profile.providerOverride ?? deps.cleanupProviderID
+            // History must record what actually ran (FR-5.1). Only one pipeline
+            // is injected today, so a profile's providerOverride is routing
+            // intent, not reality — runtime provider selection is a known gap
+            // (docs/11).
+            let providerID = deps.cleanupProviderID
             let stylePrompt: String
             if active.profile.ignoresGlobalStyle {
                 stylePrompt = ""

@@ -152,18 +152,10 @@ struct MenuBarView: View {
     // MARK: - Profiles
 
     private func loadProfiles() {
-        if let database = appState.database {
-            do {
-                let stored = try database.profiles()
-                if !stored.isEmpty {
-                    profiles = stored
-                    return
-                }
-            } catch {
-                // Fall through to built-ins; the pin menu degrades, dictation
-                // itself is unaffected.
-            }
-        }
-        profiles = BuiltInProfiles.makeAll()
+        // The composition root builds the profile list once; using the same
+        // instances keeps pin-picker UUIDs aligned with the resolver's
+        // (a fresh BuiltInProfiles.makeAll() here would mint different IDs
+        // and make pinning a silent no-op — FR-8.3).
+        profiles = appState.profiles
     }
 }

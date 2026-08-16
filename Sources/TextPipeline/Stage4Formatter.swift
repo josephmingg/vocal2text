@@ -21,7 +21,7 @@ public enum Stage4Formatter: Sendable {
         var result = text
         if language == .chinese {
             if formatting.enforceFullWidthZhPunctuation {
-                result = ZhText.convertHalfWidthPunctuationBetweenHan(result)
+                result = ZhText.enforceFullWidthPunctuationAfterHan(result)
             }
             if formatting.panguSpacing {
                 result = ZhText.applyPanguSpacing(result)

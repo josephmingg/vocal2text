@@ -142,8 +142,8 @@ struct OpenAICompatibleProviderRequestTests {
         #expect(body.model == "qwen2.5:7b-instruct")
         #expect(body.temperature == 0.2)
         #expect(body.stream == false)
-        // 29 chars → estimate 9 tokens → 2× = 18.
-        #expect(body.maxTokens == 18)
+        // 29 chars → 2× char cap, floored at 64 (ZH-safe budget).
+        #expect(body.maxTokens == 64)
         #expect(body.messages.count == 2)
         #expect(body.messages.first?.role == "system")
         #expect(body.messages.first?.content.contains("Claude") == true)
@@ -155,9 +155,9 @@ struct OpenAICompatibleProviderRequestTests {
         )
     }
 
-    @Test func maxTokensHeuristicIsTwiceCharsOverThreeWithFloor() {
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 300) == 200)
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 3) == 16)
+    @Test func maxTokensHeuristicIsTwiceCharsWithFloor() {
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 300) == 600)
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 3) == 64)
     }
 
     @Test func prewarmBodyRequestsSingleToken() throws {

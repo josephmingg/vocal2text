@@ -17,6 +17,7 @@ public enum Stage1Normalizer: Sendable {
         result = stripTokenRemnants(result)
         result = stripNoiseTags(result)
         result = collapseRepeatedTokenLoops(result)
+        result = collapseUnspacedRepetitionLoops(result)
         result = stripLeadingOrphanPunctuation(result)
         result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         if language == .english {
@@ -96,6 +97,23 @@ public enum Stage1Normalizer: Sendable {
             }
         }
         return collapsed.joined(separator: " ")
+    }
+
+    /// Collapses an *unspaced* phrase repeated 4+ times consecutively — the
+    /// canonical Whisper zh decoding loop has no spaces, so the token-based
+    /// collapse never sees it. Repeated units of 2–20 characters shrink to one
+    /// occurrence; shorter runs stay (可以可以 is legitimate speech).
+    private static func collapseUnspacedRepetitionLoops(_ text: String) -> String {
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: "(.{2,20}?)\\1{3,}",
+                options: [.dotMatchesLineSeparators]
+            )
+        else { return text }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(
+            in: text, options: [], range: range, withTemplate: "$1"
+        )
     }
 
     /// Punctuation that cannot legitimately start an utterance. Opening quotes,

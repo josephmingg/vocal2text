@@ -26,6 +26,13 @@ public enum OutputValidator {
             return .rejected(rule: "empty")
         }
 
+        // An unterminated reasoning block (max_tokens/timeout truncation)
+        // survives the paired-block strip; never deliver chain-of-thought.
+        let loweredForTags = cleaned.lowercased()
+        if loweredForTags.contains("<think") || loweredForTags.contains("<reasoning") {
+            return .rejected(rule: "meta-text")
+        }
+
         let lowered = cleaned.lowercased()
         if metaMarkers.contains(where: { lowered.hasPrefix($0) }) {
             return .rejected(rule: "meta-text")
@@ -45,6 +52,17 @@ public enum OutputValidator {
 
         if input.containsHanCharacters, !cleaned.containsHanCharacters {
             return .rejected(rule: "language-mismatch")
+        }
+        // Mirror direction: an English dictation must not come back translated
+        // into Chinese (answer/translation failure class). Code-switched Han in
+        // a mostly-Latin output is tolerated up to a third of its length.
+        if !input.containsHanCharacters, cleaned.containsHanCharacters {
+            let hanCount = cleaned.unicodeScalars.filter {
+                (0x4E00...0x9FFF).contains($0.value)
+            }.count
+            if hanCount * 3 > cleaned.count {
+                return .rejected(rule: "language-mismatch")
+            }
         }
 
         return .accepted(cleaned: cleaned)

@@ -16,6 +16,8 @@ struct HUDState: Equatable {
         case listening(startedAt: Date)
         case processing
         case error(String)
+        /// Non-error transient message (clipboard fallback, secure-field block).
+        case notice(String)
     }
 
     var mode: Mode
@@ -46,16 +48,21 @@ final class AppState: ObservableObject {
     private let cleanupLeavesDevice: Bool
 
     private var phaseTask: Task<Void, Never>?
-    /// `session.lastError` snapshot taken at press, so only an error produced
-    /// by the current take is surfaced when the session returns to idle.
-    private var errorAtPress: TranscriptionError?
+    /// Hotkey edges must reach the session actor in order; independent
+    /// unstructured Tasks give no FIFO guarantee, so each control call chains
+    /// on the previous one.
+    private var controlTask: Task<Void, Never>?
+    /// Built-in (or stored) profiles, built once so the resolver and the
+    /// menu-bar pin picker agree on UUIDs (FR-8.3).
+    let profiles: [Profile]
 
     init() {
         let settings = SettingsStore()
         let database = AppState.makeDatabase()
         settings.database = database
 
-        let resolver = ProfileResolver(profiles: AppState.loadProfiles(database: database))
+        let profiles = AppState.loadProfiles(database: database)
+        let resolver = ProfileResolver(profiles: profiles)
         let frontmost = FrontmostContext()
         let relay = ResolutionRelay()
 
@@ -89,7 +96,8 @@ final class AppState: ObservableObject {
                         overrides: settings.insertionStrategyOverrides
                     ),
                     clipboard: ClipboardManager()
-                )
+                ),
+                onOutcome: { outcome in relay.noteDelivery(outcome) }
             ),
             store: DatabaseTranscriptStore(database: database),
             config: settings,
@@ -116,6 +124,7 @@ final class AppState: ObservableObject {
         self.settings = settings
         self.database = database
         self.engine = engine
+        self.profiles = profiles
         self.cleanupLeavesDevice = provider.leavesDevice
         self.hudState = HUDState(
             mode: .hidden,
@@ -142,18 +151,29 @@ final class AppState: ObservableObject {
         hudState.partialText = ""
         hudState.languageLabel = Self.languageLabel(for: settings.languageMode)
         hudState.isRemoteCleanup = cleanupLeavesDevice && settings.cleanupMasterSwitch
-        let session = session
-        Task { await session.pressBegan() }
+        enqueueControl { session in await session.pressBegan() }
     }
 
     func stopDictation(isLockMode: Bool) {
-        let session = session
-        Task { await session.pressEnded(isLockMode: isLockMode) }
+        DeliverySounds.playStop(enabled: settings.soundsEnabled)
+        enqueueControl { session in await session.pressEnded(isLockMode: isLockMode) }
     }
 
     func cancelDictation() {
+        enqueueControl { session in await session.cancel() }
+    }
+
+    /// Chains session control calls so hotkey edges arrive in press order —
+    /// independently spawned Tasks would race a release past its press.
+    private func enqueueControl(
+        _ operation: @escaping @Sendable (DictationSession) async -> Void
+    ) {
         let session = session
-        Task { await session.cancel() }
+        let previous = controlTask
+        controlTask = Task {
+            await previous?.value
+            await operation(session)
+        }
     }
 
     // MARK: - Phase mirroring
@@ -172,27 +192,44 @@ final class AppState: ObservableObject {
     private func handle(phase: DictationSession.Phase, session: DictationSession) async {
         switch phase {
         case .arming:
-            errorAtPress = await session.lastError
             hudState.mode = .listening(startedAt: Date())
         case .recording:
             hudState.mode = .listening(startedAt: Date())
+            DeliverySounds.playStart(enabled: settings.soundsEnabled)
         case .transcribing, .cleaning, .delivering:
             hudState.mode = .processing
         case .cancelled:
             hudState.mode = .hidden
             hudState.partialText = ""
         case .idle:
-            // The session parks errors in `lastError` and returns to idle; a
-            // change since press means this take failed (short-tap discards
-            // and successful takes leave it untouched).
-            let error = await session.lastError
-            if let error, error != errorAtPress {
+            // The session clears lastError at every pressBegan, so any error
+            // visible when it returns to idle belongs to this take.
+            if case .notice = hudState.mode {
+                // A delivery notice (clipboard fallback / secure block) is
+                // already showing; let its own dismiss timer run.
+            } else if let error = await session.lastError {
                 hudState.mode = .error(Self.message(for: error))
                 scheduleErrorDismiss()
             } else {
                 hudState.mode = .hidden
             }
             hudState.partialText = ""
+        }
+    }
+
+    /// Delivery outcomes the user must hear about (FR-3.2/3.4/3.6) — invoked
+    /// by the deliverer seam before the session finishes the take.
+    func showDelivery(outcome: DeliveryOutcome) {
+        switch outcome {
+        case .inserted:
+            break
+        case .copiedToClipboard:
+            hudState.mode = .notice("Copied — press ⌘V to paste")
+            scheduleErrorDismiss()
+        case .blockedSecureField(let culprit):
+            let suffix = culprit.map { " (\($0))" } ?? ""
+            hudState.mode = .notice("Secure field\(suffix) — nothing inserted or saved")
+            scheduleErrorDismiss()
         }
     }
 
@@ -289,6 +326,10 @@ private final class ResolutionRelay {
     func noteResolved(profileName: String) {
         appState?.hudState.profileName = profileName
     }
+
+    func noteDelivery(_ outcome: DeliveryOutcome) {
+        appState?.showDelivery(outcome: outcome)
+    }
 }
 
 /// `MicrophoneSession` mirrors SessionKit's `CaptureSession` field-for-field;
@@ -311,9 +352,12 @@ private struct MicrophoneCaptureAdapter: AudioCapturing {
 /// + CGEvent synthesis) must run.
 private struct MacTextDelivering: TextDelivering {
     let deliverer: TextDeliverer
+    let onOutcome: @MainActor (DeliveryOutcome) -> Void
 
     func deliver(_ text: String, context: DeliveryContext) async -> DeliveryOutcome {
-        await deliverer.deliver(text, context: context)
+        let outcome = await deliverer.deliver(text, context: context)
+        await onOutcome(outcome)
+        return outcome
     }
 }
 

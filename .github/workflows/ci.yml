@@ -81,5 +81,8 @@ jobs:
       - name: Build app (unsigned)
         run: |
           xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build | tail -40
-          exit ${PIPESTATUS[0]}
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1
+          status=$?
+          grep -E "error:" build.log | head -80 || true
+          tail -5 build.log
+          exit $status
