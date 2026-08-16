@@ -3,9 +3,21 @@
 Answers to these questions tune the plan. Defaults are chosen so work can proceed if a
 question is unanswered — each shows the assumption currently baked into the PRDs.
 
-Answered so far:
+Answered so far (owner, 2026-08-16):
 
-- ✅ **Languages**: English + Chinese for v1; **Burmese deferred** (owner decision, 2026-08-16).
+- ✅ **Languages**: English + Chinese for v1; **Burmese deferred**.
+- ✅ **A1/A3 Hardware**: confirmed M-series Mac ≥16 GB + iPhone 15 Pro or newer — the
+  plan's baked-in assumptions hold as-is.
+- ✅ **B5 Chinese script**: owner asked for a recommendation → **Simplified output for v1**
+  (Whisper's Mandarin output is Simplified-dominant, so it's the zero-fighting-the-model
+  path), with the deterministic offline Simplified↔Traditional conversion toggle added
+  later (it's a data-table feature, cheap to add when wanted). Code-switched English is
+  preserved verbatim either way.
+- ✅ **F20 Dictation targets**: Email & documents, Code & terminal, Notes/ideas on the go
+  (chat is *not* a priority). Consequences: the Email, Terminal/Code, and Notes built-in
+  profiles and their fixtures are the tuning priority; the Messages profile still ships
+  but is not optimized first; the iPhone Action-Button capture flow ranks above the
+  keyboard in polish order (M6 before M7 was already the plan — confirmed).
 
 ## A. Hardware & OS (determines engine + API choices)
 
