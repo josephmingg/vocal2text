@@ -37,6 +37,10 @@ final class AppState: ObservableObject {
     let database: DatabaseStore?
     @Published var hudState: HUDState
 
+    /// Retained so onboarding's "Warm up now" can trigger the guided model
+    /// download/load explicitly (FR-2.4).
+    private let engine: WhisperKitEngine
+
     /// Whether the configured cleanup provider sends text off-device — drives
     /// the HUD privacy badge (FR-7.4). Ollama at localhost: false.
     private let cleanupLeavesDevice: Bool
@@ -57,14 +61,15 @@ final class AppState: ObservableObject {
 
         let model = settings.ollamaModel
         let provider = OpenAICompatibleProvider(
-            baseURL: AppState.ollamaBaseURL,
+            baseURL: AppState.ollamaBaseURL(),
             model: model,
             id: .ollama(model: model)
         )
 
+        let engine = WhisperKitEngine()
         let dependencies = DictationSession.Dependencies(
             audio: MicrophoneCaptureAdapter(microphone: MicrophoneCapture()),
-            engine: WhisperKitEngine(),
+            engine: engine,
             // The pipeline is wired unconditionally; the session's own
             // precedence gating (docs/05 §0: master switch → per-profile
             // opt-in) decides per dictation whether stage 3 runs, and an
@@ -78,18 +83,26 @@ final class AppState: ObservableObject {
                 guard await provider.isAvailable() else { return }
                 await provider.prewarm()
             },
-            deliverer: MacTextDelivering(deliverer: TextDeliverer()),
+            deliverer: MacTextDelivering(
+                deliverer: TextDeliverer(
+                    strategies: InsertionStrategyTable(
+                        overrides: settings.insertionStrategyOverrides
+                    ),
+                    clipboard: ClipboardManager()
+                )
+            ),
             store: DatabaseTranscriptStore(database: database),
             config: settings,
             profileResolution: {
                 // Snapshot the frontmost context at press; the profile stays
-                // pinned for the whole take (FR-3.6). Manual profile pinning
-                // (FR-8.3) is not wired in v1 of the composition root.
-                let snapshot = await frontmost.snapshot()
+                // pinned for the whole take (FR-3.6). The menu-bar pin wins
+                // over routing (FR-8.3, docs/05 §4).
+                let pinned = await MainActor.run { PinState.shared.pinnedProfileID }
+                let snapshot = frontmost.snapshot()
                 let resolution = resolver.resolve(
                     frontmostBundleID: snapshot.bundleID,
                     tabHostname: snapshot.tabHostname,
-                    manualPinProfileID: nil
+                    manualPinProfileID: pinned
                 )
                 await relay.noteResolved(profileName: resolution.profile.name)
                 return (
@@ -102,6 +115,7 @@ final class AppState: ObservableObject {
 
         self.settings = settings
         self.database = database
+        self.engine = engine
         self.cleanupLeavesDevice = provider.leavesDevice
         self.hudState = HUDState(
             mode: .hidden,
@@ -114,6 +128,12 @@ final class AppState: ObservableObject {
 
         relay.appState = self
         startPhaseMirror()
+    }
+
+    /// Loads (downloading on first run) the ASR model so the first dictation
+    /// is fast. Called from onboarding's "Warm up now" (FR-2.4).
+    func warmUp() async throws {
+        try await engine.prepare(languageMode: settings.languageMode)
     }
 
     // MARK: - Dictation controls
@@ -223,8 +243,13 @@ final class AppState: ObservableObject {
     }
 
     /// Ollama server root; its OpenAI-compatible surface lives under /v1
-    /// (docs/05 §3.2).
-    private static let ollamaBaseURL: URL = {
+    /// (docs/05 §3.2). The Settings Cleanup pane persists a custom URL under
+    /// "ollamaBaseURL"; localhost is the default.
+    private static func ollamaBaseURL() -> URL {
+        if let custom = UserDefaults.standard.string(forKey: "ollamaBaseURL"),
+           let url = URL(string: custom), url.host() != nil {
+            return url
+        }
         var components = URLComponents()
         components.scheme = "http"
         components.host = "localhost"
@@ -232,7 +257,7 @@ final class AppState: ObservableObject {
         // scheme + host + port always compose a URL; the fallback only keeps
         // this accessor total without a force unwrap.
         return components.url ?? URL(fileURLWithPath: "/")
-    }()
+    }
 
     private static func languageLabel(for mode: LanguageMode) -> String {
         switch mode {

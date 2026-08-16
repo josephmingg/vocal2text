@@ -58,3 +58,28 @@ jobs:
         run: swift build --build-tests
       - name: Test
         run: swift test
+
+  # The VocalMac app target: XcodeGen project + unsigned xcodebuild compile.
+  macos-app:
+    name: macOS — VocalMac app build
+    runs-on: macos-15
+    needs: macos-full
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Cache DerivedData SPM
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: xcode-spm-${{ hashFiles('Package.swift') }}
+          restore-keys: xcode-spm-
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build | tail -40
+          exit ${PIPESTATUS[0]}
