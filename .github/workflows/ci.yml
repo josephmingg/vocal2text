@@ -88,3 +88,5 @@ jobs:
           grep -E "error:" build.log | head -80 || true
           tail -5 build.log
           exit $status
+
+# Retrigger marker: runner-scheduling failure on 2026-08-16 (run 31971170040)
