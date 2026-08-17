@@ -320,6 +320,8 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .masterSwitchOff)
         } else if !profile.cleanupEnabled {
             cleanupOutcome = .skipped(reason: .profileDisabled)
+        } else if !Self.cleanupAllowed(for: language, profile: profile) {
+            cleanupOutcome = .skipped(reason: .languageOptOut)
         } else if let pipeline = deps.cleanup {
             transition(to: .cleaning)
             // History must record what actually ran (FR-5.1). Only one pipeline
@@ -412,6 +414,23 @@ public actor DictationSession {
     }
 
     // MARK: - Helpers
+
+    /// Whether stage 3 may run for this language under this profile.
+    ///
+    /// Some languages are worse off with cleanup than without it: the small
+    /// local models this app targets corrupt Burmese rather than tidy it
+    /// (docs/04 Appendix A), and a cleanup step that damages the transcript is
+    /// strictly worse than no cleanup at all. Those languages therefore stay
+    /// on the deterministic stages by default.
+    ///
+    /// Pinning the language on a profile is the opt-in. It is an explicit,
+    /// per-profile act — "this profile is for Burmese" — so a user who wants
+    /// to experiment with a capable model has a way in, while someone who
+    /// merely code-switches into Burmese mid-session never gets surprised.
+    static func cleanupAllowed(for language: Language, profile: Profile) -> Bool {
+        if language.allowsCleanupByDefault { return true }
+        return profile.languageOverride?.pinnedLanguage == language
+    }
 
     /// Maps a `CleanupPipeline` fallback reason onto history metadata: the
     /// "validator: <rule>" prefix and the protected-terms guard are validator

@@ -15,5 +15,8 @@ this file.
 | G7 | FTS5 external-content tables key on rowid over a TEXT-PK table; safe today (nothing VACUUMs), corrupts on VACUUM | docs/03 §5 | INTEGER PRIMARY KEY surrogate + FTS rebuild migration |
 | G8 | History rows store bundle ID but `targetAppName` stays nil (HistoryView falls back to bundle ID) | FR-5.1 | Resolve via NSRunningApplication at save time |
 | G9 | Audio files are not yet retained in history (text + metadata are; retention setting is wired for when persistence lands); cancelled-take 24 h recovery pending same work | FR-5.1/1.6 | Opus/AAC encode of the capture buffer in MicrophoneCapture.finish |
-| G10 | iOS app not yet built (spec complete in docs/02) | — | Next build phase |
+| G10 | ~~iOS app not yet built~~ — built; the *keyboard extension* (docs/02 mode D2) is what remains, main-app dictation with auto-copy delivery ships | docs/02 | Keyboard extension phase |
 | G11 | Onboarding hotkey-choice + test-playground pages trimmed to the pragmatic v1 subset | FR-11.1 | M5 polish |
+| G12 | `AppleSpeechEngine` does not pass `dictionaryTerms` to `DictationTranscriber.contextualStrings` yet; stage 2 is the backstop either way | docs/04 §3 | Wire contextualStrings in the adapter |
+| G13 | **Burmese recognition runs on Whisper, which is poor at it** (80–100% WER). The text layer, detection, dictionary, and formatting are complete; only the engine is not. `availability(for: .burmese)` reports `.readyWithCaveat` and both apps say so plainly via `BurmeseSupportNote` | docs/04 App. A | sherpa-onnx adapter behind `TranscriptionEngine` + the `omni-asr-ctc-*` catalog entries already listed; benchmark FLEURS `my_mm` first |
+| G14 | `ZawgyiDetector` detects but does not convert, and its heuristics are rule-based rather than the google/myanmar-tools Markov model — so it is a non-blocking hint on dictionary input, not a transform | docs/04 App. A | Port the myanmar-tools conversion table when Zawgyi input proves to be a real nuisance |

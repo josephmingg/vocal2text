@@ -29,10 +29,18 @@ public actor AppleSpeechEngine: TranscriptionEngine {
         switch language {
         case .english: Locale(identifier: "en_US")
         case .chinese: Locale(identifier: "zh_CN")
+        case .burmese: Locale(identifier: "my_MM")
         }
     }
 
     public func availability(for language: Language) async -> EngineAvailability {
+        // Apple's dictation assets have no Burmese locale (docs/04 Appendix A).
+        // The generic supportedLocales check below would also catch this, but
+        // it costs an async round-trip to learn something already known, and
+        // the specific message is more useful than "not supported".
+        if language == .burmese {
+            return .unsupported(reason: "Apple Speech has no Burmese locale")
+        }
         let locale = locale(for: language)
         let supported = await DictationTranscriber.supportedLocales
         guard supported.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
@@ -70,6 +78,10 @@ public actor AppleSpeechEngine: TranscriptionEngine {
         switch languageMode {
         case .pinned(let l): language = l
         case .auto: language = .english
+        }
+
+        guard language != .burmese else {
+            throw TranscriptionError.engineUnavailable("Apple Speech has no Burmese locale")
         }
 
         guard !audio.samples.isEmpty else {

@@ -441,3 +441,93 @@ struct DictationSessionTests {
         #expect(phase == .idle)
     }
 }
+
+// MARK: - Burmese (v1.1)
+
+/// Cleanup that damages a transcript is worse than no cleanup: small local
+/// models corrupt Burmese rather than tidy it (docs/04 Appendix A).
+struct BurmeseCleanupGateTests {
+
+    @Test func autoDetectedBurmeseSkipsCleanup() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ရာသီဥတုကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(name: "Default", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 0)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.cleanup == .skipped(reason: .languageOptOut))
+        // The deterministic stages still ran, so the text is still improved.
+        #expect(record.deliveredText.hasSuffix("။"))
+    }
+
+    /// Pinning Burmese on a profile is the deliberate opt-in.
+    @Test func aProfilePinnedToBurmeseMayUseCleanup() async throws {
+        let provider = ScriptedCleanupProvider(
+            script: .fixed("ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+        )
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ရာသီဥတုကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(
+                name: "Burmese notes",
+                cleanupEnabled: true,
+                languageOverride: .pinned(.burmese)
+            ),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 1)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.deliveredText == "ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+    }
+
+    @Test func englishAndChineseAreUnaffectedByTheGate() {
+        #expect(
+            DictationSession.cleanupAllowed(for: .english, profile: Profile(name: "Default"))
+        )
+        #expect(
+            DictationSession.cleanupAllowed(for: .chinese, profile: Profile(name: "Default"))
+        )
+        #expect(
+            !DictationSession.cleanupAllowed(for: .burmese, profile: Profile(name: "Default"))
+        )
+    }
+
+    /// A Burmese dictation still runs the deterministic Burmese stages end to
+    /// end — that is the part of v1.1 that is genuinely complete.
+    @Test func burmeseGoesThroughTheBurmesePipeline() async throws {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ ရာသီဥတု ကောင်းတယ် ပုဒ်မ", detectedLanguage: .burmese
+            ),
+            profile: Profile(
+                name: "Burmese",
+                formatting: FormattingOptions(myanmarDigits: .western)
+            )
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        // Spoken "ပုဒ်မ" became ။, and no English capitalization or period.
+        #expect(delivered == ["ဒီနေ့ ရာသီဥတု ကောင်းတယ်။"])
+        let records = await harness.store.records
+        #expect(records.first?.language == .burmese)
+    }
+}

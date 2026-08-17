@@ -173,3 +173,47 @@ struct Stage4FormatterTests {
         #expect(out == "")
     }
 }
+
+// MARK: - Burmese (v1.1)
+
+@Test func burmeseDigitPreferenceIsApplied() {
+    let result = Stage4Formatter.format(
+        "ဒီနေ့ ၁၀ နာရီ",
+        language: .burmese,
+        formatting: FormattingOptions(myanmarDigits: .western),
+        precedingContext: nil
+    )
+    #expect(result == "ဒီနေ့ 10 နာရီ")
+}
+
+@Test func burmeseDigitPreferenceDefaultsToLeavingThemAlone() {
+    let text = "ဒီနေ့ ၁၀ နာရီ"
+    let result = Stage4Formatter.format(
+        text, language: .burmese, formatting: FormattingOptions(), precedingContext: nil
+    )
+    #expect(result == text)
+}
+
+/// The digit set is a display preference rather than punctuation, so a
+/// verbatim profile still honors it — a Burmese user who asked for Myanmar
+/// numerals wants them in the terminal too.
+@Test func verbatimBurmeseStillHonorsTheDigitPreference() {
+    var formatting = FormattingOptions.verbatim
+    formatting.myanmarDigits = .myanmar
+    let result = Stage4Formatter.format(
+        "10 နာရီ", language: .burmese, formatting: formatting, precedingContext: nil
+    )
+    #expect(result == "၁၀ နာရီ")
+}
+
+@Test func burmeseNeverGetsChineseOrEnglishRules() {
+    // Full-width conversion and pangu spacing are Chinese-only; smart spacing
+    // and duplicate-terminal collapsing are English-only.
+    let result = Stage4Formatter.format(
+        "ဒီနေ့,ကောင်းတယ်",
+        language: .burmese,
+        formatting: FormattingOptions(panguSpacing: true),
+        precedingContext: "Done."
+    )
+    #expect(result == "ဒီနေ့,ကောင်းတယ်")
+}

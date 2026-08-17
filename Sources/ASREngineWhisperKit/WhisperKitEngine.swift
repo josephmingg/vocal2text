@@ -28,9 +28,19 @@ public actor WhisperKitEngine: TranscriptionEngine {
     }
 
     public func availability(for language: Language) async -> EngineAvailability {
-        // Whisper covers all our v1 languages; readiness depends on model download.
-        pipe == nil ? .needsDownload(bytes: 626_000_000) : .ready
+        // Whisper accepts a `my` token, but its Burmese output is unusable —
+        // 80–100% WER with hallucination loops (docs/04 Appendix A). Say so
+        // rather than let the UI imply EN/ZH-grade accuracy; the fix is a
+        // Burmese-capable engine (ModelCatalog lists the candidates), not a
+        // different Whisper variant.
+        if language == .burmese {
+            return .readyWithCaveat(Self.burmeseCaveat)
+        }
+        // Whisper covers the rest; readiness depends on model download.
+        return pipe == nil ? .needsDownload(bytes: 626_000_000) : .ready
     }
+
+    static let burmeseCaveat = BurmeseSupportNote.shortCaveat
 
     public func prepare(languageMode: LanguageMode) async throws {
         _ = try await loadedPipe()
@@ -143,9 +153,8 @@ public actor WhisperKitEngine: TranscriptionEngine {
         text: String,
         mode: LanguageMode
     ) -> Language {
-        if case .pinned(let lang) = mode { return lang }
-        if let reported, let lang = Language(rawValue: reported) { return lang }
-        return text.containsHanCharacters ? .chinese : .english
+        // Shared with every other adapter so the answer cannot vary by backend.
+        LanguageDetector.detect(reportedTag: reported, text: text, mode: mode)
     }
 }
 #else

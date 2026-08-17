@@ -48,7 +48,9 @@ public enum OutputValidator {
         let inputCount = input.count
         let ratio =
             inputCount > 0 ? Double(cleaned.count) / Double(inputCount) : Double.infinity
-        let longInputThreshold = language == .chinese ? 20 : 60
+        // Unspaced scripts pack far more meaning per character, so the
+        // "long enough for ratio bounds to be meaningful" line sits lower.
+        let longInputThreshold = language.isUnspacedScript ? 20 : 60
         if inputCount > longInputThreshold {
             if ratio < 0.4 || ratio > 2.5 {
                 return .rejected(rule: "ratio")
@@ -60,14 +62,25 @@ public enum OutputValidator {
         if input.containsHanCharacters, !cleaned.containsHanCharacters {
             return .rejected(rule: "language-mismatch")
         }
+        // Burmese is the language most at risk here: small local models are
+        // prone to answering it in English or transliterating it rather than
+        // cleaning it (docs/04 Appendix A), and either would replace the
+        // user's dictation with something they never said.
+        if input.containsMyanmarCharacters, !cleaned.containsMyanmarCharacters {
+            return .rejected(rule: "language-mismatch")
+        }
         // Mirror direction: an English dictation must not come back translated
         // into Chinese (answer/translation failure class). Code-switched Han in
         // a mostly-Latin output is tolerated up to a third of its length.
         if !input.containsHanCharacters, cleaned.containsHanCharacters {
-            let hanCount = cleaned.unicodeScalars.filter {
-                (0x4E00...0x9FFF).contains($0.value)
-            }.count
+            let hanCount = cleaned.unicodeScalars.filter(Unicode.isHanScalar).count
             if hanCount * 3 > cleaned.count {
+                return .rejected(rule: "language-mismatch")
+            }
+        }
+        if !input.containsMyanmarCharacters, cleaned.containsMyanmarCharacters {
+            let myanmarCount = cleaned.unicodeScalars.filter(Unicode.isMyanmarScalar).count
+            if myanmarCount * 3 > cleaned.count {
                 return .rejected(rule: "language-mismatch")
             }
         }

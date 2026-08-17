@@ -26,19 +26,69 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
     public var enforceFullWidthZhPunctuation: Bool
     /// Chinese: insert thin spacing between Han and Latin/digit runs.
     public var panguSpacing: Bool
+    /// Burmese: which digit set stage 4 emits (docs/04 Appendix A).
+    public var myanmarDigits: MyanmarDigits
+    /// Burmese: turn spoken "ပုဒ်မ" / "full stop" into ။ and "ပုဒ်ဖြတ်" /
+    /// "comma" into ၊. Burmese recognizers punctuate erratically or not at
+    /// all, so saying the mark is the reliable path (docs/04 Appendix A).
+    public var myanmarSpokenPunctuation: Bool
 
     public init(
         autoPunctuation: Bool = true,
         smartSpacing: Bool = true,
         structureAllowed: Bool = false,
         enforceFullWidthZhPunctuation: Bool = true,
-        panguSpacing: Bool = false
+        panguSpacing: Bool = false,
+        myanmarDigits: MyanmarDigits = .asRecognized,
+        myanmarSpokenPunctuation: Bool = true
     ) {
         self.autoPunctuation = autoPunctuation
         self.smartSpacing = smartSpacing
         self.structureAllowed = structureAllowed
         self.enforceFullWidthZhPunctuation = enforceFullWidthZhPunctuation
         self.panguSpacing = panguSpacing
+        self.myanmarDigits = myanmarDigits
+        self.myanmarSpokenPunctuation = myanmarSpokenPunctuation
+    }
+
+    /// Declared rather than synthesized because `init(from:)` below is hand
+    /// written and must name these keys.
+    public enum CodingKeys: String, CodingKey {
+        case autoPunctuation
+        case smartSpacing
+        case structureAllowed
+        case enforceFullWidthZhPunctuation
+        case panguSpacing
+        case myanmarDigits
+        case myanmarSpokenPunctuation
+    }
+
+    /// Decodes leniently: every key falls back to its default when absent.
+    ///
+    /// Profiles are persisted as JSON documents, so the synthesized decoder
+    /// would reject any profile saved before a field existed — and the app
+    /// treats a profile-load failure as "use the built-ins", silently
+    /// discarding the user's customizations. Adding a formatting option must
+    /// never cost someone their profiles.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = FormattingOptions()
+        func flag(_ key: CodingKeys, _ fallback: Bool) throws -> Bool {
+            try container.decodeIfPresent(Bool.self, forKey: key) ?? fallback
+        }
+        self.autoPunctuation = try flag(.autoPunctuation, defaults.autoPunctuation)
+        self.smartSpacing = try flag(.smartSpacing, defaults.smartSpacing)
+        self.structureAllowed = try flag(.structureAllowed, defaults.structureAllowed)
+        self.enforceFullWidthZhPunctuation = try flag(
+            .enforceFullWidthZhPunctuation, defaults.enforceFullWidthZhPunctuation
+        )
+        self.panguSpacing = try flag(.panguSpacing, defaults.panguSpacing)
+        self.myanmarDigits =
+            try container.decodeIfPresent(MyanmarDigits.self, forKey: .myanmarDigits)
+            ?? defaults.myanmarDigits
+        self.myanmarSpokenPunctuation = try flag(
+            .myanmarSpokenPunctuation, defaults.myanmarSpokenPunctuation
+        )
     }
 
     /// Verbatim mode: nothing is reshaped; only artifacts + dictionary apply.
@@ -47,7 +97,9 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         smartSpacing: false,
         structureAllowed: false,
         enforceFullWidthZhPunctuation: false,
-        panguSpacing: false
+        panguSpacing: false,
+        myanmarDigits: .asRecognized,
+        myanmarSpokenPunctuation: false
     )
 }
 

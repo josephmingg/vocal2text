@@ -332,3 +332,32 @@ private func writeFile(at url: URL, bytes count: Int) throws {
     #expect(request.value(forHTTPHeaderField: "Range") == nil)
     #expect(request.url == file.url)
 }
+
+// MARK: - Burmese catalog entries (v1.1)
+
+@Test func catalogOffersABurmeseCapableEngine() {
+    let burmese = ModelCatalog.models(for: .burmese)
+    #expect(!burmese.isEmpty)
+    // Whisper is unusable for Burmese (docs/04 Appendix A), so no Burmese
+    // entry may point at it — that is the whole reason these exist.
+    #expect(burmese.allSatisfy { $0.engine != "whisperkit" })
+    #expect(burmese.contains { $0.id == "omni-asr-ctc-300m-int8" })
+    #expect(burmese.contains { $0.id == "omni-asr-ctc-1b-int8" })
+}
+
+@Test func whisperEntriesStillCoverEnglishAndChinese() {
+    #expect(ModelCatalog.models(for: .english).contains { $0.engine == "whisperkit" })
+    #expect(ModelCatalog.models(for: .chinese).contains { $0.engine == "whisperkit" })
+}
+
+@Test func everyCatalogEntryIsWellFormed() {
+    for spec in ModelCatalog.builtIn {
+        #expect(!spec.id.isEmpty)
+        #expect(!spec.displayName.isEmpty)
+        #expect(!spec.engine.isEmpty)
+        #expect(!spec.languages.isEmpty)
+        #expect(spec.approximateBytes > 0)
+    }
+    // Catalog ids are the on-disk directory names, so they must be unique.
+    #expect(Set(ModelCatalog.builtIn.map(\.id)).count == ModelCatalog.builtIn.count)
+}

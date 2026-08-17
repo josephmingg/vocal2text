@@ -335,7 +335,7 @@ private struct AboutPane: View {
                 .bold()
             Text("Version \(Self.versionString)")
                 .foregroundStyle(.secondary)
-            Text("Personal offline dictation for English and 简体中文. Audio and transcripts stay on this Mac.")
+            Text("Personal offline dictation for English, 简体中文, and မြန်မာ. Audio and transcripts stay on this Mac.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

@@ -319,8 +319,7 @@ final class AppState: ObservableObject {
     private static func languageLabel(for mode: LanguageMode) -> String {
         switch mode {
         case .auto: return "Auto"
-        case .pinned(.english): return "EN"
-        case .pinned(.chinese): return "中文"
+        case .pinned(let language): return language.shortLabel
         }
     }
 

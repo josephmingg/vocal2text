@@ -62,15 +62,18 @@ quantized (~626 MB)**:
 | Moonshine zh | Non-commercial community license; quality tier below turbo | — |
 | whisper.cpp | Same models as WhisperKit but more glue for us on Apple platforms | Fallback runtime if WhisperKit regresses; also runs Parakeet since v1.9 |
 
-## 2. Language layer (designed for 3, shipping 2)
+## 2. Language layer (three languages as of v1.1)
 
 ```
-LanguageMode = .auto | .english | .chinese          // menu-bar quick toggle + per-profile pin
+LanguageMode = .auto | .english | .chinese | .burmese   // menu-bar quick toggle + per-profile pin
 ```
 
-- **Auto**: Whisper's language identification per utterance (single model, no routing).
+- **Auto**: resolved per utterance by `ASRKit.LanguageDetector`. Script in the decoded text
+  wins over the engine's reported tag — Myanmar or Han characters are proof, whereas
+  Whisper's language ID is a whole-clip guess made before decoding and is routinely wrong on
+  short utterances. The reported tag only settles Latin-script languages.
   Wispr Flow's own docs list auto-detect as its top failure mode — so the manual pin is a
-  first-class UI element, not buried in settings.
+  first-class UI element, not buried in settings, and a pin outranks every other signal.
 - **Pinned**: passes the language token to Whisper (or selects the Apple-engine locale).
   Pinning also gates language-specific post-processing (docs/05 stage 1/4 rule sets).
 - **Chinese specifics**:
@@ -83,8 +86,13 @@ LanguageMode = .auto | .english | .chinese          // menu-bar quick toggle + p
     temperature ladder 0.0→1.0 step 0.2; `no_speech_threshold` 0.6; `logprob_threshold`
     −1.0; `compression_ratio_threshold` 2.4; canned-phrase blacklist applied only to
     near-silent segments; repetition penalty if zh loops persist.
+- **Burmese specifics** (v1.1, appendix A): unspaced script, so it takes the Chinese side of
+  every word-boundary decision — phrase-mode dictionary entries, no Latin space hygiene, no
+  capitalization. NFC normalization runs before anything matches. Spoken punctuation
+  commands supply ။ and ၊ because recognizers do not. Digit set is a per-profile preference.
+  Cleanup is off by default: small local models corrupt Burmese rather than tidy it.
 - Adding a language later = new enum case + engine adapter + rule files. No pipeline
-  changes (verified by the deferred-Burmese design below never having required one).
+  changes — verified in practice: Burmese landed in v1.1 without one.
 
 ## 3. Custom dictionary ↔ ASR integration points
 
@@ -140,10 +148,32 @@ evidence-backed or get revised.
 
 ---
 
-## Appendix A — Burmese (deferred, preserved research)
+## Appendix A — Burmese (v1.1: text layer shipped, recognition pending)
 
-Owner decision 2026-08-16: out of v1. The research changes the eventual approach compared
-to what one would guess:
+Owner decision 2026-08-16 deferred Burmese out of v1; v1.1 ships the half of it that can be
+done well today. The research below is why the split falls where it does — the text layer is
+tractable and complete, while recognition quality depends on a model that is not wired yet.
+
+### What v1.1 ships
+
+| Piece | Status | Where |
+|---|---|---|
+| `Language.burmese` (`my`), pinning, per-utterance auto-detect | Done | `CoreModels`, `ASRKit/LanguageDetector` |
+| Script detection (Myanmar + Extended-A/B) | Done | `Unicode.isMyanmarScalar` |
+| NFC normalization before anything matches | Done | stage 1 |
+| Spoken punctuation ပုဒ်မ/ပုဒ်မကြီး → ။, ပုဒ်ဖြတ်/ပုဒ်မငယ် → ၊ (plus English "full stop"/"comma") | Done | `MyText` |
+| Myanmar vs Western digit preference | Done | stage 4, per profile |
+| Unspaced-script handling: phrase-mode dictionary, no Latin space hygiene, no capitalization | Done | stages 1/2/4 |
+| Zawgyi *detection* for imported dictionary text | Done (heuristic) | `ZawgyiDetector` |
+| Zawgyi → Unicode *conversion* | Not shipped | docs/11 G14 |
+| Cleanup prompt + validator guards (no translation, no transliteration) | Done | `lang_my.txt`, `OutputValidator` |
+| Cleanup off by default for Burmese | Done | `Language.allowsCleanupByDefault` |
+| Burmese-capable ASR engine | **Not shipped** — Whisper is used and is poor | docs/11 G13 |
+
+The honest summary shown to users lives in one place, `BurmeseSupportNote`, so both apps say
+the same thing.
+
+### Why recognition is the hard half
 
 - **Vanilla Whisper is unusable for Burmese** (~80–100% WER / ~88% CER, hallucination
   loops; 2026 "myMediWhisper" paper puts global commercial models >80% WER). Apple's
@@ -162,5 +192,25 @@ to what one would guess:
   script makes WER misleading — observed 49% WER vs 13% CER on the same output); no LLM
   cleanup by default (small local LLMs corrupt Burmese) — dictionary + punctuation commands
   only, with Mac-only Sailor2-8B via Ollama as an opt-in experiment.
-- Architecture already accommodates it: new `LanguageMode` case + sherpa-onnx adapter
-  behind `TranscriptionEngine` + a Burmese rule file for stages 1/4.
+- Architecture already accommodated it, as designed: v1.1 needed a new `Language` case, a
+  Burmese rule file for stages 1/4, and catalog entries — **no pipeline changes**, which is
+  the claim §2 makes. The remaining work is the sherpa-onnx adapter behind
+  `TranscriptionEngine`.
+
+### Engine status in v1.1
+
+`WhisperKitEngine.availability(for: .burmese)` returns `.readyWithCaveat` rather than
+`.ready`: Whisper accepts a `my` token and returns something, so blocking it outright would
+remove a path some users still want, but reporting it as ready would promise EN/ZH-grade
+accuracy the engine cannot deliver. `AppleSpeechEngine` returns `.unsupported` — there is no
+Burmese locale to select.
+
+`ModelCatalog` lists both Omnilingual CTC exports (`omni-asr-ctc-1b-int8` for Mac,
+`omni-asr-ctc-300m-int8` for iPhone). The catalog is data, so listing them costs nothing and
+`ModelStore` can already track their on-disk footprint; wiring the runtime is G13.
+
+### Measuring it
+
+When the engine lands, measure **CER / syllable error rate, not WER** — the unspaced script
+makes WER misleading (49% WER vs 13% CER observed on the same output). Step one is a FLEURS
+`my_mm` benchmark day against the 300M and 1B exports.

@@ -33,6 +33,9 @@ struct IOSSettingsView: View {
                     Text("Whisper large-v3-turbo (~600 MB), downloaded once, stored on device. English + 中文, fully offline.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text(BurmeseSupportNote.text)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Profile") {

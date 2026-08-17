@@ -189,3 +189,72 @@ struct Stage1NormalizerTests {
         #expect(out == "我在用Swift,感觉不错")
     }
 }
+
+// MARK: - Burmese (v1.1)
+
+@Test func burmeseGetsASectionMarkAndSpokenPunctuation() {
+    let result = Stage1Normalizer.normalize(
+        "ဒီနေ့ ရာသီဥတု ကောင်းတယ် ပုဒ်မ",
+        language: .burmese,
+        formatting: FormattingOptions()
+    )
+    #expect(result == "ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+}
+
+@Test func burmeseWithoutASpokenMarkStillTerminates() {
+    let result = Stage1Normalizer.normalize(
+        "ဒီနေ့ရာသီဥတုကောင်းတယ်",
+        language: .burmese,
+        formatting: FormattingOptions()
+    )
+    #expect(result.hasSuffix("။"))
+}
+
+/// Burmese never gets the English treatment: no capitalization (the script
+/// has no case) and no Latin terminal period.
+@Test func burmeseDoesNotGetEnglishPunctuation() {
+    let result = Stage1Normalizer.normalize(
+        "ဒီနေ့ရာသီဥတုကောင်းတယ်",
+        language: .burmese,
+        formatting: FormattingOptions()
+    )
+    #expect(!result.hasSuffix("."))
+}
+
+@Test func verbatimBurmeseIsNotReshaped() {
+    let raw = "ဒီနေ့ ရာသီဥတု ကောင်းတယ် ပုဒ်မ"
+    let result = Stage1Normalizer.normalize(
+        raw, language: .burmese, formatting: .verbatim
+    )
+    // No mark substitution, no appended ။ — the spoken command stays literal.
+    #expect(result == raw)
+}
+
+@Test func spokenPunctuationCanBeTurnedOffWithoutLosingTheTerminalMark() {
+    let result = Stage1Normalizer.normalize(
+        "ဒီနေ့ရာသီဥတုကောင်းတယ်",
+        language: .burmese,
+        formatting: FormattingOptions(myanmarSpokenPunctuation: false)
+    )
+    #expect(result.hasSuffix("။"))
+}
+
+@Test func burmeseArtifactStrippingStillRuns() {
+    let result = Stage1Normalizer.normalize(
+        "[BLANK_AUDIO] ဒီနေ့ရာသီဥတုကောင်းတယ်<|endoftext|>",
+        language: .burmese,
+        formatting: .verbatim
+    )
+    #expect(!result.contains("BLANK_AUDIO"))
+    #expect(!result.contains("endoftext"))
+    #expect(result.contains("ဒီနေ့ရာသီဥတုကောင်းတယ်"))
+}
+
+@Test func aLeadingOrphanMyanmarMarkIsStripped() {
+    let result = Stage1Normalizer.normalize(
+        "။ ဒီနေ့ရာသီဥတုကောင်းတယ်",
+        language: .burmese,
+        formatting: .verbatim
+    )
+    #expect(result == "ဒီနေ့ရာသီဥတုကောင်းတယ်")
+}

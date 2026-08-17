@@ -162,3 +162,73 @@ struct OutputValidatorTests {
         #expect(result == .accepted(cleaned: "用 Xcode 打开这个项目。"))
     }
 }
+
+// MARK: - Burmese (v1.1)
+
+/// Burmese is the language most at risk from a small local model: answering
+/// in English or transliterating instead of cleaning would replace the user's
+/// dictation with something they never said.
+struct BurmeseOutputValidatorTests {
+
+    private let burmeseInput = "ဒီနေ့ ရာသီဥတု ကောင်းတယ်"
+
+    @Test func burmeseInputMustProduceBurmeseOutput() {
+        let result = OutputValidator.validate(
+            output: "The weather is good today.",
+            input: burmeseInput,
+            language: .burmese
+        )
+        #expect(result == .rejected(rule: "language-mismatch"))
+    }
+
+    @Test func transliteratedBurmeseIsRejected() {
+        let result = OutputValidator.validate(
+            output: "di ne yathi utu kaung deh",
+            input: burmeseInput,
+            language: .burmese
+        )
+        #expect(result == .rejected(rule: "language-mismatch"))
+    }
+
+    @Test func anEnglishDictationMustNotComeBackInBurmese() {
+        let result = OutputValidator.validate(
+            output: "ဒီနေ့ ရာသီဥတု ကောင်းတယ်",
+            input: "the weather is good today",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "language-mismatch"))
+    }
+
+    @Test func cleanedBurmeseIsAccepted() {
+        let cleaned = "ဒီနေ့ ရာသီဥတု ကောင်းတယ်။"
+        let result = OutputValidator.validate(
+            output: cleaned, input: burmeseInput, language: .burmese
+        )
+        #expect(result == .accepted(cleaned: cleaned))
+    }
+
+    /// Burmese sentences routinely embed English product and technical terms;
+    /// a little Latin in the output is not a translation.
+    @Test func codeSwitchedEnglishInsideBurmeseSurvives() {
+        let cleaned = "Vocal က အရမ်းကောင်းတယ်။"
+        let result = OutputValidator.validate(
+            output: cleaned, input: "Vocal က အရမ်းကောင်းတယ်", language: .burmese
+        )
+        #expect(result == .accepted(cleaned: cleaned))
+    }
+
+    /// Unspaced scripts pack more meaning per character, so the ratio bounds
+    /// start applying at a lower character count than for English.
+    @Test func burmeseUsesTheUnspacedRatioThreshold() {
+        let longInput = String(repeating: "ကောင်း", count: 16)
+        // Past the 20-character unspaced threshold, so the [0.4, 2.5] bounds
+        // apply — the same input under English's 60-character threshold would
+        // still be in "short input, may legitimately collapse" territory.
+        #expect(longInput.count > 20)
+        #expect(longInput.count < 60)
+        let result = OutputValidator.validate(
+            output: "ကောင်း", input: longInput, language: .burmese
+        )
+        #expect(result == .rejected(rule: "ratio"))
+    }
+}
