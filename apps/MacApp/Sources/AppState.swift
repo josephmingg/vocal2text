@@ -85,17 +85,18 @@ final class AppState: ObservableObject {
     /// unstructured Tasks give no FIFO guarantee, so each control call chains
     /// on the previous one.
     private var controlTask: Task<Void, Never>?
-    /// Built-in (or stored) profiles, built once so the resolver and the
-    /// menu-bar pin picker agree on UUIDs (FR-8.3).
-    let profiles: [Profile]
+    /// Live profile set (docs/11 G17): persisted, seeded from the built-ins on
+    /// first run, and edited by Settings → Profiles. One instance, so the
+    /// resolver, the menu-bar pin picker, and the editor agree on UUIDs
+    /// (FR-8.3).
+    let profileStore: ProfileStore
 
     init() {
         let settings = SettingsStore()
         let database = AppState.makeDatabase()
         settings.database = database
 
-        let profiles = AppState.loadProfiles(database: database)
-        let resolver = ProfileResolver(profiles: profiles)
+        let profileStore = ProfileStore(database: database)
         let frontmost = FrontmostContext()
         let relay = ResolutionRelay()
 
@@ -146,10 +147,15 @@ final class AppState: ObservableObject {
             profileResolution: {
                 // Snapshot the frontmost context at press; the profile stays
                 // pinned for the whole take (FR-3.6). The menu-bar pin wins
-                // over routing (FR-8.3, docs/05 §4).
-                let pinned = await MainActor.run { PinState.shared.pinnedProfileID }
+                // over routing (FR-8.3, docs/05 §4). Profiles are read from
+                // the live store at every press, so a Settings edit applies to
+                // the next dictation without relaunching (docs/11 G17); the
+                // resolver itself is a throwaway wrapper over a tiny array.
+                let (pinned, currentProfiles) = await MainActor.run {
+                    (PinState.shared.pinnedProfileID, profileStore.profiles)
+                }
                 let snapshot = frontmost.snapshot()
-                let resolution = resolver.resolve(
+                let resolution = ProfileResolver(profiles: currentProfiles).resolve(
                     frontmostBundleID: snapshot.bundleID,
                     tabHostname: snapshot.tabHostname,
                     manualPinProfileID: pinned
@@ -168,7 +174,7 @@ final class AppState: ObservableObject {
         self.engine = engine
         self.burmeseEngine = burmeseEngine
         self.routedEngine = routedEngine
-        self.profiles = profiles
+        self.profileStore = profileStore
         self.cleanupLeavesDevice = provider.leavesDevice
         self.hudState = HUDState(
             mode: .hidden,
@@ -345,18 +351,6 @@ final class AppState: ObservableObject {
             print("Vocal: failed to open database — history disabled: \(error)")
             return nil
         }
-    }
-
-    private static func loadProfiles(database: DatabaseStore?) -> [Profile] {
-        if let database {
-            do {
-                let stored = try database.profiles()
-                if !stored.isEmpty { return stored }
-            } catch {
-                print("Vocal: failed to load profiles — using built-ins: \(error)")
-            }
-        }
-        return BuiltInProfiles.makeAll()
     }
 
     /// Ollama server root; its OpenAI-compatible surface lives under /v1

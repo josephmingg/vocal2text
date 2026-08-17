@@ -270,11 +270,14 @@ final class IOSAppState: ObservableObject {
         }
     }
 
+    /// Seeds the built-ins into the database on first run (docs/11 G17) so
+    /// profile IDs stay stable across launches, matching the Mac app. iOS has
+    /// no profile editor yet — the seeded set is effectively read-only here.
     private static func loadProfiles(database: DatabaseStore?) -> [Profile] {
-        if let database, let stored = try? database.profiles(), !stored.isEmpty {
-            return stored
-        }
-        return BuiltInProfiles.makeAll()
+        ProfileBootstrap.loadOrSeed(
+            load: { try database?.profiles() ?? [] },
+            save: { try database?.save($0) }
+        )
     }
 
     private static func message(for error: TranscriptionError) -> String {

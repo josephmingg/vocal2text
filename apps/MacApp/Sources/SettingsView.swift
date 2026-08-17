@@ -4,9 +4,9 @@ import PersistenceKit
 import ServiceManagement
 import SwiftUI
 
-/// Settings panes, v1 subset of FR-11.2: General, Cleanup, Dictionary,
-/// History & privacy, About. Hosted in an AppKit window via `WindowManager`
-/// (docs/03 §3.4).
+/// Settings panes, v1 subset of FR-11.2: General, Profiles, Cleanup,
+/// Dictionary, History & privacy, About. Hosted in an AppKit window via
+/// `WindowManager` (docs/03 §3.4).
 @MainActor
 struct SettingsView: View {
     @ObservedObject private var appState: AppState
@@ -21,6 +21,8 @@ struct SettingsView: View {
         TabView {
             GeneralPane(settings: settings, appState: appState)
                 .tabItem { Label("General", systemImage: "gearshape") }
+            ProfilesPane(profileStore: appState.profileStore)
+                .tabItem { Label("Profiles", systemImage: "person.2") }
             CleanupPane(settings: settings)
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
             DictionaryPane(database: appState.database)
@@ -30,7 +32,9 @@ struct SettingsView: View {
             AboutPane()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 560, height: 460)
+        // Sized for the Profiles master–detail pane; the Form panes are
+        // scrollable at any size.
+        .frame(width: 680, height: 560)
     }
 }
 
