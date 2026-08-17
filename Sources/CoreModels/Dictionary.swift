@@ -38,8 +38,12 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
         self.id = id
         self.spoken = spoken
         self.written = written
-        // Entries containing Han characters default to phrase matching (docs/05 §2).
-        self.matchMode = matchMode ?? (spoken.containsHanCharacters ? .phrase : .word)
+        // Unspaced scripts have no word boundaries to anchor on, so entries
+        // written in one default to phrase matching (docs/05 §2).
+        self.matchMode =
+            matchMode
+            ?? ((spoken.containsHanCharacters || spoken.containsMyanmarCharacters)
+                ? .phrase : .word)
         self.languages = languages
         self.isEnabled = isEnabled
         self.createdAt = createdAt
@@ -51,10 +55,31 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
 extension String {
     /// True if the string contains any Han (CJK ideograph) scalar.
     public var containsHanCharacters: Bool {
-        unicodeScalars.contains { scalar in
-            (0x4E00...0x9FFF).contains(scalar.value)        // CJK Unified
-                || (0x3400...0x4DBF).contains(scalar.value) // Extension A
-                || (0xF900...0xFAFF).contains(scalar.value) // Compatibility
-        }
+        unicodeScalars.contains { Unicode.isHanScalar($0) }
+    }
+
+    /// True if the string contains any Myanmar-script scalar.
+    public var containsMyanmarCharacters: Bool {
+        unicodeScalars.contains { Unicode.isMyanmarScalar($0) }
+    }
+}
+
+/// Script predicates shared by the models, the text pipeline, and the cleanup
+/// validator. One definition per script, so "is this Burmese?" cannot drift
+/// between the layer that detects it and the layer that formats it.
+extension Unicode {
+    public static func isHanScalar(_ scalar: Unicode.Scalar) -> Bool {
+        (0x4E00...0x9FFF).contains(scalar.value)        // CJK Unified
+            || (0x3400...0x4DBF).contains(scalar.value) // Extension A
+            || (0xF900...0xFAFF).contains(scalar.value) // Compatibility
+    }
+
+    /// The Myanmar block plus the two extension blocks. Covers Burmese proper
+    /// and the minority-language letters that share the script, so text mixing
+    /// them is never half-detected.
+    public static func isMyanmarScalar(_ scalar: Unicode.Scalar) -> Bool {
+        (0x1000...0x109F).contains(scalar.value)        // Myanmar
+            || (0xAA60...0xAA7F).contains(scalar.value) // Extended-A
+            || (0xA9E0...0xA9FF).contains(scalar.value) // Extended-B
     }
 }

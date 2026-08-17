@@ -1,7 +1,6 @@
 import ASRKit
 import ASREngineWhisperKit
 import AudioPipeline
-import AVFoundation
 import CleanupKit
 import Combine
 import CoreModels
@@ -34,7 +33,27 @@ final class IOSAppState: ObservableObject {
     let session: DictationSession
     let database: DatabaseStore?
     let profiles: [Profile]
-    @Published var display = DictationDisplay()
+    @Published var display = DictationDisplay() {
+        didSet {
+            guard display != oldValue else { return }
+            onDisplayChanged?(display)
+        }
+    }
+
+    /// Called on every display transition. The capture-session coordinator
+    /// uses it to mirror take state into the keyboard bridge and the Live
+    /// Activity without this type having to know either exists.
+    var onDisplayChanged: ((DictationDisplay) -> Void)?
+    /// Called once per delivered take, with the language the take resolved to
+    /// (the display carries only the text).
+    var onDelivered: ((String, Language) -> Void)?
+    /// Profile the keyboard picked for the current take; nil falls back to the
+    /// user's own selection (docs/02 FR-i3.3 — iOS cannot route by host app).
+    var keyboardProfileOverride: String?
+    /// Runs immediately before capture starts, whichever entry point began the
+    /// take. The capture-session coordinator uses it to release the residency
+    /// tap, so two AVAudioEngines never contend for the same input node.
+    var willStartCapture: (() -> Void)?
 
     // Persisted scalar settings (FR-i parity subset). Plain @Published with
     // UserDefaults persistence — @AppStorage only publishes inside Views.
@@ -56,22 +75,25 @@ final class IOSAppState: ObservableObject {
 
     private let engine: WhisperKitEngine
     private let config: IOSSessionConfig
+
+    /// The loaded ASR engine, for paths that transcribe outside a dictation
+    /// take — share-sheet imports run through the same model rather than a
+    /// second one (docs/02 FR-i2.3).
+    var transcriptionEngine: any TranscriptionEngine { engine }
     private var phaseTask: Task<Void, Never>?
     private var controlTask: Task<Void, Never>?
 
+    /// Persisted as "auto" or a `Language` raw value, so a new language needs
+    /// no change here (docs/04 §2).
     var languageMode: LanguageMode {
         get {
-            switch languageModeRaw {
-            case "en": .pinned(.english)
-            case "zh": .pinned(.chinese)
-            default: .auto
-            }
+            guard let language = Language(rawValue: languageModeRaw) else { return .auto }
+            return .pinned(language)
         }
         set {
             switch newValue {
             case .auto: languageModeRaw = "auto"
-            case .pinned(.english): languageModeRaw = "en"
-            case .pinned(.chinese): languageModeRaw = "zh"
+            case .pinned(let language): languageModeRaw = language.rawValue
             }
         }
     }
@@ -103,8 +125,14 @@ final class IOSAppState: ObservableObject {
             store: IOSTranscriptStore(database: database),
             config: config,
             profileResolution: {
-                let name = await MainActor.run {
-                    UserDefaults.standard.string(forKey: "selectedProfileName") ?? selectedName
+                // A keyboard-chosen profile wins for that take only; otherwise
+                // the user's own pick stands (docs/02 FR-i2.2).
+                let name = await MainActor.run { () -> String in
+                    if let override = relay.appState?.keyboardProfileOverride, !override.isEmpty {
+                        return override
+                    }
+                    return UserDefaults.standard.string(forKey: "selectedProfileName")
+                        ?? selectedName
                 }
                 let resolver = ProfileResolver(profiles: profiles)
                 let manual = profiles.first { $0.name == name }
@@ -138,11 +166,23 @@ final class IOSAppState: ObservableObject {
         try await engine.prepare(languageMode: languageMode)
     }
 
+    /// The profile a take would run under right now — the same routing the
+    /// session performs at press time, so the keyboard and the arming UI can
+    /// name it before anyone speaks.
+    var effectiveProfileName: String {
+        let resolver = ProfileResolver(profiles: profiles)
+        let manual = profiles.first { $0.name == selectedProfileName }
+        return resolver.resolve(
+            frontmostBundleID: nil, tabHostname: nil, manualPinProfileID: manual?.id
+        ).profile.name
+    }
+
     // MARK: - Dictation controls
 
     func startDictation() {
+        willStartCapture?()
         do {
-            try Self.activateAudioSession()
+            try AudioSessionManager.activate()
         } catch {
             display.mode = .error("Microphone unavailable: \(error.localizedDescription)")
             return
@@ -214,12 +254,6 @@ final class IOSAppState: ObservableObject {
 
     // MARK: - Composition helpers
 
-    private static func activateAudioSession() throws {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.record, mode: .default)
-        try audioSession.setActive(true)
-    }
-
     private static func makeDatabase() -> DatabaseStore? {
         let fileManager = FileManager.default
         guard
@@ -285,11 +319,15 @@ private final class ClipboardDelivering: TextDelivering, @unchecked Sendable {
     weak var appState: IOSAppState?
 
     func deliver(_ text: String, context: DeliveryContext) async -> DeliveryOutcome {
+        let language = context.language
         await MainActor.run { [weak appState] in
             if appState?.autoCopy ?? true {
                 UIPasteboard.general.string = text
             }
             appState?.showResult(text)
+            // After the result is on screen, so anything reacting to this sees
+            // a consistent display state.
+            appState?.onDelivered?(text, language)
         }
         return .copiedToClipboard(reason: .userSetting)
     }

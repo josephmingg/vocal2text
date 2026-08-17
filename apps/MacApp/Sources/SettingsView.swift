@@ -389,11 +389,12 @@ private struct HistoryPrivacyPane: View {
     private func deleteAllHistory() {
         guard let database else { return }
         do {
-            let all = try database.allTranscripts()
-            for record in all {
-                try database.deleteTranscript(id: record.id)
-            }
-            statusText = "Deleted \(all.count) transcript\(all.count == 1 ? "" : "s")."
+            // One SQL statement, deliberately not fetch-decode-delete-each:
+            // the list query skips rows this build cannot decode, and
+            // enumerating it would silently spare them — breaking the
+            // dialog's "permanently removes every transcript" promise.
+            let count = try database.deleteAllTranscripts()
+            statusText = "Deleted \(count) transcript\(count == 1 ? "" : "s")."
         } catch {
             statusText = "Delete failed: \(error.localizedDescription)"
         }
@@ -414,11 +415,17 @@ private struct AboutPane: View {
                 .bold()
             Text("Version \(Self.versionString)")
                 .foregroundStyle(.secondary)
-            Text("Personal offline dictation for English and 简体中文. Audio and transcripts stay on this Mac.")
+            Text("Personal offline dictation for English, 简体中文, and မြန်မာ. Audio and transcripts stay on this Mac.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
+            // The Burmese caveat both apps must state identically (docs/11 G13).
+            Text(BurmeseSupportNote.text)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 400)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

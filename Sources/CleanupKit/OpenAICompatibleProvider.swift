@@ -30,14 +30,61 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         promptAssembler: PromptAssembler = PromptAssembler()
     ) {
         let host = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)?.host ?? ""
-        let isLoopback = host == "localhost" || host == "127.0.0.1"
-        self.baseURL = baseURL
+        let isLoopback = Self.isLoopbackHost(host)
+        self.baseURL = Self.normalizedRoot(baseURL)
         self.apiKey = apiKey
         self.model = model
         self.temperature = temperature
         self.id = id ?? .openAICompatible(name: host.isEmpty ? "custom" : host)
         self.leavesDevice = leavesDevice ?? !isLoopback
         self.assembler = promptAssembler
+    }
+
+    // MARK: - Base-URL normalization
+
+    /// Trims the server root to what `endpointURL` expects.
+    ///
+    /// The documented base URL for several servers — Ollama's OpenAI-compatible
+    /// surface among them — already *includes* `/v1`, and that is what users
+    /// paste into the settings field. Appending our own `v1` to it produced
+    /// `/v1/v1/chat/completions`, a 404 that looks exactly like "the server is
+    /// down": cleanup silently fell back on every dictation. Accept both
+    /// spellings by reducing either to the bare root. Trailing slashes go too,
+    /// since they otherwise yield an empty path component.
+    /// Works on the percent-ENCODED path throughout. `URL.pathComponents`
+    /// percent-decodes, and rebuilding from decoded segments re-splits any
+    /// segment containing an encoded slash — `/tenant%2Fteam/v1` would come
+    /// back as `/tenant/team`, a different resource than the user configured.
+    static func normalizedRoot(_ url: URL) -> URL {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+        var segments = parts.percentEncodedPath
+            .split(separator: "/")
+            .filter { !$0.isEmpty }
+        // "v1" contains no percent-encodable characters, so comparing the
+        // encoded segment directly is exact.
+        if segments.last?.lowercased() == "v1" {
+            segments.removeLast()
+        }
+        parts.percentEncodedPath = segments.isEmpty ? "" : "/" + segments.joined(separator: "/")
+        return parts.url ?? url
+    }
+
+    /// Loopback detection for the privacy badge (FR-7.4). Covers IPv6 and the
+    /// whole 127.0.0.0/8 block, not just the two spellings people usually type.
+    static func isLoopbackHost(_ host: String) -> Bool {
+        let lowered = host.lowercased()
+        if lowered == "localhost" || lowered.hasSuffix(".localhost") { return true }
+        if lowered == "::1" || lowered == "[::1]" { return true }
+        // 127.0.0.0/8 — any address in the block is loopback.
+        let octets = lowered.split(separator: ".", omittingEmptySubsequences: false)
+        if octets.count == 4, octets[0] == "127",
+            octets.allSatisfy({ UInt8($0) != nil })
+        {
+            return true
+        }
+        return false
     }
 
     // MARK: - CleanupProvider
@@ -170,35 +217,74 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         let session = URLSession(configuration: configuration)
         defer { session.finishTasksAndInvalidate() }
 
+        // Without a cancellation handler, a continuation-based transport is
+        // deaf to cancellation: CleanupPipeline's deadline race would abandon
+        // this request but the network work would run to its own timeout.
+        // The box forwards the cancellation to the URLSession task, closing
+        // the one gap between "requested" and "actually stopped".
+        let box = DataTaskBox()
         do {
-            return try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<HTTPReply, any Error>) in
-                let task = session.dataTask(with: request) { data, response, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else if let http = response as? HTTPURLResponse {
-                        continuation.resume(
-                            returning: HTTPReply(statusCode: http.statusCode, body: data ?? Data())
-                        )
-                    } else {
-                        continuation.resume(
-                            throwing: CleanupError.transport("non-HTTP response")
-                        )
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<HTTPReply, any Error>) in
+                    let task = session.dataTask(with: request) { data, response, error in
+                        if let error {
+                            continuation.resume(throwing: error)
+                        } else if let http = response as? HTTPURLResponse {
+                            continuation.resume(
+                                returning: HTTPReply(statusCode: http.statusCode, body: data ?? Data())
+                            )
+                        } else {
+                            continuation.resume(
+                                throwing: CleanupError.transport("non-HTTP response")
+                            )
+                        }
                     }
+                    box.store(task)
+                    task.resume()
                 }
-                task.resume()
+            } onCancel: {
+                box.cancel()
             }
         } catch let error as CleanupError {
             throw error
         } catch {
-            if let urlError = error as? URLError, urlError.code == .timedOut {
+            if let urlError = error as? URLError,
+                urlError.code == .timedOut || urlError.code == .cancelled {
+                // .cancelled: the only canceller is the stage-3 deadline race.
                 throw CleanupError.timedOut
             }
             let nsError = error as NSError
-            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorTimedOut {
+            if nsError.domain == NSURLErrorDomain,
+                nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorCancelled {
                 throw CleanupError.timedOut
             }
             throw CleanupError.transport(String(describing: error))
+        }
+    }
+
+    /// Carries the in-flight `URLSessionDataTask` across the cancellation
+    /// handler boundary. `onCancel` can fire before `store` (cancelled while
+    /// the task is being created), so the box remembers and cancels late.
+    private final class DataTaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionDataTask?
+        private var isCancelled = false
+
+        func store(_ task: URLSessionDataTask) {
+            lock.lock()
+            self.task = task
+            let cancelNow = isCancelled
+            lock.unlock()
+            if cancelNow { task.cancel() }
+        }
+
+        func cancel() {
+            lock.lock()
+            isCancelled = true
+            let task = task
+            lock.unlock()
+            task?.cancel()
         }
     }
 }

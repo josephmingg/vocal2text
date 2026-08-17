@@ -84,6 +84,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // re-arms the tap itself when one is running.
         appState.settings.$hotkeySpec
             .dropFirst()
+            // `updateSpec` rebuilds the tap itself when one is running; an
+            // extra `rearm()` here would tear it down a second time.
             .sink { [weak self] spec in
                 guard let self, let monitor = self.hotkeyMonitor else { return }
                 monitor.updateSpec(spec)
@@ -123,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard !Task.isCancelled, let self, self.isLockModeActive else { return }
             self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: true)
-            self.appState.hudState.mode = .notice("Hands-free capped at 15 min — take saved")
+            self.appState.showNotice("Hands-free capped at 15 min — take saved")
         }
     }
 

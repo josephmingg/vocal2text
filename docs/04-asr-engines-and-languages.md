@@ -62,15 +62,19 @@ quantized (~626 MB)**:
 | Moonshine zh | Non-commercial community license; quality tier below turbo | — |
 | whisper.cpp | Same models as WhisperKit but more glue for us on Apple platforms | Fallback runtime if WhisperKit regresses; also runs Parakeet since v1.9 |
 
-## 2. Language layer (designed for 3, shipping 2)
+## 2. Language layer (three languages as of v1.1)
 
 ```
-LanguageMode = .auto | .english | .chinese          // menu-bar quick toggle + per-profile pin
+LanguageMode = .auto | .english | .chinese | .burmese   // menu-bar quick toggle + per-profile pin
 ```
 
-- **Auto**: Whisper's language identification per utterance (single model, no routing).
+- **Auto**: resolved per utterance by `ASRKit.LanguageDetector`. The engine's reported tag
+  is trusted unless the transcript's *dominant* script (a majority of its letters)
+  contradicts it — a mostly-Han or mostly-Myanmar transcript overrides a Latin tag, but a
+  few stray characters never do: one 中 in an English sentence, or a hallucinated Myanmar
+  scalar, must not reroute the whole take through another language's formatter.
   Wispr Flow's own docs list auto-detect as its top failure mode — so the manual pin is a
-  first-class UI element, not buried in settings.
+  first-class UI element, not buried in settings, and a pin outranks every other signal.
 - **Pinned**: passes the language token to Whisper (or selects the Apple-engine locale).
   Pinning also gates language-specific post-processing (docs/05 stage 1/4 rule sets).
 - **Chinese specifics**:
@@ -83,8 +87,13 @@ LanguageMode = .auto | .english | .chinese          // menu-bar quick toggle + p
     temperature ladder 0.0→1.0 step 0.2; `no_speech_threshold` 0.6; `logprob_threshold`
     −1.0; `compression_ratio_threshold` 2.4; canned-phrase blacklist applied only to
     near-silent segments; repetition penalty if zh loops persist.
+- **Burmese specifics** (v1.1, appendix A): unspaced script, so it takes the Chinese side of
+  every word-boundary decision — phrase-mode dictionary entries, no Latin space hygiene, no
+  capitalization. NFC normalization runs before anything matches. Spoken punctuation
+  commands supply ။ and ၊ because recognizers do not. Digit set is a per-profile preference.
+  Cleanup is off by default: small local models corrupt Burmese rather than tidy it.
 - Adding a language later = new enum case + engine adapter + rule files. No pipeline
-  changes (verified by the deferred-Burmese design below never having required one).
+  changes — verified in practice: Burmese landed in v1.1 without one.
 
 ## 3. Custom dictionary ↔ ASR integration points
 
@@ -140,10 +149,32 @@ evidence-backed or get revised.
 
 ---
 
-## Appendix A — Burmese (deferred, preserved research)
+## Appendix A — Burmese (v1.1: text layer shipped, recognition pending)
 
-Owner decision 2026-08-16: out of v1. The research changes the eventual approach compared
-to what one would guess:
+Owner decision 2026-08-16 deferred Burmese out of v1; v1.1 ships the half of it that can be
+done well today. The research below is why the split falls where it does — the text layer is
+tractable and complete, while recognition quality depends on a model that is not wired yet.
+
+### What v1.1 ships
+
+| Piece | Status | Where |
+|---|---|---|
+| `Language.burmese` (`my`), pinning, per-utterance auto-detect | Done | `CoreModels`, `ASRKit/LanguageDetector` |
+| Script detection (Myanmar + Extended-A/B) | Done | `Unicode.isMyanmarScalar` |
+| NFC normalization before anything matches | Done | stage 1 |
+| Spoken punctuation | **Disabled by default** — the Myanmar-script command words were removed in review (byte-identical to ordinary vocabulary; ပုဒ်မ = "section"); English command words remain, opt-in, pending native-speaker-validated vocabulary (G18) | `MyText` |
+| Myanmar vs Western digit preference | Done in stage 4; **no settings UI** (G17) | stage 4, per profile |
+| Unspaced-script handling: phrase-mode dictionary, no Latin space hygiene, no capitalization | Done | stages 1/2/4 |
+| Zawgyi *detection* | Not shipped — the rule-based prototype misclassified legitimate Unicode Burmese and was removed (G14) | — |
+| Zawgyi → Unicode *conversion* | Not shipped | docs/11 G14 |
+| Cleanup prompt + validator guards (no translation, no transliteration) | Done | `lang_my.txt`, `OutputValidator` |
+| Cleanup off by default for Burmese | Done; the per-profile opt-in exists in the session gate but needs the profile editor to be reachable (G17) | `Language.allowsCleanupByDefault` |
+| Burmese-capable ASR engine | **Not shipped** — Whisper is used and is poor | docs/11 G13 |
+
+The honest summary shown to users lives in one place, `BurmeseSupportNote`, so both apps say
+the same thing.
+
+### Why recognition is the hard half
 
 - **Vanilla Whisper is unusable for Burmese** (~80–100% WER / ~88% CER, hallucination
   loops; 2026 "myMediWhisper" paper puts global commercial models >80% WER). Apple's
@@ -155,12 +186,32 @@ to what one would guess:
   API, VAD chunking (<40 s windows), character timestamps. Sub-7B Burmese CER is
   unpublished — a FLEURS `my_mm` benchmark day would be step one.
 - Alternative: DataoceanAI **Dolphin** small 0.4 B (Apache-2.0, `my` supported, no English).
-- Text-layer requirements when revived: Unicode-only with NFC normalization; Zawgyi
-  detection/conversion (google/myanmar-tools) for imported dictionary text; spoken
-  punctuation commands for ၊ (U+104A) and ။ (U+104B) since CTC engines emit none; Myanmar
-  vs Arabic digits as a preference; measure **CER/syllable error rate, not WER** (unspaced
-  script makes WER misleading — observed 49% WER vs 13% CER on the same output); no LLM
-  cleanup by default (small local LLMs corrupt Burmese) — dictionary + punctuation commands
-  only, with Mac-only Sailor2-8B via Ollama as an opt-in experiment.
-- Architecture already accommodates it: new `LanguageMode` case + sherpa-onnx adapter
-  behind `TranscriptionEngine` + a Burmese rule file for stages 1/4.
+- The text-layer requirements this research identified are the ones v1.1 implemented, and
+  they were right: Unicode-only with NFC normalization; spoken punctuation commands for
+  ၊ (U+104A) and ။ (U+104B) since CTC engines emit none; Myanmar vs Arabic digits as a
+  preference; no LLM cleanup by default (small local LLMs corrupt Burmese) — dictionary and
+  punctuation commands only. Two are still open: Zawgyi handling (neither detection nor
+  conversion ships — G14), and Mac-only Sailor2-8B via Ollama as an opt-in cleanup
+  experiment, which becomes reachable once the profile editor lands (G17).
+- Architecture accommodated it well, though not at the "no pipeline changes" ideal §2
+  hoped for: v1.1 added a new `Language` case, new stage-1/4 branches, validator rules,
+  and catalog entries — additive surface in the shared pipeline, no architectural change.
+  The remaining work is the sherpa-onnx adapter behind `TranscriptionEngine`.
+
+### Engine status in v1.1
+
+`WhisperKitEngine.availability(for: .burmese)` returns `.readyWithCaveat` rather than
+`.ready`: Whisper accepts a `my` token and returns something, so blocking it outright would
+remove a path some users still want, but reporting it as ready would promise EN/ZH-grade
+accuracy the engine cannot deliver. `AppleSpeechEngine` returns `.unsupported` — there is no
+Burmese locale to select.
+
+`ModelCatalog` lists both Omnilingual CTC exports (`omni-asr-ctc-1b-int8` for Mac,
+`omni-asr-ctc-300m-int8` for iPhone). The catalog is data, so listing them costs nothing and
+`ModelStore` can already track their on-disk footprint; wiring the runtime is G13.
+
+### Measuring it
+
+When the engine lands, measure **CER / syllable error rate, not WER** — the unspaced script
+makes WER misleading (49% WER vs 13% CER observed on the same output). Step one is a FLEURS
+`my_mm` benchmark day against the 300M and 1B exports.

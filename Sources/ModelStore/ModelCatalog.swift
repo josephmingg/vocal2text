@@ -77,5 +77,36 @@ public enum ModelCatalog {
             approximateBytes: 506_462_208, // ≈483 MB
             files: []
         ),
+        /// Burmese (v1.1). Whisper is unusable for Burmese — 80–100% WER with
+        /// hallucination loops — so Burmese gets its own engine rather than
+        /// another Whisper variant (docs/04 Appendix A). Meta's Omnilingual
+        /// ASR reports 4.4% CER on Burmese at 7 B; sherpa-onnx ships int8 CTC
+        /// exports with a Swift API, which is what these two entries name.
+        ///
+        /// The catalog is data, so listing them costs nothing and commits
+        /// nothing: `ModelStore` can already report and manage their on-disk
+        /// footprint. Wiring the sherpa-onnx runtime behind
+        /// `TranscriptionEngine` is the remaining work (docs/11 G13).
+        ModelSpec(
+            id: "omni-asr-ctc-1b-int8",
+            displayName: "Omnilingual ASR CTC 1B (int8)",
+            engine: "sherpa-onnx",
+            languages: [.burmese],
+            approximateBytes: 1_181_116_006, // ≈1.1 GB — Mac tier
+            files: []
+        ),
+        ModelSpec(
+            id: "omni-asr-ctc-300m-int8",
+            displayName: "Omnilingual ASR CTC 300M (int8)",
+            engine: "sherpa-onnx",
+            languages: [.burmese],
+            approximateBytes: 364_904_448, // ≈348 MB — iPhone tier
+            files: []
+        ),
     ]
+
+    /// Catalog entries that can serve `language`.
+    public static func models(for language: Language) -> [ModelSpec] {
+        builtIn.filter { $0.languages.contains(language) }
+    }
 }

@@ -83,6 +83,31 @@ struct OutputValidatorTests {
         #expect(result == .rejected(rule: "meta-text"))
     }
 
+    /// The meta-text rule looks for a preamble the *model* added. When the
+    /// speaker themselves opened with one of those words, rejecting the output
+    /// would make cleanup permanently useless for that phrasing.
+    @Test(arguments: [
+        ("Sure, sounds good.", "sure sounds good"),
+        ("Here's the summary.", "here's the summary"),
+        ("好的，我明天过去。", "好的我明天过去"),
+    ])
+    func markerAlreadyPresentInTheInputIsTheSpeakersOwnWord(output: String, input: String) {
+        let language: Language = input.containsHanCharacters ? .chinese : .english
+        let result = OutputValidator.validate(output: output, input: input, language: language)
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    /// Review round 2: the input opening with a marker word licenses that one
+    /// word — not every preamble the model might then attach behind it.
+    @Test func aMarkerInputDoesNotLicenseAModelPreamble() {
+        let result = OutputValidator.validate(
+            output: "Sure! Here is the cleaned text: let's meet on Saturday at three.",
+            input: "sure let's meet on saturday at three",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "meta-text"))
+    }
+
     @Test func markdownFenceAtStartIsRejected() {
         let result = OutputValidator.validate(
             output: "```\nmeet on Saturday\n```",
@@ -146,5 +171,79 @@ struct OutputValidatorTests {
             language: .chinese
         )
         #expect(result == .accepted(cleaned: "用 Xcode 打开这个项目。"))
+    }
+}
+
+// MARK: - Burmese (v1.1)
+
+/// Burmese is the language most at risk from a small local model: answering
+/// in English or transliterating instead of cleaning would replace the user's
+/// dictation with something they never said.
+struct BurmeseOutputValidatorTests {
+
+    private let burmeseInput = "ဒီနေ့ ရာသီဥတု ကောင်းတယ်"
+
+    @Test func burmeseInputMustProduceBurmeseOutput() {
+        let result = OutputValidator.validate(
+            output: "The weather is good today.",
+            input: burmeseInput,
+            language: .burmese
+        )
+        #expect(result == .rejected(rule: "language-mismatch"))
+    }
+
+    @Test func transliteratedBurmeseIsRejected() {
+        let result = OutputValidator.validate(
+            output: "di ne yathi utu kaung deh",
+            input: burmeseInput,
+            language: .burmese
+        )
+        #expect(result == .rejected(rule: "language-mismatch"))
+    }
+
+    @Test func anEnglishDictationMustNotComeBackInBurmese() {
+        let result = OutputValidator.validate(
+            output: "ဒီနေ့ ရာသီဥတု ကောင်းတယ်",
+            input: "the weather is good today",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "language-mismatch"))
+    }
+
+    @Test func cleanedBurmeseIsAccepted() {
+        let cleaned = "ဒီနေ့ ရာသီဥတု ကောင်းတယ်။"
+        let result = OutputValidator.validate(
+            output: cleaned, input: burmeseInput, language: .burmese
+        )
+        #expect(result == .accepted(cleaned: cleaned))
+    }
+
+    /// Burmese sentences routinely embed English product and technical terms;
+    /// a little Latin in the output is not a translation.
+    @Test func codeSwitchedEnglishInsideBurmeseSurvives() {
+        let cleaned = "Vocal က အရမ်းကောင်းတယ်။"
+        let result = OutputValidator.validate(
+            output: cleaned, input: "Vocal က အရမ်းကောင်းတယ်", language: .burmese
+        )
+        #expect(result == .accepted(cleaned: cleaned))
+    }
+
+    /// Unspaced scripts pack more meaning per character, so the ratio bounds
+    /// start applying at a lower character count than for English.
+    /// Bare consonants, deliberately: a Myanmar syllable's `String.count` is
+    /// not what it looks like. U+102C and U+1038 are excluded from
+    /// `SpacingMark` by UAX #29, so they break the cluster instead of joining
+    /// it and "ကောင်း" is four Characters, not one. Unmarked letters make the
+    /// length of this fixture self-evident.
+    @Test func burmeseUsesTheUnspacedRatioThreshold() {
+        let longInput = String(repeating: "ကခဂဃင", count: 8)
+        // Past the 20-character unspaced threshold, so the [0.4, 2.5] bounds
+        // apply — the same input under English's 60-character threshold would
+        // still be in "short input, may legitimately collapse" territory.
+        #expect(longInput.count == 40)
+        let result = OutputValidator.validate(
+            output: "က", input: longInput, language: .burmese
+        )
+        #expect(result == .rejected(rule: "ratio"))
     }
 }

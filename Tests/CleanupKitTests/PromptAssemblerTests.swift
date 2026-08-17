@@ -88,3 +88,49 @@ struct PromptAssemblerTests {
         #expect(prompt == "A EN-RULES B - T C P D S")
     }
 }
+
+// MARK: - Burmese (v1.1)
+
+struct BurmesePromptAssemblerTests {
+
+    @Test func burmeseRequestGetsTheBurmeseRuleBlock() {
+        let assembler = PromptAssembler(
+            coreTemplate: "RULES: {LANGUAGE_RULES} TERMS: {PROTECTED_TERMS} "
+                + "TASK: {PROFILE_PROMPT} STYLE: {STYLE_PROMPT}",
+            languageRules: [
+                .english: "english rules",
+                .chinese: "chinese rules",
+                .burmese: "burmese rules",
+            ]
+        )
+        let prompt = assembler.systemPrompt(
+            for: CleanupRequest(text: "ဒီနေ့", language: .burmese)
+        )
+        #expect(prompt.contains("burmese rules"))
+        #expect(!prompt.contains("english rules"))
+        #expect(!prompt.contains("chinese rules"))
+    }
+
+    /// A language with no bundled rule file must still produce a usable
+    /// prompt rather than an empty LANGUAGE block.
+    @Test func aMissingRuleBlockFallsBackToEnglish() {
+        let assembler = PromptAssembler(
+            coreTemplate: "RULES: {LANGUAGE_RULES}",
+            languageRules: [.english: "english rules"]
+        )
+        let prompt = assembler.systemPrompt(
+            for: CleanupRequest(text: "ဒီနေ့", language: .burmese)
+        )
+        #expect(prompt.contains("english rules"))
+    }
+
+    /// The real bundled resource, not an injected stub.
+    @Test func bundledBurmeseRulesLoadAndForbidTranslation() {
+        let prompt = PromptAssembler().systemPrompt(
+            for: CleanupRequest(text: "ဒီနေ့", language: .burmese)
+        )
+        #expect(prompt.contains("Burmese"))
+        #expect(prompt.lowercased().contains("never translate"))
+        #expect(prompt.contains("။"))
+    }
+}
