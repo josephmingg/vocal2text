@@ -87,13 +87,23 @@ struct HUDView: View {
     }
 
     private var processing: some View {
-        HStack(spacing: 10) {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .controlSize(.small)
-            Text("Transcribing…")
-                .font(.callout)
-                .foregroundStyle(.primary)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                Text("Transcribing…")
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+            }
+            // First-run honesty: the model download/compile hint arrives via
+            // partialText so a multi-minute first load never looks frozen.
+            if !appState.hudState.partialText.isEmpty {
+                Text(appState.hudState.partialText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
     }
 

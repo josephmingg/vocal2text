@@ -4,7 +4,7 @@ options:
   bundleIdPrefix: com.vocal
   createIntermediateGroups: true
   deploymentTarget:
-    macOS: "15.0"
+    macOS: "14.0"
 
 settings:
   base:
@@ -56,7 +56,7 @@ targets:
   VocalMac:
     type: application
     platform: macOS
-    deploymentTarget: "15.0"
+    deploymentTarget: "14.0"
     sources:
       - path: apps/MacApp/Sources
       - path: apps/MacApp/Resources
@@ -68,7 +68,7 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         LSUIElement: true
-        LSMinimumSystemVersion: "15.0"
+        LSMinimumSystemVersion: "14.0"
         NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation key — never at idle."
         NSAppleEventsUsageDescription: "Vocal reads the active browser tab's address to route website profiles. Only the hostname is used, in memory, never stored."
     dependencies:

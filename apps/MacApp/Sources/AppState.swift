@@ -151,6 +151,17 @@ final class AppState: ObservableObject {
         hudState.partialText = ""
         hudState.languageLabel = Self.languageLabel(for: settings.languageMode)
         hudState.isRemoteCleanup = cleanupLeavesDevice && settings.cleanupMasterSwitch
+        // First-run honesty (FR-2.4): if the model isn't resident yet, the
+        // release will trigger a ~600 MB download + Neural Engine compile that
+        // can take minutes — say so instead of looking frozen.
+        let engine = engine
+        Task { [weak self] in
+            let loaded = await engine.isModelLoaded
+            if !loaded {
+                self?.hudState.partialText =
+                    "First run: downloading the speech model (~600 MB) and preparing it — this can take several minutes. Later dictations are instant."
+            }
+        }
         enqueueControl { session in await session.pressBegan() }
     }
 

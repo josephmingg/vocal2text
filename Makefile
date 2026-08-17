@@ -17,6 +17,20 @@ generate:
 mac: generate
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug build
 
+# Release-build VocalMac and install it to /Applications as Vocal.app.
+# Requires the signing Team to be selected once in Xcode (Signing & Capabilities).
+install:
+	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Release \
+		-derivedDataPath build -allowProvisioningUpdates build
+	rm -rf /Applications/Vocal.app
+	ditto build/Build/Products/Release/VocalMac.app /Applications/Vocal.app
+	@echo "✅ Installed /Applications/Vocal.app — grant mic + Accessibility once for this copy."
+
+# Zip the installed app for sharing to another Mac (AirDrop the zip).
+share: install
+	cd /Applications && zip -r -y ~/Desktop/Vocal.zip Vocal.app
+	@echo "✅ ~/Desktop/Vocal.zip ready to AirDrop."
+
 clean:
 	rm -rf .build Vocal.xcodeproj
 
