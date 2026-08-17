@@ -185,13 +185,13 @@ the same thing.
   API, VAD chunking (<40 s windows), character timestamps. Sub-7B Burmese CER is
   unpublished — a FLEURS `my_mm` benchmark day would be step one.
 - Alternative: DataoceanAI **Dolphin** small 0.4 B (Apache-2.0, `my` supported, no English).
-- Text-layer requirements when revived: Unicode-only with NFC normalization; Zawgyi
-  detection/conversion (google/myanmar-tools) for imported dictionary text; spoken
-  punctuation commands for ၊ (U+104A) and ။ (U+104B) since CTC engines emit none; Myanmar
-  vs Arabic digits as a preference; measure **CER/syllable error rate, not WER** (unspaced
-  script makes WER misleading — observed 49% WER vs 13% CER on the same output); no LLM
-  cleanup by default (small local LLMs corrupt Burmese) — dictionary + punctuation commands
-  only, with Mac-only Sailor2-8B via Ollama as an opt-in experiment.
+- The text-layer requirements this research identified are the ones v1.1 implemented, and
+  they were right: Unicode-only with NFC normalization; spoken punctuation commands for
+  ၊ (U+104A) and ။ (U+104B) since CTC engines emit none; Myanmar vs Arabic digits as a
+  preference; no LLM cleanup by default (small local LLMs corrupt Burmese) — dictionary and
+  punctuation commands only. Two are still open: Zawgyi *conversion* (detection ships; the
+  google/myanmar-tools table does not — G14), and Mac-only Sailor2-8B via Ollama as an
+  opt-in cleanup experiment, which the per-profile Burmese pin now makes reachable.
 - Architecture already accommodated it, as designed: v1.1 needed a new `Language` case, a
   Burmese rule file for stages 1/4, and catalog entries — **no pipeline changes**, which is
   the claim §2 makes. The remaining work is the sherpa-onnx adapter behind
