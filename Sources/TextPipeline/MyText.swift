@@ -4,29 +4,25 @@ import Foundation
 /// Burmese (Myanmar-script) text helpers shared by stage 1 (normalizer) and
 /// stage 4 (post-formatter) — the counterpart of `ZhText` (docs/04 Appendix A).
 ///
-/// Three things make Burmese unlike the other two languages:
+/// Two things make Burmese unlike the other two languages here:
 ///
-/// 1. **Two incompatible encodings share the same code points.** Zawgyi, the
-///    pre-2019 de-facto font hack, stores different characters at Unicode's
-///    Myanmar addresses. Zawgyi text renders as gibberish in a Unicode context
-///    and vice versa, and nothing in the byte stream announces which one you
-///    have — it must be inferred. See `ZawgyiDetector`.
-/// 2. **The script is unspaced**, so nothing here may collapse, insert, or
+/// 1. **The script is unspaced**, so nothing here may collapse, insert, or
 ///    reason about spaces the way the English rules do. Spaces that do appear
 ///    are phrase separators, not word boundaries.
-/// 3. **Sentence punctuation is often absent.** CTC-family recognizers emit no
-///    ၊ or ။ at all, so the user speaks them; `spokenPunctuationApplied`
-///    turns those spoken commands into marks.
+/// 2. **Sentence punctuation is often absent** from recognizer output, so the
+///    pipeline supplies it: `appendingSectionIfSentenceLike`, plus opt-in
+///    spoken commands via `spokenPunctuationApplied`.
+///
+/// Zawgyi — the pre-2019 encoding hack that reuses Unicode's Myanmar code
+/// points — is deliberately NOT handled: a rule-based detector prototype
+/// misclassified legitimate Unicode Burmese and was removed in review.
+/// docs/11 G14 tracks porting google/myanmar-tools if it proves needed.
 enum MyText {
 
     /// Myanmar phrase separator, "little section" ၊ (U+104A).
     static let littleSection: Character = "\u{104A}"
     /// Myanmar sentence terminator, "section" ။ (U+104B).
     static let section: Character = "\u{104B}"
-
-    static func isMyanmar(_ character: Character) -> Bool {
-        character.unicodeScalars.contains { Unicode.isMyanmarScalar($0) }
-    }
 
     // MARK: - Normalization
 
@@ -184,92 +180,6 @@ enum MyText {
     /// Myanmar consonants and independent vowels — the scalars that can
     /// carry a sentence, as opposed to digits, signs, and punctuation.
     private static func isMyanmarLetter(_ scalar: Unicode.Scalar) -> Bool {
-        (0x1000...0x102A).contains(scalar.value)
-    }
-}
-
-/// Detects Zawgyi-encoded Myanmar text so it can be converted to Unicode
-/// before anything else looks at it (docs/04 Appendix A).
-///
-/// Zawgyi and Unicode occupy the same code points, so detection is structural:
-/// each encoding produces sequences the other never legally produces. This is
-/// a compact rule-based detector in the spirit of google/myanmar-tools, chosen
-/// over that library's ~250 KB Markov model because it needs no resource
-/// bundle and the app only has to make a binary choice on short dictation-
-/// length strings, not score a corpus.
-///
-/// Detection is deliberately conservative: when nothing decisive appears, the
-/// text is treated as Unicode. Mis-converting real Unicode is far more
-/// damaging than leaving rare Zawgyi alone, because conversion is lossy in
-/// that direction.
-public enum ZawgyiDetector: Sendable {
-
-    /// True when `text` looks like Zawgyi rather than Unicode Myanmar.
-    public static func isZawgyi(_ text: String) -> Bool {
-        guard text.unicodeScalars.contains(where: { Unicode.isMyanmarScalar($0) }) else {
-            return false
-        }
-        return zawgyiEvidence(in: text) > unicodeEvidence(in: text)
-    }
-
-    /// Code points that exist only in Zawgyi's layout — Unicode assigns these
-    /// to Shan/Mon/Karen letters that essentially never appear in Burmese
-    /// text, whereas Zawgyi reuses them for common Burmese glyph variants.
-    private static let zawgyiOnlyScalars: Set<UInt32> = [
-        0x1060, 0x1061, 0x1062, 0x1063, 0x1064, 0x1065, 0x1066, 0x1067,
-        0x1068, 0x1069, 0x106A, 0x106B, 0x106C, 0x106D, 0x106E, 0x106F,
-        0x1070, 0x1071, 0x1072, 0x1073, 0x1074, 0x1075, 0x1076, 0x1077,
-        0x1078, 0x1079, 0x107A, 0x107B, 0x107C, 0x107D, 0x107E, 0x107F,
-        0x1080, 0x1081, 0x1082, 0x1083, 0x1084, 0x1085, 0x1086, 0x1087,
-        0x1088, 0x1089, 0x108A, 0x108B, 0x108C, 0x108D, 0x108E, 0x108F,
-        0x1090, 0x1091, 0x1092, 0x1093, 0x1094, 0x1095, 0x1096, 0x1097,
-        0x1098, 0x1099, 0x109A, 0x109B, 0x109C, 0x109D,
-    ]
-
-    private static func zawgyiEvidence(in text: String) -> Int {
-        var score = 0
-        let scalars = Array(text.unicodeScalars)
-        for (index, scalar) in scalars.enumerated() {
-            if zawgyiOnlyScalars.contains(scalar.value) {
-                score += 2
-                continue
-            }
-            // Zawgyi stores the ေ vowel *before* its consonant; Unicode stores
-            // it after. A ေ followed directly by a consonant is Zawgyi order.
-            if scalar.value == 0x1031, index + 1 < scalars.count,
-                isConsonant(scalars[index + 1])
-            {
-                score += 1
-            }
-            // Likewise ျ (medial ya) preceding its consonant.
-            if scalar.value == 0x103B, index + 1 < scalars.count,
-                isConsonant(scalars[index + 1])
-            {
-                score += 1
-            }
-        }
-        return score
-    }
-
-    private static func unicodeEvidence(in text: String) -> Int {
-        var score = 0
-        let scalars = Array(text.unicodeScalars)
-        for (index, scalar) in scalars.enumerated() {
-            guard index > 0 else { continue }
-            // Unicode order: consonant then ေ, consonant then ျ.
-            if scalar.value == 0x1031 || scalar.value == 0x103B {
-                if isConsonant(scalars[index - 1]) { score += 1 }
-            }
-            // ်  (asat) always follows a consonant in Unicode; Zawgyi's
-            // equivalent stacking differs.
-            if scalar.value == 0x103A, isConsonant(scalars[index - 1]) {
-                score += 1
-            }
-        }
-        return score
-    }
-
-    private static func isConsonant(_ scalar: Unicode.Scalar) -> Bool {
         (0x1000...0x102A).contains(scalar.value)
     }
 }
