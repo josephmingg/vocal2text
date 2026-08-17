@@ -187,6 +187,14 @@ final class CaptureSessionCoordinator: ObservableObject {
         handledRequest = request
         try? store.clear(.request)
 
+        // A request the app was suspended through is history, not an
+        // instruction: acting on it would start a take nobody asked for, and
+        // answering it would surface an error long after the fact.
+        guard
+            Date().timeIntervalSince(request.issuedAt)
+                <= KeyboardBridgePolicy.replyFreshnessWindow
+        else { return }
+
         guard let session, session.isArmed(at: Date()) else {
             reply(to: request.id, outcome: .failed(reason: "Vocal's capture session expired"))
             return

@@ -9,7 +9,10 @@ import Foundation
 /// matters because a keyboard extension cannot afford to block.
 public struct BridgeStore: Sendable {
     public let container: BridgeContainer
-    private let fileManager = FileManager.default
+    // Computed, not stored: `FileManager` is not Sendable on Apple
+    // platforms, and this type must be, so it crosses into the keyboard
+    // extension and the share extension.
+    private var fileManager: FileManager { .default }
 
     public init(container: BridgeContainer) {
         self.container = container

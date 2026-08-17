@@ -53,7 +53,10 @@ public struct ImportManifest: Codable, Sendable, Hashable, Identifiable {
 /// given manifest. That is what makes this safe without `NSFileCoordinator`.
 public struct ImportInbox: Sendable {
     public let container: BridgeContainer
-    private let fileManager = FileManager.default
+    // Computed, not stored: `FileManager` is not Sendable on Apple
+    // platforms, and this type must be, so it crosses into the keyboard
+    // extension and the share extension.
+    private var fileManager: FileManager { .default }
 
     public init(container: BridgeContainer) {
         self.container = container
