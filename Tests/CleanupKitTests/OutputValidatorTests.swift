@@ -282,6 +282,56 @@ struct BurmeseOutputValidatorTests {
     )
 }
 
+/// The worst failure the pipeline can produce: the model answers the dictation
+/// instead of cleaning it, and the app types its answer in place of the user's
+/// words. It used to survive validation because the floor only applied above
+/// 60 characters and this question is 28, so a 0.18 collapse had nothing to
+/// clear. Rejecting it delivers the stage-2 transcript — the question the user
+/// actually asked.
+@Test(arguments: [
+    ("Paris", "what's the capital of France", Language.english),
+    ("巴黎", "法国的首都是哪里", Language.chinese),
+])
+func aShortDictationAnsweredInsteadOfCleanedIsRejected(
+    output: String, input: String, language: Language
+) {
+    #expect(
+        OutputValidator.validate(output: output, input: input, language: language)
+            == .rejected(rule: "ratio")
+    )
+}
+
+/// The floor is calibrated so it never rejects a correct answer. These are the
+/// two tightest legitimate collapses in `evals/cleanup` — both short enough to
+/// have had no floor at all before, and both must survive one.
+@Test(arguments: [
+    ("四点半开会。", "三点开会，啊不是，四点半", Language.chinese),
+    ("The file is on the desktop.", "the file is in downloads wait no it's on the desktop",
+     Language.english),
+])
+func theTightestCorrectAnswersInTheEvalSetStillPass(
+    output: String, input: String, language: Language
+) {
+    #expect(
+        OutputValidator.validate(output: output, input: input, language: language)
+            == .accepted(cleaned: output)
+    )
+}
+
+/// A short input that collapses hard for a *reason* keeps its licence: the cue
+/// moves the basis to the surviving half, so `en-corr-009` measures 1.1 rather
+/// than the 0.31 it would score against the whole dictation. At 36 characters
+/// it never met the old floor at all, so this only became load-bearing now.
+/// (`showcaseChineseSelfCorrectionIsAccepted` is the Chinese twin.)
+@Test func aShortSelfCorrectionMayStillCollapsePastTheFloor() {
+    #expect(
+        OutputValidator.validate(
+            output: "I'll drive.", input: "I'll take the train sorry I'll drive",
+            language: .english
+        ) == .accepted(cleaned: "I'll drive.")
+    )
+}
+
 @Test func inputsWithoutACueKeepTheFlatFloor() {
     let input = String(repeating: "the quarterly numbers came in higher than we planned ", count: 2)
     #expect(
