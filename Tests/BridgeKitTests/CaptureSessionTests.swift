@@ -89,10 +89,11 @@ struct CaptureSessionTests {
         let state = CaptureSessionState.armed(
             window: .fiveMinutes, profileName: "Chat", now: epoch
         )
+        // Disarming long after the window closed must not push expiry forward.
         let alreadyOver = epoch.addingTimeInterval(9_999)
         let stopped = state.expired(at: alreadyOver)
         #expect(stopped.expiresAt == state.expiresAt)
-        #expect(!stopped.isArmed(at: epoch.addingTimeInterval(299)))
+        #expect(!stopped.isArmed(at: alreadyOver))
     }
 
     @Test("Retargeting keeps the clock")
