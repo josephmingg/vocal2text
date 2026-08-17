@@ -271,6 +271,37 @@ private func makeRecord(
     #expect(throws: (any Error).self) { try store.transcript(id: fromTheFuture.id) }
 }
 
+/// "Delete All" must remove rows this build cannot decode — they are exactly
+/// the ones the user can no longer see or delete individually, while their
+/// raw text still sits in the file.
+@Test func deleteAllTranscriptsRemovesUndecodableRowsToo() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let visible = makeRecord(rawText: "readable", createdAt: Date(timeIntervalSince1970: 1_000))
+    let fromTheFuture = makeRecord(
+        rawText: "private dictation", createdAt: Date(timeIntervalSince1970: 2_000)
+    )
+    try store.save(visible)
+    try store.save(fromTheFuture)
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "UPDATE transcript SET language = ? WHERE id = ?",
+            arguments: ["xx", fromTheFuture.id.uuidString]
+        )
+    }
+    // The forged row is invisible to the list query…
+    #expect(try store.allTranscripts().count == 1)
+
+    // …but Delete All still takes it.
+    #expect(try store.deleteAllTranscripts() == 2)
+
+    let remaining = try DatabaseQueue(path: path).read { db in
+        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript") ?? -1
+    }
+    #expect(remaining == 0)
+}
+
 #else
 
 @Test func persistenceIsUnsupportedWithoutGRDB() {

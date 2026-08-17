@@ -183,6 +183,20 @@ public final class DatabaseStore: Sendable {
         }
     }
 
+    /// Removes every transcript row, decodable or not, and returns the count.
+    ///
+    /// Deliberately one SQL statement rather than delete-by-enumerated-id:
+    /// `allTranscripts()` skips rows this build cannot decode, so enumerating
+    /// it would silently spare exactly the rows the user can no longer see —
+    /// while their raw text still sits in the file. "Delete All" must mean
+    /// all. (The FTS delete triggers fire per row either way.)
+    public func deleteAllTranscripts() throws -> Int {
+        try dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM transcript")
+            return db.changesCount
+        }
+    }
+
     /// Search history: Latin FTS first, then trigram FTS, then a LIKE scan for
     /// 1–2-character CJK queries. Results are de-duplicated by id and ordered
     /// by `createdAt` descending (AC-7 covers both scripts).
