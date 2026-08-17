@@ -1,10 +1,15 @@
 # Next Steps & Goals (handoff, 2026-08-17)
 
 Status at handoff: **v0.1 shipped and field-verified.** Mac app installed and dictating
-daily on two machines (owner's Mac + spouse's M2/Sonoma); iOS main app CI-green; all four
+daily on two machines (owner's Mac + spouse's M2/Sonoma); iOS main app CI-green; all five
 CI jobs green on `main`. Evidence: CI runs 32004944289 (all targets) and 32011357060
 (macOS 14 target). Field findings already fixed: first-run model-download visibility,
 `make generate` signing reset, Sonoma support, quarantine-stripping share flow.
+
+**Landed since, and not yet run on hardware:** the customizable push-to-talk hotkey
+(A7 below, CI run 32038326693). It is on `main` and green, but CI compiles the Mac app
+without executing it, so the verification debt is real rather than ceremonial — one of
+its changes alters what keystrokes other applications receive.
 
 **How to resume in a new session:** point Claude at this repo and this file. Working
 branch convention: `claude/offline-voice-text-app-oy19q9` (restart it from `main`).
@@ -20,6 +25,29 @@ Read `docs/11-known-gaps.md` alongside — G-numbers below refer to it.
 | A4 | **Insertion edge-case sweep** | Collect real paste failures from daily use; grow the per-app strategy table; expose overrides in Advanced settings |
 | A5 | **Benchmark evidence (M0 debt)** | Run the docs/06 M0 spike checklist on the owner's Mac; commit `docs/benchmarks/M0-results.md` (latency p50/p95, WER on the fixture sets) |
 | A6 | **Profile editing UI + persistence** | Profiles are in-memory built-ins today; add CRUD in Settings, seed the database once, make the pin durable |
+| A7 | **Hotkey customization: hardware pass** | **Code complete, five CI jobs green, nothing executed.** PRs #6 and #11 shipped the preset dropdown, the custom recorder, the extracted decision core, the onboarding key step and the live key tester. CI compiles the Mac app but never runs it, so every runtime claim below is unproven. Closes when each row of the checklist has a result |
+
+### A7 checklist — what "verified" means for the hotkey
+
+Ordered by risk. The first three exercise code paths that did not exist before this
+change, so a regression there would be new damage rather than a pre-existing gap.
+
+| # | Check | Why this one |
+|---|---|---|
+| 1 | Hold the hotkey in TextEdit, dictate, release — no stray characters before the transcript | The tap now **consumes** a keyed binding's press, release and autorepeat (#6). It forwarded everything unconditionally until now, so this is the only change that alters what other apps receive. Highest risk in the whole feature |
+| 2 | Press the key while Settings → General → **Test Your Key** is listening — ✓ appears, with no HUD, no sound, no transcript | Test-mode routing diverts hotkey edges away from dictation (#11). Exists only at runtime |
+| 3 | Open the recorder, press the **current** hotkey — it captures, and no dictation starts behind the sheet | The sheet suspends the global tap (#6). Before that fix this started a real take, HUD and all |
+| 4 | Bind Left ⇧. Hold Left ⇧, add Right ⇧, release Left ⇧ — the take must end | Device-specific modifier bits (`NX_DEVICE*KEYMASK`, #6). **A pass here is ambiguous:** when the hardware does not report those bits the code falls back to the old shared-bit behaviour, which also ends the take in the single-key case. Only the both-Shifts sequence distinguishes them |
+| 5 | Record ⌥Space; confirm the amber secure-input caveat shows; then confirm it does **not** fire while a password field is focused | The keyed-vs-modifier asymmetry documented in docs/03 §3.1 — the reason Fn and Right ⌘ are the recommended pair |
+| 6 | Press ⏎ in the recorder on a good capture — it commits rather than erasing it | Capture swallows key events, so the blue default button cannot fire on its own (#11) |
+| 7 | Delete the `onboardingComplete` default, relaunch, walk onboarding — the key step appears, and the Globe page follows **only** when Fn is chosen | The step list is rebuilt when the key changes (#11) |
+| 8 | F13/F14/F15 from an external keyboard | Presets no built-in Mac keyboard has |
+| 9 | Press a bare F-key (say F4) in the recorder — does anything register at all? | **Open question, not a bug report.** In macOS's default media-key mode F1–F12 may emit no `keyDown`, which would make them recordable but dead. The recorder warns; it does not block. If they are dead, block them in `HotkeySpec.validationError` |
+| 10 | A profile that predates the change keeps its key (Right ⌘ stays Right ⌘) | One-time migration from `settings.hotkeyChoice`; only observable on an existing install, never on a fresh one |
+
+**Rollback if row 1 fails:** `HotkeyDecisionCore.handle` returns `Outcome.consumesEvent`;
+forcing it `false` restores always-forward behaviour with no other change. The rest of the
+feature is independent of it.
 
 ## Phase B — finish the iPhone
 
@@ -42,12 +70,17 @@ on an iPhone. Treat B2/B3 as "ready for the device pass", not as shipped.
 - **iCloud private sync** (M8): per-Apple-ID — syncs the owner's Mac↔iPhone; spouse's data stays hers
 - **Traditional Chinese toggle** (deterministic OpenCC-style table — deferred by owner choice)
 - **Command mode** ("select last sentence, make it shorter") — parked in roadmap Later
-- ~~**Burmese revival**~~ — shipped in v1.1: text layer, detection, dictionary and formatting are complete. What remains is the *engine* (G13): a sherpa-onnx adapter, benchmarked on FLEURS `my_mm` first
+- ~~**Burmese revival**~~ — text layer *and* the Mac engine have both landed: `SherpaOnnxEngine` (Omnilingual CTC 1B int8, 10.78% CER on FLEURS `my_mm`) serves pinned မြန်မာ via `LanguageRoutingEngine`. Left to verify (G13): the real-audio path has never run on a Mac — only the file-absence paths are CI-tested — and the iPhone 300M call waits on on-device RTF
 - Remaining known-gaps: G1 (secure-field anonymous event), G3 (per-profile provider routing), G4 (low-disk guard), G5 (Escape in lock mode), G7 (FTS5 rowid hardening), G8 (app names in history)
 
 ## Standing engineering rules (unchanged)
 
-- Every change lands via the working branch → PR → all four CI jobs green → merge.
+- Every change lands via the working branch → PR → all five CI jobs green → merge.
+- **CI green ≠ mergeable.** Check `mergeable_state` separately; `main` moved under an
+  open PR three times in one afternoon, and the conflict is invisible in the checks.
+- **CI compiles the app targets but never runs them.** Anything that only exists at
+  runtime — event taps, SwiftUI flows, permissions — carries verification debt no matter
+  how green the checks are. Say so explicitly rather than letting green imply working.
 - Evidence-backed "done": benchmarks and screen recordings for behavior claims.
 - Cold-review before merge for any substantial new subsystem (the two review fleets each caught ~2 dozen real bugs).
 - `make generate` resets the Xcode signing Team — warn whenever a change touches `project.yml`.
