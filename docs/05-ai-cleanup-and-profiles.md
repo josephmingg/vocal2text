@@ -243,7 +243,12 @@ profile name + route type.
 All editable; user can add unlimited profiles (F8 requirement: "write your own profile with
 any prompt you want"). **Shipped state**: these are pre-authored *configurations* — with the
 global cleanup master switch OFF (the default), none of their cleanup behavior runs; the
-Terminal profile's verbatim formatting gates apply regardless of the master switch.
+Terminal profile's verbatim formatting gates apply regardless of the master switch. The
+editor itself ships on the Mac (Settings → Profiles, docs/11 G17): profiles persist in the
+database, the built-ins are seeded on first run so their IDs survive relaunch, and the
+press-time resolver reads the live set — an edit applies to the next dictation. iOS seeds
+the same built-ins but has no editor yet; `providerOverride` has no UI until the G3
+provider-selecting factory makes it real.
 
 ### iOS routing
 

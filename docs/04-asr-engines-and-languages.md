@@ -165,12 +165,12 @@ and `SherpaOnnxEngine` now runs that model for pinned-မြန်မာ dictati
 | Script detection (Myanmar + Extended-A/B) | Done | `Unicode.isMyanmarScalar` |
 | NFC normalization before anything matches | Done | stage 1 |
 | Spoken punctuation | **Disabled by default** — the Myanmar-script command words were removed in review (byte-identical to ordinary vocabulary; ပုဒ်မ = "section"); English command words remain, opt-in, pending native-speaker-validated vocabulary (G18) | `MyText` |
-| Myanmar vs Western digit preference | Done in stage 4; **no settings UI** (G17) | stage 4, per profile |
+| Myanmar vs Western digit preference | Done in stage 4; set per profile in the Mac Settings → Profiles pane (iOS editor still pending, G17) | stage 4, per profile |
 | Unspaced-script handling: phrase-mode dictionary, no Latin space hygiene, no capitalization | Done | stages 1/2/4 |
 | Zawgyi *detection* | Not shipped — the rule-based prototype misclassified legitimate Unicode Burmese and was removed (G14) | — |
 | Zawgyi → Unicode *conversion* | Not shipped | docs/11 G14 |
 | Cleanup prompt + validator guards (no translation, no transliteration) | Done | `lang_my.txt`, `OutputValidator` |
-| Cleanup off by default for Burmese | Done; the per-profile opt-in exists in the session gate but needs the profile editor to be reachable (G17) | `Language.allowsCleanupByDefault` |
+| Cleanup off by default for Burmese | Done; the per-profile opt-in is reachable via the Mac profile editor (G17) | `Language.allowsCleanupByDefault` |
 | Burmese-capable ASR engine | **Mac: shipped** — pinned မြန်မာ routes to `SherpaOnnxEngine` (Omnilingual CTC 1B int8, 10.78% CER measured). Auto mode and iPhone still fall to Whisper | `ASREngineSherpaOnnx`, docs/11 G13 |
 
 The honest summary shown to users lives in one place, `BurmeseSupportNote`, so both apps say
@@ -194,7 +194,8 @@ the same thing.
   preference; no LLM cleanup by default (small local LLMs corrupt Burmese) — dictionary and
   punctuation commands only. Two are still open: Zawgyi handling (neither detection nor
   conversion ships — G14), and Mac-only Sailor2-8B via Ollama as an opt-in cleanup
-  experiment, which becomes reachable once the profile editor lands (G17).
+  experiment, now reachable through the profile editor (G17): a Burmese profile with
+  cleanup opted in.
 - Architecture accommodated it well, though not at the "no pipeline changes" ideal §2
   hoped for: v1.1 added a new `Language` case, new stage-1/4 branches, validator rules,
   and catalog entries — additive surface in the shared pipeline, no architectural change.
@@ -205,7 +206,7 @@ the same thing.
 
 The Mac app composes `LanguageRoutingEngine(primary: WhisperKitEngine, overrides:
 [.burmese: SherpaOnnxEngine(.omnilingual1B)])`. Routing happens **only on a pin**
-(menu-bar မြန်မာ, or a profile language override once the editor lands — G17): auto mode
+(menu-bar မြန်မာ, or a per-profile language pin from Settings → Profiles — G17): auto mode
 always stays on the primary engine, because "which language was that?" is answered *by
 decoding*, and by then the primary has already produced the take's text — re-decoding on
 another engine would double latency on a guess. Auto-detected Burmese still gets the

@@ -1,13 +1,10 @@
 import AppKit
 import CoreModels
-import PersistenceKit
-import ProfileKit
 import SwiftUI
 
 /// Manual profile pin (FR-8.3). Lives outside SettingsStore because pinning is
 /// transient UI state, not a persisted setting; a singleton so the menu and the
-/// composition root's profile resolution can share it once app-core wires
-/// `manualPinProfileID` into `ProfileResolver.resolve` (currently passed nil).
+/// composition root's press-time profile resolution share one value.
 @MainActor
 final class PinState: ObservableObject {
     static let shared = PinState()
@@ -27,12 +24,16 @@ struct MenuBarView: View {
     @ObservedObject private var appState: AppState
     @ObservedObject private var settings: SettingsStore
     @ObservedObject private var pinState: PinState
-    @State private var profiles: [Profile] = []
+    // The composition root's single store, so pin-picker UUIDs always match
+    // the resolver's (FR-8.3) and edits from Settings → Profiles show up here
+    // live (docs/11 G17).
+    @ObservedObject private var profileStore: ProfileStore
 
     init(appState: AppState) {
         _appState = ObservedObject(wrappedValue: appState)
         _settings = ObservedObject(wrappedValue: appState.settings)
         _pinState = ObservedObject(wrappedValue: PinState.shared)
+        _profileStore = ObservedObject(wrappedValue: appState.profileStore)
     }
 
     var body: some View {
@@ -59,7 +60,7 @@ struct MenuBarView: View {
 
             Picker("Profile", selection: $pinState.pinnedProfileID) {
                 Text("Auto (by app)").tag(Optional<UUID>.none)
-                ForEach(profiles) { profile in
+                ForEach(profileStore.profiles) { profile in
                     Text(profile.name).tag(Optional(profile.id))
                 }
             }
@@ -87,7 +88,6 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 280)
-        .onAppear { loadProfiles() }
     }
 
     // MARK: - Status
@@ -141,15 +141,5 @@ struct MenuBarView: View {
             get: { settings.languageMode },
             set: { settings.languageMode = $0 }
         )
-    }
-
-    // MARK: - Profiles
-
-    private func loadProfiles() {
-        // The composition root builds the profile list once; using the same
-        // instances keeps pin-picker UUIDs aligned with the resolver's
-        // (a fresh BuiltInProfiles.makeAll() here would mint different IDs
-        // and make pinning a silent no-op — FR-8.3).
-        profiles = appState.profiles
     }
 }

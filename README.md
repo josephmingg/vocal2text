@@ -18,9 +18,10 @@ deliberate gaps are tracked in [`docs/11-known-gaps.md`](docs/11-known-gaps.md).
 
 Burmese ships with an uneven story, stated plainly rather than papered over. Working today:
 Unicode NFC normalization, per-utterance script detection, and the custom dictionary in
-phrase mode. In the engine but dormant: a Myanmar/Western digit preference and spoken
-punctuation, both awaiting a profile editor (docs/11 G17) — and the spoken-command
-vocabulary additionally needs native-speaker validation before it can ship on (G18).
+phrase mode. The Myanmar/Western digit preference and spoken punctuation are set per
+profile in the Mac app's Settings → Profiles pane (docs/11 G17; no iOS editor yet) — and
+the spoken-command vocabulary still needs native-speaker validation before it can ship on,
+so commands stay off and English-only (G18).
 Recognition: on the Mac, pinning မြန်မာ routes to a dedicated Burmese engine — Meta's
 Omnilingual ASR via sherpa-onnx, measured at 10.78% CER on FLEURS `my_mm`
 (docs/benchmarks) — with a ~790 MB first-use download. Auto-detect and iPhone still fall

@@ -2,9 +2,10 @@ import CoreModels
 import Foundation
 
 /// The five starter profiles from docs/05 §4, pre-authored so cleanup works
-/// the moment the user opts in. Intended to be editable and deletable like
-/// user-created profiles — but no profile editor exists yet and nothing
-/// persists a profile, so today these ARE the profile set (docs/11 G17).
+/// the moment the user opts in. `ProfileBootstrap.loadOrSeed` writes them to
+/// the profile store on first run; from then on the persisted set is the
+/// truth and these are ordinary editable, deletable profiles (docs/11 G17 —
+/// the Mac Settings → Profiles pane edits them; iOS has no editor yet).
 ///
 /// Shipped `cleanupEnabled` state: every profile ships `true` EXCEPT
 /// Terminal / Code (`false`). This is safe because the global cleanup master
