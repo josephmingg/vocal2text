@@ -114,6 +114,13 @@ public struct HotkeyDecisionCore: Sendable {
     private let timings: Timings
 
     public private(set) var isPressed = false
+    /// True between the `.lockToggled` that started a hands-free take and
+    /// whatever ends it. While set, an Escape `keyDown` with no active press
+    /// discards the locked take (FR-1.6, docs/11 G5) — without this, Escape
+    /// only worked while the key was physically held. The flag clears on every
+    /// emitted `pressEnded`/`cancelled` (the in-band ways a lock ends) and via
+    /// `noteLockEnded()` for the out-of-band ones (15-minute cap, sleep).
+    private var isLockActive = false
     private var pressStartTime: TimeInterval = 0
     /// The device-specific bit observed on the current press's down edge, or 0
     /// when the hardware did not report one. Self-calibrating on purpose: a
@@ -205,6 +212,12 @@ public struct HotkeyDecisionCore: Sendable {
             let decision = event.isRepeat ? nil : downEdge(at: event.timestamp)
             return Outcome(decision: decision, consumesEvent: true)
         }
+        if !isPressed, isLockActive, event.keyCode == HotkeyKeyCode.escape {
+            // Escape discards a hands-free take after the physical press ended
+            // (FR-1.6, docs/11 G5). Passes through, same as the in-press path.
+            isLockActive = false
+            return Outcome(decision: .cancelled)
+        }
         guard isPressed else { return Outcome() }
         if event.keyCode == HotkeyKeyCode.escape {
             // Escape cancels an active press at any time (docs/03 §3.1), and
@@ -243,14 +256,26 @@ public struct HotkeyDecisionCore: Sendable {
         // is the monitor's job — it must happen inside the tap callback.
         guard isPressed else { return nil }
         isPressed = false
+        // The synthesized release ends a locked take too (the app treats any
+        // pressEnded during lock as the finishing tap).
+        isLockActive = false
         lastShortTapDownTime = nil
         return .pressEnded
+    }
+
+    /// Lock mode ended outside the core's view — the 15-minute cap fired or
+    /// the machine slept mid-take. Without this, the stale flag would keep
+    /// emitting no-op cancels for every later Escape press until the next
+    /// hotkey use cleared it.
+    public mutating func noteLockEnded() {
+        isLockActive = false
     }
 
     // MARK: - Press edges
 
     private mutating func abortActivePress() -> Decision {
         isPressed = false
+        isLockActive = false
         lastShortTapDownTime = nil
         return .cancelled
     }
@@ -280,12 +305,14 @@ public struct HotkeyDecisionCore: Sendable {
         let heldDuration = now - pressStartTime
         if heldDuration >= timings.hold {
             lastShortTapDownTime = nil
+            isLockActive = false
             return .pressEnded
         }
         if let previousTapDownTime = lastShortTapDownTime,
             pressStartTime - previousTapDownTime <= timings.doubleTap {
             // Second tap of a double-tap → hands-free lock toggle (FR-1.3).
             lastShortTapDownTime = nil
+            isLockActive = true
             return .lockToggled
         }
         // Short tap: report it as an ended press so SessionKit's FR-1.5
@@ -293,6 +320,9 @@ public struct HotkeyDecisionCore: Sendable {
         // speech it discards silently — docs/03 §3.1). Routing it to cancel
         // would make the has-speech override a dead path.
         lastShortTapDownTime = pressStartTime
+        // During lock this tap is the finishing one (the app stops the take on
+        // its pressEnded), so the Escape watch disarms with it.
+        isLockActive = false
         return .pressEnded
     }
 }

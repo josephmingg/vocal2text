@@ -112,6 +112,13 @@ final class HotkeyMonitor {
         _ = start()
     }
 
+    /// Lock mode ended outside the tap's view — the 15-minute cap fired or the
+    /// Mac slept mid-take. Forwarded to the decision core so its lock-aware
+    /// Escape watch (docs/11 G5) disarms instead of going stale.
+    func noteLockEnded() {
+        machine?.noteLockEnded()
+    }
+
     /// Switch the hotkey; rebuilds the tap machine when one is running.
     func updateSpec(_ newSpec: HotkeySpec) {
         guard newSpec != spec else {
@@ -175,6 +182,10 @@ private final class HotkeyTapMachine: @unchecked Sendable {
     private let stateLock = NSLock()
     /// Published by the tap thread at startup, consumed by `stopTap()`.
     private var runLoop: CFRunLoop?
+    /// Set on the main thread when lock mode ends outside the core (15-minute
+    /// cap, sleep); consumed on the tap thread before the next event, so the
+    /// core's lock flag is never mutated across threads. Guarded by stateLock.
+    private var pendingLockClear = false
 
     /// Press state — tap-thread-confined. All timings use systemUptime
     /// (docs/03 §3.1: 50 ms debounce on systemUptime).
@@ -260,10 +271,24 @@ private final class HotkeyTapMachine: @unchecked Sendable {
         thread = nil
     }
 
+    /// Main-thread entry for `HotkeyMonitor.noteLockEnded()`.
+    func noteLockEnded() {
+        stateLock.lock()
+        pendingLockClear = true
+        stateLock.unlock()
+    }
+
     // MARK: Event handling (tap thread, called from the C callback)
 
     /// Returns true when the event must be swallowed instead of forwarded.
     func handle(type: CGEventType, event: CGEvent) -> Bool {
+        stateLock.lock()
+        let clearLock = pendingLockClear
+        pendingLockClear = false
+        stateLock.unlock()
+        if clearLock {
+            core.noteLockEnded()
+        }
         guard let coreEvent = makeCoreEvent(type: type, event: event) else {
             return false
         }

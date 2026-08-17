@@ -73,6 +73,18 @@ struct MenuBarView: View {
 
             Divider()
 
+            // FR-1.6: Escape throws a take away, but the audio survives for 24
+            // hours. Shown only while there is something to recover, so the
+            // menu does not carry a permanently dead entry.
+            if let candidate = appState.recoverableTake {
+                Button("Recover Cancelled Take (\(Self.durationLabel(candidate.durationSeconds)))") {
+                    appState.recoverLastCancelledTake()
+                }
+                .help(
+                    "Transcribe the take you cancelled and insert it where you are typing now. Cancelled takes stay recoverable for 24 hours."
+                )
+            }
+
             Button("Open History") {
                 WindowManager.shared.showHistory(appState: appState)
             }
@@ -88,6 +100,16 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 280)
+        // The sidecar can appear or expire while the menu is closed — and a
+        // crash leaves one behind with no phase change to notice it.
+        .onAppear { appState.refreshRecoverableTake() }
+    }
+
+    /// "12s" / "1:24" — enough for the user to tell which take is on offer.
+    static func durationLabel(_ seconds: Double) -> String {
+        let whole = max(0, Int(seconds.rounded()))
+        guard whole >= 60 else { return "\(whole)s" }
+        return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 
     // MARK: - Status

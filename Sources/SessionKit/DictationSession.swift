@@ -28,17 +28,46 @@ public actor DictationSession {
         case cancelled
     }
 
+    /// The stage-3 pipeline chosen for one take, plus the provider identity
+    /// history records — `CleanupPipeline` does not expose its provider, so
+    /// the two travel together.
+    public struct CleanupSelection: Sendable {
+        public var pipeline: CleanupPipeline
+        public var providerID: CleanupProviderID
+
+        public init(pipeline: CleanupPipeline, providerID: CleanupProviderID) {
+            self.pipeline = pipeline
+            self.providerID = providerID
+        }
+    }
+
+    /// Chooses the stage-3 pipeline for one take, called after the profile is
+    /// pinned and only when cleanup is actually going to run.
+    ///
+    /// Resolving per take rather than per launch is what makes a profile's
+    /// `providerOverride` real (docs/11 G3) and lets a changed model or server
+    /// URL take effect on the next dictation instead of the next launch
+    /// (docs/11 G15). Returning nil means no provider is configured, and the
+    /// take is recorded as `skipped(providerUnavailable)`.
+    public typealias CleanupSelecting = @Sendable (Profile) async -> CleanupSelection?
+
+    /// Retains a delivered take's audio, returning the path history should
+    /// record — nil when audio is not being kept (the user's retention
+    /// setting) or the write failed (FR-5.1, docs/11 G9).
+    ///
+    /// Called only after delivery succeeds, so a blocked secure field or a
+    /// discarded take never leaves a recording behind, and a failure here can
+    /// never cost the user the transcript.
+    public typealias AudioArchiving = @Sendable (PCMChunk, UUID) async -> String?
+
     /// Everything a session needs, injected by the composition root.
     public struct Dependencies: Sendable {
         public var audio: any AudioCapturing
         public var engine: any TranscriptionEngine
-        /// Stage-3 pipeline; nil when no provider is configured.
-        public var cleanup: CleanupPipeline?
-        /// Identity of the provider behind `cleanup`, recorded in history
-        /// outcomes. `CleanupPipeline` does not expose its provider, so the
-        /// composition root supplies the ID alongside the pipeline; a
-        /// profile's `providerOverride` wins when set.
-        public var cleanupProviderID: CleanupProviderID
+        /// Stage-3 provider selection, resolved per take.
+        public var selectCleanup: CleanupSelecting
+        /// Retains the take's audio after delivery; nil keeps nothing.
+        public var archiveAudio: AudioArchiving?
         /// Fired fire-and-forget at hotkey press so the model is hot at
         /// release (docs/03 §2). Wire to `CleanupProvider.prewarm`; defaults
         /// to a no-op.
@@ -57,11 +86,47 @@ public actor DictationSession {
         /// tests pin timestamps.
         public var now: @Sendable () -> Date
 
+        /// Fixed-pipeline form: every take uses the same provider. Used by
+        /// tests and by platforms with a single built-in provider; the Mac app
+        /// passes a `selectCleanup` closure instead.
         public init(
             audio: any AudioCapturing,
             engine: any TranscriptionEngine,
             cleanup: CleanupPipeline? = nil,
             cleanupProviderID: CleanupProviderID = .openAICompatible(name: "unconfigured"),
+            archiveAudio: AudioArchiving? = nil,
+            prewarmCleanup: @escaping @Sendable () async -> Void = {},
+            deliverer: any TextDelivering,
+            store: any TranscriptStoring,
+            config: any SessionConfiguring,
+            profileResolution: @escaping @Sendable () async -> (
+                profile: Profile,
+                routeKind: TranscriptRecord.RouteKind,
+                pressTimeBundleID: String?
+            ),
+            now: @escaping @Sendable () -> Date = { Date() }
+        ) {
+            self.init(
+                audio: audio,
+                engine: engine,
+                selectCleanup: { _ in
+                    cleanup.map { CleanupSelection(pipeline: $0, providerID: cleanupProviderID) }
+                },
+                archiveAudio: archiveAudio,
+                prewarmCleanup: prewarmCleanup,
+                deliverer: deliverer,
+                store: store,
+                config: config,
+                profileResolution: profileResolution,
+                now: now
+            )
+        }
+
+        public init(
+            audio: any AudioCapturing,
+            engine: any TranscriptionEngine,
+            selectCleanup: @escaping CleanupSelecting,
+            archiveAudio: AudioArchiving? = nil,
             prewarmCleanup: @escaping @Sendable () async -> Void = {},
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
@@ -75,8 +140,8 @@ public actor DictationSession {
         ) {
             self.audio = audio
             self.engine = engine
-            self.cleanup = cleanup
-            self.cleanupProviderID = cleanupProviderID
+            self.selectCleanup = selectCleanup
+            self.archiveAudio = archiveAudio
             self.prewarmCleanup = prewarmCleanup
             self.deliverer = deliverer
             self.store = store
@@ -273,6 +338,63 @@ public actor DictationSession {
         // Join the press-time resolution started in `pressBegan`. It has had
         // the whole utterance to finish, so this is normally already complete.
         let resolved = await active.resolution.value
+        _ = await runPipeline(
+            audio: audio,
+            resolved: resolved,
+            isLockMode: isLockMode,
+            captureSeconds: captureSeconds,
+            source: .dictation
+        )
+    }
+
+    /// Recovers a cancelled take's audio (FR-1.6, docs/11 G9): the identical
+    /// post-capture pipeline — transcribe, dictionary, cleanup gating,
+    /// formatting, delivery, history — so a recovered take is indistinguishable
+    /// from one that was never cancelled, except for its `source`.
+    ///
+    /// The profile is resolved fresh: the take is being delivered *now*, into
+    /// whatever is frontmost now, so pinning the app from a press minutes ago
+    /// would route by a context that no longer exists.
+    ///
+    /// Returns whether the audio was consumed. `false` means the take is still
+    /// worth another attempt later — the session was busy, or transcription
+    /// failed — so the caller must keep the recording rather than discard it.
+    @discardableResult
+    public func recover(audio: PCMChunk) async -> Bool {
+        guard phaseValue == .idle, audio.durationSeconds > 0 else { return false }
+        lastError = nil
+        transition(to: .transcribing)
+        let resolved = await deps.profileResolution()
+        return await runPipeline(
+            audio: audio,
+            resolved: resolved,
+            isLockMode: false,
+            captureSeconds: audio.durationSeconds,
+            source: .recovered
+        )
+    }
+
+    /// Everything a take does once its audio exists. Shared by the live press
+    /// path and recovery so the two can never drift apart.
+    ///
+    /// Returns whether the take reached a terminal outcome that consumes its
+    /// audio. Only a transcription failure returns `false`: nothing was
+    /// produced from the recording, so re-running it is a real second chance.
+    /// A secure-field block returns `true` — FR-3.2 means that take leaves no
+    /// trace, and holding its raw audio back for another try would defeat the
+    /// rule it just enforced.
+    @discardableResult
+    private func runPipeline(
+        audio: PCMChunk,
+        resolved: (
+            profile: Profile,
+            routeKind: TranscriptRecord.RouteKind,
+            pressTimeBundleID: String?
+        ),
+        isLockMode: Bool,
+        captureSeconds: Double,
+        source: TranscriptSource
+    ) async -> Bool {
         let profile = resolved.profile
 
         let languageMode: LanguageMode
@@ -294,7 +416,7 @@ public actor DictationSession {
             lastError =
                 (error as? TranscriptionError) ?? .engineUnavailable(String(describing: error))
             transition(to: .idle)
-            return
+            return false
         }
         let transcriptionSeconds = Self.seconds(transcriptionStart.duration(to: clock.now))
 
@@ -322,13 +444,14 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .profileDisabled)
         } else if !Self.cleanupAllowed(for: language, profile: profile) {
             cleanupOutcome = .skipped(reason: .languageOptOut)
-        } else if let pipeline = deps.cleanup {
+        } else if let selection = await deps.selectCleanup(profile) {
             transition(to: .cleaning)
-            // History must record what actually ran (FR-5.1). Only one pipeline
-            // is injected today, so a profile's providerOverride is routing
-            // intent, not reality — runtime provider selection is a known gap
-            // (docs/11).
-            let providerID = deps.cleanupProviderID
+            // Resolved for this take from this profile, so history records the
+            // provider that actually ran (FR-5.1) — including a profile's
+            // `providerOverride` (docs/11 G3) and any settings change made
+            // since launch (docs/11 G15).
+            let pipeline = selection.pipeline
+            let providerID = selection.providerID
             let stylePrompt: String
             if profile.ignoresGlobalStyle {
                 stylePrompt = ""
@@ -380,7 +503,7 @@ public actor DictationSession {
         // persisted — no history row for this take.
         if case .blockedSecureField = delivery {
             transition(to: .idle)
-            return
+            return true
         }
 
         var targetBundleID = resolved.pressTimeBundleID
@@ -388,9 +511,19 @@ public actor DictationSession {
             targetBundleID = appBundleID
         }
 
+        // FR-5.1 (docs/11 G9): retain the audio only for a take that actually
+        // landed, and only when the user's retention setting keeps any. The
+        // transcript id names the file, so the two are found together.
+        let transcriptID = UUID()
+        var audioPath: String?
+        if let archive = deps.archiveAudio {
+            audioPath = await archive(audio, transcriptID)
+        }
+
         let record = TranscriptRecord(
+            id: transcriptID,
             createdAt: deps.now(),
-            source: .dictation,
+            source: source,
             language: language,
             rawText: result.text,
             deliveredText: formatted,
@@ -405,13 +538,15 @@ public actor DictationSession {
                 dictionarySeconds: dictionarySeconds,
                 cleanupSeconds: cleanupSeconds,
                 deliverySeconds: deliverySeconds
-            )
+            ),
+            audioPath: audioPath
         )
         // A failed save must not un-deliver text that already landed; the
         // session still returns to idle (history write errors surface via
         // PersistenceKit, not here).
         try? await deps.store.save(record)
         transition(to: .idle)
+        return true
     }
 
     // MARK: - Helpers

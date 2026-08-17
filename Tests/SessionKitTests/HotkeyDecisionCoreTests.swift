@@ -29,6 +29,23 @@ private struct Driver {
         now += seconds
     }
 
+    /// Out-of-band lock end (15-minute cap, sleep) — what the monitor forwards
+    /// via `HotkeyMonitor.noteLockEnded()`.
+    mutating func noteLockEnded() {
+        core.noteLockEnded()
+    }
+
+    /// Double-taps into the hands-free lock (FR-1.3).
+    mutating func lock() {
+        #expect(fnDown() == .pressBegan)
+        advance(0.1)
+        #expect(fnUp() == .pressEnded)
+        advance(0.1)
+        #expect(fnDown() == .pressBegan)
+        advance(0.1)
+        #expect(fnUp() == .lockToggled)
+    }
+
     mutating func send(
         _ kind: HotkeyDecisionCore.EventKind,
         keyCode: UInt16 = 0,
@@ -604,4 +621,83 @@ private let f13 = HotkeySpec(kind: .key(keyCode: HotkeyKeyCode.f13, requiredFlag
         driver.advance(0.1)
         #expect(driver.release(spec) == .lockToggled, "double tap: \(spec.label)")
     }
+}
+
+// MARK: - Lock-aware Escape (FR-1.6, docs/11 G5)
+
+@Test func escapeDiscardsALockedTakeAfterThePressEnded() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(2.0)
+    let outcome = driver.outcome(.keyDown, keyCode: HotkeyKeyCode.escape)
+    #expect(outcome.decision == .cancelled)
+    // Escape keeps its normal job everywhere else — never swallowed.
+    #expect(!outcome.consumesEvent)
+    // One cancel per lock: the watch disarmed with the take.
+    driver.advance(0.1)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == nil)
+}
+
+@Test func theFinishingTapDisarmsTheLockEscapeWatch() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(2.0)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == .pressEnded)  // the tap that finishes the take
+    driver.advance(0.1)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == nil)
+}
+
+@Test func aHoldReleaseDuringLockAlsoDisarmsTheEscapeWatch() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(2.0)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.6)  // held past the tap threshold
+    #expect(driver.fnUp() == .pressEnded)
+    driver.advance(0.1)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == nil)
+}
+
+@Test func externallyEndedLockDisarmsTheEscapeWatch() {
+    // The 15-minute cap and sleep end lock mode outside the core's view; the
+    // monitor forwards that via noteLockEnded so Escape goes back to inert.
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(2.0)
+    driver.noteLockEnded()
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == nil)
+}
+
+@Test func otherKeysDuringALockedTakeStayInert() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(2.0)
+    let outcome = driver.outcome(.keyDown, keyCode: cKey)
+    #expect(outcome.decision == nil)
+    #expect(!outcome.consumesEvent)
+}
+
+@Test func escapeWithNoPressAndNoLockStaysInert() {
+    var driver = Driver(spec: .fnGlobe)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == nil)
+}
+
+@Test func escapeDuringLockWorksForKeyedBindingsToo() {
+    let spec = HotkeySpec.presets.first { spec in
+        if case .key = spec.kind { return true }
+        return false
+    }
+    guard let spec else { return }  // preset list currently has none: skip
+    var driver = Driver(spec: spec)
+    _ = driver.press(spec)
+    driver.advance(0.1)
+    #expect(driver.release(spec) == .pressEnded)
+    driver.advance(0.1)
+    _ = driver.press(spec)
+    driver.advance(0.1)
+    #expect(driver.release(spec) == .lockToggled)
+    driver.advance(2.0)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == .cancelled)
 }

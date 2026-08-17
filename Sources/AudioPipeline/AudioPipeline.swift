@@ -50,6 +50,177 @@ public enum RecoveryFileReaper {
     }
 }
 
+/// Reads back the crash/cancel sidecars `MicrophoneCapture` writes (FR-1.6,
+/// FR-11.3): raw 16 kHz mono Float32, no header. The reaper writes the
+/// retention policy; this reads what is still inside it.
+public enum RecoveryStore {
+    /// One recoverable take: its file and when it was written.
+    public struct Candidate: Sendable, Hashable {
+        public var url: URL
+        public var modified: Date
+        /// Seconds of audio, from the file size — 4 bytes per sample at
+        /// 16 kHz, so no decode is needed to describe the take to the user.
+        public var durationSeconds: Double
+
+        public init(url: URL, modified: Date, durationSeconds: Double) {
+            self.url = url
+            self.modified = modified
+            self.durationSeconds = durationSeconds
+        }
+    }
+
+    /// The newest sidecar still inside the 24 h window, if any.
+    ///
+    /// Only takes worth recovering are offered: a file under half a second is
+    /// the tail of an accidental tap, and offering it back as "your cancelled
+    /// recording" would be a worse answer than offering nothing.
+    public static func latestRecoverable(
+        in directory: URL = FileManager.default.temporaryDirectory,
+        now: Date = Date(),
+        minimumSeconds: Double = 0.5
+    ) -> Candidate? {
+        let fileManager = FileManager.default
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return nil }
+
+        var best: Candidate?
+        for entry in entries
+        where entry.lastPathComponent.hasPrefix(RecoveryFileReaper.recoveryFilePrefix)
+            && entry.pathExtension == "pcmf32"
+        {
+            let values = try? entry.resourceValues(forKeys: [
+                .contentModificationDateKey, .fileSizeKey,
+            ])
+            guard
+                let modified = values?.contentModificationDate,
+                let size = values?.fileSize,
+                now.timeIntervalSince(modified) <= RecoveryFileReaper.recoveryRetention
+            else { continue }
+            let seconds = Double(size / MemoryLayout<Float>.size) / Double(PCMChunk.sampleRate)
+            guard seconds >= minimumSeconds else { continue }
+            let candidate = Candidate(url: entry, modified: modified, durationSeconds: seconds)
+            if best == nil || modified > best!.modified {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    /// Decodes a sidecar back into samples. Returns nil rather than a partial
+    /// take when the file is truncated to nothing or unreadable.
+    public static func samples(at url: URL) -> [Float]? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        let count = data.count / MemoryLayout<Float>.size
+        guard count > 0 else { return nil }
+        // The sidecar is written in host byte order by the same machine that
+        // reads it, so a straight reinterpretation is correct — and a
+        // trailing partial sample (a crash mid-write) is dropped by `count`.
+        return data.withUnsafeBytes { raw in
+            let buffer = raw.bindMemory(to: Float.self)
+            return Array(buffer.prefix(count))
+        }
+    }
+
+    /// Removes a sidecar once its take has been recovered, so the same
+    /// recording is never offered twice.
+    public static func discard(at url: URL) {
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
+/// Converts captured audio into the 0…1 levels the HUD waveform draws
+/// (FR-4.1). Pure and tested on every platform; the capture actor feeds it.
+public enum AudioLevelMeter {
+    /// Quietest level the meter shows. Speech in Float PCM sits around -30 to
+    /// -12 dBFS, so a -60 dB floor keeps a soft voice clearly visible while
+    /// room tone stays near the baseline.
+    public static let floorDecibels: Float = -60
+
+    /// Normalized display level for one chunk of 16 kHz mono Float samples.
+    ///
+    /// RMS on a decibel scale rather than raw amplitude: linear amplitude puts
+    /// ordinary speech in the bottom tenth of the bar, which reads as "the mic
+    /// is dead" — the exact question the waveform exists to answer.
+    public static func level(for samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sumOfSquares: Float = 0
+        for sample in samples {
+            sumOfSquares += sample * sample
+        }
+        let rms = (sumOfSquares / Float(samples.count)).squareRoot()
+        guard rms > 0, rms.isFinite else { return 0 }
+        let decibels = 20 * log10(rms)
+        guard decibels.isFinite else { return 0 }
+        let normalized = (decibels - floorDecibels) / -floorDecibels
+        return min(max(normalized, 0), 1)
+    }
+}
+
+/// How long a take's audio is kept (FR-5.1, docs/11 G9). Encodes the meaning
+/// of Settings → History & Privacy → "Keep audio", which is stored as a day
+/// count with two sentinels. Pure, so the rules are tested rather than
+/// re-derived at each call site.
+public enum AudioRetentionPolicy {
+    /// "Never" — the take's audio is not written at all.
+    public static let never = 0
+    /// "Forever" — kept until the transcript is deleted.
+    public static let forever = -1
+
+    public static func keepsAudio(retentionDays: Int) -> Bool {
+        retentionDays != never
+    }
+
+    /// Whether a file recorded at `createdAt` has outlived the window.
+    /// "Forever" never expires; a nil date is treated as expired, since an
+    /// unreadable timestamp is indistinguishable from an orphan.
+    public static func isExpired(
+        createdAt: Date?,
+        retentionDays: Int,
+        now: Date = Date()
+    ) -> Bool {
+        guard retentionDays != forever else { return false }
+        guard retentionDays != never else { return true }
+        guard let createdAt else { return true }
+        return now.timeIntervalSince(createdAt) > Double(retentionDays) * 24 * 60 * 60
+    }
+}
+
+/// FR-1.3 low-disk guard (docs/11 G4): a recording must not fill the disk.
+/// A take is refused at start, or finished early mid-take, when the volume
+/// holding the recovery sidecars drops below `minimumFreeBytes`. The decision
+/// logic is pure and Linux-tested; the stat itself is Darwin-only.
+public enum DiskSpaceGuard {
+    /// FR-1.3: stop recording below 1 GB free.
+    public static let minimumFreeBytes: Int64 = 1_000_000_000
+    /// Ingested chunks between free-space stats — the check is a filesystem
+    /// stat, cheap but not free, and chunks arrive ~12×/second.
+    public static let checkInterval = 50
+
+    /// An unknown capacity (the stat failed) is NOT critical: refusing to
+    /// record because a stat failed would fail takes on healthy disks.
+    public static func isCritical(availableBytes: Int64?) -> Bool {
+        guard let availableBytes else { return false }
+        return availableBytes < minimumFreeBytes
+    }
+
+    #if canImport(Darwin)
+    /// Free bytes on the volume containing `url`, by the "important usage"
+    /// capacity — purgeable space counts as free, matching what the system
+    /// would actually grant the recording.
+    public static func availableBytes(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        )
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+    #endif
+}
+
 #if canImport(AVFoundation)
 import AVFoundation
 
@@ -63,6 +234,9 @@ public enum CaptureError: Error, Sendable, Equatable {
     case alreadyCapturing
     case formatUnavailable
     case engineStartFailed(String)
+    /// FR-1.3: below the `DiskSpaceGuard` floor — recording refused rather
+    /// than started on a disk it could fill.
+    case insufficientDiskSpace
 }
 
 /// One live capture: the chunk stream plus stop/cancel handles. Mirrors
@@ -92,6 +266,119 @@ public struct MicrophoneSession: Sendable {
     }
 }
 
+/// Stores and reaps the retained audio of delivered takes (FR-5.1, docs/11
+/// G9). One flat directory of `<transcript-uuid>.m4a`, so a transcript's
+/// recording is found by id alone and an orphaned file is obvious.
+public enum AudioArchive {
+    public static let fileExtension = "m4a"
+
+    public static func fileURL(forTranscript id: UUID, in directory: URL) -> URL {
+        directory.appendingPathComponent(id.uuidString).appendingPathExtension(fileExtension)
+    }
+
+    /// Encodes a finished take to AAC beside its transcript, returning the
+    /// path to record — nil when the audio could not be written, which must
+    /// never cost the user the transcript itself.
+    ///
+    /// AAC at 24 kbps mono: about 3 KB per second of speech, so even years of
+    /// daily dictation stay smaller than the speech model that produced it.
+    @discardableResult
+    public static func write(
+        _ samples: [Float],
+        forTranscript id: UUID,
+        in directory: URL
+    ) -> String? {
+        guard !samples.isEmpty else { return nil }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true
+            )
+        } catch {
+            return nil
+        }
+        let url = fileURL(forTranscript: id, in: directory)
+        do {
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: Double(PCMChunk.sampleRate),
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 24_000,
+            ]
+            let file = try AVAudioFile(forWriting: url, settings: settings)
+            // Written in the file's own processing format; AVAudioFile handles
+            // the float→AAC conversion on the way out.
+            guard
+                let buffer = AVAudioPCMBuffer(
+                    pcmFormat: file.processingFormat,
+                    frameCapacity: AVAudioFrameCount(samples.count)
+                ),
+                let channel = buffer.floatChannelData
+            else { return nil }
+            buffer.frameLength = AVAudioFrameCount(samples.count)
+            for index in samples.indices {
+                channel[0][index] = samples[index]
+            }
+            try file.write(from: buffer)
+            return url.path
+        } catch {
+            // A failed encode leaves no half-written file behind.
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+    }
+
+    /// Deletes one transcript's recording, if it has one.
+    public static func delete(forTranscript id: UUID, in directory: URL) {
+        try? FileManager.default.removeItem(at: fileURL(forTranscript: id, in: directory))
+    }
+
+    /// Deletes every recording — the audio half of "Delete All History".
+    public static func deleteAll(in directory: URL) {
+        guard
+            let entries = try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            )
+        else { return }
+        for entry in entries where entry.pathExtension == fileExtension {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
+    /// Applies the retention window, returning how many recordings were
+    /// removed. Run at launch: the setting is a promise about what is on disk,
+    /// not merely about what is written.
+    @discardableResult
+    public static func sweep(
+        directory: URL,
+        retentionDays: Int,
+        now: Date = Date()
+    ) -> Int {
+        let fileManager = FileManager.default
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+
+        var removed = 0
+        for entry in entries where entry.pathExtension == fileExtension {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            guard
+                AudioRetentionPolicy.isExpired(
+                    createdAt: modified, retentionDays: retentionDays, now: now
+                )
+            else { continue }
+            if (try? fileManager.removeItem(at: entry)) != nil {
+                removed += 1
+            }
+        }
+        return removed
+    }
+}
+
 /// AVAudioEngine microphone capture (docs/03 §4): tap the input node at its
 /// native hardware format (tap format requests are ignored), convert with
 /// AVAudioConverter to 16 kHz mono Float32, and stream `PCMChunk`s.
@@ -110,13 +397,42 @@ public actor MicrophoneCapture {
     private var recoveryURL: URL?
     private var recoveryHandle: FileHandle?
     private var isCapturing = false
+    /// FR-1.3 (docs/11 G4): invoked at most once per take when free space
+    /// drops below the `DiskSpaceGuard` floor mid-recording. The composition
+    /// root wires this to "finish the take normally" — the audio captured so
+    /// far is delivered, not lost.
+    private var lowDiskHandler: (@Sendable () -> Void)?
+    private var ingestsSinceDiskCheck = 0
+    private var lowDiskTripped = false
+    /// Per-chunk microphone level for the HUD waveform (FR-4.1), ~12×/second.
+    private var levelHandler: (@Sendable (Float) -> Void)?
 
     public init() {}
+
+    /// Installs the low-disk callback (see `lowDiskHandler`).
+    public func setLowDiskHandler(_ handler: @escaping @Sendable () -> Void) {
+        lowDiskHandler = handler
+    }
+
+    /// Installs the live-level callback (see `levelHandler`).
+    public func setLevelHandler(_ handler: @escaping @Sendable (Float) -> Void) {
+        levelHandler = handler
+    }
 
     /// Begin capturing. The returned session's `chunks` yields converted audio
     /// as it arrives; call `finish` to stop and receive the concatenated take.
     public func start() async throws -> MicrophoneSession {
         guard !isCapturing else { throw CaptureError.alreadyCapturing }
+        // FR-1.3: refuse to start a recording the disk cannot hold.
+        if DiskSpaceGuard.isCritical(
+            availableBytes: DiskSpaceGuard.availableBytes(
+                at: FileManager.default.temporaryDirectory
+            )
+        ) {
+            throw CaptureError.insufficientDiskSpace
+        }
+        ingestsSinceDiskCheck = 0
+        lowDiskTripped = false
 
         let engine = AVAudioEngine()
         let input = engine.inputNode
@@ -266,8 +582,28 @@ public actor MicrophoneCapture {
         let converted = Array(UnsafeBufferPointer(start: outChannels[0], count: Int(outBuffer.frameLength)))
         accumulated.append(contentsOf: converted)
         chunkContinuation?.yield(PCMChunk(samples: converted))
+        levelHandler?(AudioLevelMeter.level(for: converted))
         let data = converted.withUnsafeBufferPointer { Data(buffer: $0) }
         try? recoveryHandle?.write(contentsOf: data)
+
+        // FR-1.3 mid-take guard (docs/11 G4): a long (locked) take must not
+        // record until the disk fills. Fires the handler once; the app
+        // finishes the take through the normal stop path, so the audio
+        // captured so far is transcribed and delivered.
+        ingestsSinceDiskCheck += 1
+        if ingestsSinceDiskCheck >= DiskSpaceGuard.checkInterval {
+            ingestsSinceDiskCheck = 0
+            if !lowDiskTripped,
+                DiskSpaceGuard.isCritical(
+                    availableBytes: DiskSpaceGuard.availableBytes(
+                        at: FileManager.default.temporaryDirectory
+                    )
+                )
+            {
+                lowDiskTripped = true
+                lowDiskHandler?()
+            }
+        }
     }
 
     /// Stop the engine, then drain the ordered native-sample stream so every

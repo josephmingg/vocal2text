@@ -125,3 +125,12 @@ struct StaticConfig: SessionConfiguring {
         entries.filter(\.isEnabled)
     }
 }
+
+/// Records the profiles a per-take cleanup selector was handed (docs/11 G3).
+actor ProfileRecorder {
+    private(set) var profiles: [Profile] = []
+
+    func record(_ profile: Profile) {
+        profiles.append(profile)
+    }
+}
