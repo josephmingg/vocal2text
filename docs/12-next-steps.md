@@ -28,12 +28,12 @@ Read `docs/11-known-gaps.md` alongside — G-numbers below refer to it.
 | B1 | **Run VocalIOS on the owner's iPhone** | **Open — owner-only.** Cannot be done from CI: it needs the phone, Xcode signing, and a paid account for App Groups. Checklist and the measurements to record: `docs/14-running-on-your-iphone.md` |
 | B2 | **Keyboard extension (D2b)** | **Code complete, compiles in CI, unverified on device.** `Sources/BridgeKit` holds the whole App Group contract (Linux-tested); `apps/iOSKeyboard` is the insert-only surface; `CaptureSessionCoordinator` is the app-side host. Closes when AC-i3 has screen recordings |
 | B3 | **Share-extension import + Live Activity** | **Code complete, compiles in CI, unverified on device.** `apps/iOSShareExt` + `ImportProcessor` + `AudioFileDecoder`; `apps/iOSWidgets` renders the Dynamic Island. Closes when AC-i5 and AC-i6 have recordings |
-| B4 | **iOS background audio session polish** | **Partly done.** Auto-expiry 5/15/60 and `AudioSessionManager`/`CaptureResidency` are in. Still open: the G15 latency spike and the NFR-i3 battery number |
+| B4 | **iOS background audio session polish** | **Partly done.** Auto-expiry 5/15/60 and `AudioSessionManager`/`CaptureResidency` are in. Still open: the G22 latency spike and the NFR-i3 battery number |
 
 **Where Phase B actually stands:** everything Phase B asked for is written and
 builds, and the logic behind it is tested on Linux — but no line of it has run
 on an iPhone. Treat B2/B3 as "ready for the device pass", not as shipped.
-`docs/11-known-gaps.md` G10 and G12–G16 track exactly what is unproven.
+`docs/11-known-gaps.md` G10 and G19–G23 track exactly what is unproven.
 
 ## Phase C — deeper features (pick by appetite)
 
@@ -42,7 +42,7 @@ on an iPhone. Treat B2/B3 as "ready for the device pass", not as shipped.
 - **iCloud private sync** (M8): per-Apple-ID — syncs the owner's Mac↔iPhone; spouse's data stays hers
 - **Traditional Chinese toggle** (deterministic OpenCC-style table — deferred by owner choice)
 - **Command mode** ("select last sentence, make it shorter") — parked in roadmap Later
-- **Burmese revival** — docs/04 appendix A: Meta Omnilingual ASR via sherpa-onnx; benchmark `omniASR_CTC` variants on FLEURS `my_mm` first
+- ~~**Burmese revival**~~ — shipped in v1.1: text layer, detection, dictionary and formatting are complete. What remains is the *engine* (G13): a sherpa-onnx adapter, benchmarked on FLEURS `my_mm` first
 - Remaining known-gaps: G1 (secure-field anonymous event), G3 (per-profile provider routing), G4 (low-disk guard), G5 (Escape in lock mode), G7 (FTS5 rowid hardening), G8 (app names in history)
 
 ## Standing engineering rules (unchanged)

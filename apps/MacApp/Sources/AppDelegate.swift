@@ -81,9 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Hotkey choice changes take effect immediately, not at relaunch.
         appState.settings.$hotkeyChoice
             .dropFirst()
+            // `updateChoice` rebuilds the tap itself when one is running;
+            // an extra `rearm()` here would tear it down a second time.
             .sink { [weak self] choice in
                 self?.hotkeyMonitor?.updateChoice(choice)
-                self?.hotkeyMonitor?.rearm()
             }
             .store(in: &settingsSinks)
 
@@ -115,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard !Task.isCancelled, let self, self.isLockModeActive else { return }
             self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: true)
-            self.appState.hudState.mode = .notice("Hands-free capped at 15 min — take saved")
+            self.appState.showNotice("Hands-free capped at 15 min — take saved")
         }
     }
 

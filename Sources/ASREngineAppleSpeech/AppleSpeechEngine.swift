@@ -7,12 +7,17 @@ import Foundation
 // every CI runner and Linux build stays green while real hardware gets the
 // fast-path engine. [verify: M0 spike 0.2 exercises this adapter on-device.]
 #if canImport(Speech) && compiler(>=6.2)
+// AVFoundation supplies AVAudioFormat/AVAudioPCMBuffer below. Speech pulls it
+// in transitively today, but relying on that makes the build hostage to
+// another framework's header layout.
+import AVFoundation
 import Speech
 
 /// Apple's on-device dictation engine (docs/04 §1): fast path for pinned-language
 /// EN/ZH. DictationTranscriber is the only Apple module honoring custom-vocabulary
-/// contextual strings, so the adapter routes through it whenever dictionary terms
-/// are present.
+/// contextual strings, which is why the adapter routes through it — though
+/// `dictionaryTerms` are not yet handed over (docs/11 G12); stage 2 remains the
+/// correctness backstop either way.
 @available(macOS 26.0, iOS 26.0, *)
 public actor AppleSpeechEngine: TranscriptionEngine {
     public nonisolated let id = "apple-speech"
@@ -24,10 +29,18 @@ public actor AppleSpeechEngine: TranscriptionEngine {
         switch language {
         case .english: Locale(identifier: "en_US")
         case .chinese: Locale(identifier: "zh_CN")
+        case .burmese: Locale(identifier: "my_MM")
         }
     }
 
     public func availability(for language: Language) async -> EngineAvailability {
+        // Apple's dictation assets have no Burmese locale (docs/04 Appendix A).
+        // The generic supportedLocales check below would also catch this, but
+        // it costs an async round-trip to learn something already known, and
+        // the specific message is more useful than "not supported".
+        if language == .burmese {
+            return .unsupported(reason: "Apple Speech has no Burmese locale")
+        }
         let locale = locale(for: language)
         let supported = await DictationTranscriber.supportedLocales
         guard supported.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
@@ -56,13 +69,24 @@ public actor AppleSpeechEngine: TranscriptionEngine {
         languageMode: LanguageMode,
         dictionaryTerms: [String]
     ) async throws -> TranscriptionResult {
-        // Apple's engine is single-language per session (docs/04 §1): auto mode
-        // is resolved by a cheap script heuristic before choosing the locale —
-        // callers wanting true code-switching use the WhisperKit engine.
+        // Apple's engine is single-language per session (docs/04 §1) and the
+        // locale must be chosen before any audio is seen, so there is nothing
+        // to detect from: auto mode picks the default locale. Callers who need
+        // real per-utterance detection or code-switching use WhisperKit; the
+        // composition root routes `.auto` there for exactly this reason.
         let language: Language
         switch languageMode {
         case .pinned(let l): language = l
         case .auto: language = .english
+        }
+
+        guard language != .burmese else {
+            throw TranscriptionError.engineUnavailable("Apple Speech has no Burmese locale")
+        }
+
+        guard !audio.samples.isEmpty else {
+            // AVAudioPCMBuffer rejects a zero frame capacity.
+            throw TranscriptionError.audioUnreadable("empty audio buffer")
         }
 
         let transcriber = DictationTranscriber(

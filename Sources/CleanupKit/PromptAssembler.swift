@@ -14,24 +14,33 @@ public struct PromptAssembler: Sendable {
     }
 
     private let coreTemplate: String
-    private let englishRules: String
-    private let chineseRules: String
+    private let languageRules: [Language: String]
 
     /// Loads the bundled templates. A missing resource degrades to an empty
     /// template rather than crashing; the assembler itself never fails.
     public init() {
         self.init(
             coreTemplate: Self.loadPrompt(named: "system_core"),
-            englishRules: Self.loadPrompt(named: "lang_en"),
-            chineseRules: Self.loadPrompt(named: "lang_zh")
+            languageRules: [
+                .english: Self.loadPrompt(named: "lang_en"),
+                .chinese: Self.loadPrompt(named: "lang_zh"),
+                .burmese: Self.loadPrompt(named: "lang_my"),
+            ]
         )
     }
 
     /// Injection seam for tests and prompt experiments.
-    public init(coreTemplate: String, englishRules: String, chineseRules: String) {
+    public init(coreTemplate: String, languageRules: [Language: String]) {
         self.coreTemplate = coreTemplate
-        self.englishRules = englishRules
-        self.chineseRules = chineseRules
+        self.languageRules = languageRules
+    }
+
+    /// Convenience for the two-language call sites that predate Burmese.
+    public init(coreTemplate: String, englishRules: String, chineseRules: String) {
+        self.init(
+            coreTemplate: coreTemplate,
+            languageRules: [.english: englishRules, .chinese: chineseRules]
+        )
     }
 
     /// The full system prompt for one cleanup call: core template with language
@@ -39,7 +48,7 @@ public struct PromptAssembler: Sendable {
     /// style slot sits after the profile slot so profile instructions win on
     /// conflict (docs/05 §5).
     public func systemPrompt(for request: CleanupRequest) -> String {
-        let rules = (request.language == .chinese ? chineseRules : englishRules)
+        let rules = (languageRules[request.language] ?? languageRules[.english] ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return coreTemplate
             .replacingOccurrences(of: Slot.languageRules, with: rules)

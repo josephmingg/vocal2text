@@ -113,7 +113,7 @@ private struct WelcomeStep: View {
                 .bold()
             Text(
                 """
-                Hold the dictation key, speak in English or 中文, release — your \
+                Hold the dictation key, speak in English, 中文, or မြန်မာ, release — your \
                 words appear where you were typing. Everything runs on this Mac: \
                 audio and transcripts never leave it.
                 """

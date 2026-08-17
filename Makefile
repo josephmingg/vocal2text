@@ -35,6 +35,12 @@ clean:
 	rm -rf .build Vocal.xcodeproj
 
 # Development hygiene: clear wedged TCC grants after signing changes (docs/03 §3.4).
+# Both bundle IDs. Debug runs from Xcode are com.vocal.mac.dev, but `make
+# install` ships Release as com.vocal.mac — and a wedged grant on the installed
+# copy is the one that actually stops you dictating, so resetting only the dev
+# ID left the failing case untouched.
 reset-tcc:
+	tccutil reset Accessibility com.vocal.mac || true
+	tccutil reset Microphone com.vocal.mac || true
 	tccutil reset Accessibility com.vocal.mac.dev || true
 	tccutil reset Microphone com.vocal.mac.dev || true

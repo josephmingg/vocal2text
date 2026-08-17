@@ -39,8 +39,8 @@ targets:
       path: apps/iOSApp/Info.plist
       properties:
         CFBundleDisplayName: Vocal
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
         NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation button, or while a capture session you armed is running."
         UIBackgroundModes: [audio]
         UILaunchScreen: {}
@@ -96,8 +96,8 @@ targets:
       path: apps/iOSKeyboard/Info.plist
       properties:
         CFBundleDisplayName: Vocal
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
         VocalAppGroupIdentifier: *appGroup
         NSExtension:
           NSExtensionPointIdentifier: com.apple.keyboard-service
@@ -136,8 +136,8 @@ targets:
       path: apps/iOSShareExt/Info.plist
       properties:
         CFBundleDisplayName: Save to Vocal
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
         VocalAppGroupIdentifier: *appGroup
         NSExtension:
           NSExtensionPointIdentifier: com.apple.share-services
@@ -173,8 +173,8 @@ targets:
       path: apps/iOSWidgets/Info.plist
       properties:
         CFBundleDisplayName: Vocal
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
         VocalAppGroupIdentifier: *appGroup
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
@@ -205,8 +205,8 @@ targets:
       path: apps/MacApp/Info.plist
       properties:
         CFBundleDisplayName: Vocal
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
         NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation key — never at idle."

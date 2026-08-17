@@ -358,6 +358,73 @@ struct DictationSessionTests {
         #expect(terms == ["Claude Code"])
     }
 
+    /// Regression: profile resolution must never gate the microphone. On macOS
+    /// it shells out to osascript for the frontmost browser's tab URL (up to
+    /// 1.5 s), and every millisecond before capture opens is speech the user
+    /// already spoke. Here resolution refuses to finish until capture is live,
+    /// so the pre-fix serial order (resolve → start) cannot pass.
+    @Test func captureStartsWithoutWaitingForProfileResolution() async throws {
+        let gate = CaptureGate()
+        let captureLog = CaptureLog()
+        let audio = ScriptedAudioCapturing(
+            chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+            log: captureLog,
+            onStart: { await gate.open() }
+        )
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: audio,
+                engine: FakeTranscriptionEngine(
+                    result: TranscriptionResult(text: "hello there", detectedLanguage: .english)
+                ),
+                deliverer: deliverer,
+                store: store,
+                config: StaticConfig(),
+                profileResolution: {
+                    // Bounded so a regression fails the assertion instead of
+                    // hanging the suite forever.
+                    let sawCaptureStart = await withTaskGroup(of: Bool.self) { group in
+                        group.addTask {
+                            await gate.waitForOpen()
+                            return true
+                        }
+                        group.addTask {
+                            try? await Task.sleep(for: .seconds(5))
+                            return false
+                        }
+                        let first = await group.next() ?? false
+                        group.cancelAll()
+                        return first
+                    }
+                    return (
+                        Profile(name: sawCaptureStart ? "Concurrent" : "Serialized"),
+                        .app,
+                        "com.example.pressapp"
+                    )
+                },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        await session.pressEnded()
+
+        // "Serialized" would mean the press awaited resolution before opening
+        // the mic — the leading-speech-loss bug.
+        let records = await store.records
+        let record = try #require(records.first)
+        #expect(record.profileName == "Concurrent")
+
+        // The resolution is still the pinned press-time one (FR-3.6).
+        let contexts = await deliverer.contexts
+        #expect(contexts.first?.pressTimeAppBundleID == "com.example.pressapp")
+        #expect(record.routeKind == .app)
+        let finishCount = await captureLog.finishCount
+        #expect(finishCount == 1)
+    }
+
     @Test func secureFieldBlockPersistsNothing() async {
         let harness = makeHarness(
             deliveryOutcome: .blockedSecureField(culpritApp: "com.example.password")
@@ -372,5 +439,95 @@ struct DictationSessionTests {
         #expect(records.isEmpty)
         let phase = await harness.session.phase
         #expect(phase == .idle)
+    }
+}
+
+// MARK: - Burmese (v1.1)
+
+/// Cleanup that damages a transcript is worse than no cleanup: small local
+/// models corrupt Burmese rather than tidy it (docs/04 Appendix A).
+struct BurmeseCleanupGateTests {
+
+    @Test func autoDetectedBurmeseSkipsCleanup() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ရာသီဥတုကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(name: "Default", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 0)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.cleanup == .skipped(reason: .languageOptOut))
+        // The deterministic stages still ran, so the text is still improved.
+        #expect(record.deliveredText.hasSuffix("။"))
+    }
+
+    /// Pinning Burmese on a profile is the deliberate opt-in.
+    @Test func aProfilePinnedToBurmeseMayUseCleanup() async throws {
+        let provider = ScriptedCleanupProvider(
+            script: .fixed("ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+        )
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ရာသီဥတုကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(
+                name: "Burmese notes",
+                cleanupEnabled: true,
+                languageOverride: .pinned(.burmese)
+            ),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 1)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.deliveredText == "ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+    }
+
+    @Test func englishAndChineseAreUnaffectedByTheGate() {
+        #expect(
+            DictationSession.cleanupAllowed(for: .english, profile: Profile(name: "Default"))
+        )
+        #expect(
+            DictationSession.cleanupAllowed(for: .chinese, profile: Profile(name: "Default"))
+        )
+        #expect(
+            !DictationSession.cleanupAllowed(for: .burmese, profile: Profile(name: "Default"))
+        )
+    }
+
+    /// A Burmese dictation still runs the deterministic Burmese stages end to
+    /// end — that is the part of v1.1 that is genuinely complete.
+    @Test func burmeseGoesThroughTheBurmesePipeline() async throws {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ ရာသီဥတု ကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(
+                name: "Burmese",
+                formatting: FormattingOptions(myanmarDigits: .western)
+            )
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        // The terminal ။ was appended — no English capitalization or period.
+        #expect(delivered == ["ဒီနေ့ ရာသီဥတု ကောင်းတယ်။"])
+        let records = await harness.store.records
+        #expect(records.first?.language == .burmese)
     }
 }

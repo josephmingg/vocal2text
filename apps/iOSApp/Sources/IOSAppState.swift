@@ -83,19 +83,17 @@ final class IOSAppState: ObservableObject {
     private var phaseTask: Task<Void, Never>?
     private var controlTask: Task<Void, Never>?
 
+    /// Persisted as "auto" or a `Language` raw value, so a new language needs
+    /// no change here (docs/04 §2).
     var languageMode: LanguageMode {
         get {
-            switch languageModeRaw {
-            case "en": .pinned(.english)
-            case "zh": .pinned(.chinese)
-            default: .auto
-            }
+            guard let language = Language(rawValue: languageModeRaw) else { return .auto }
+            return .pinned(language)
         }
         set {
             switch newValue {
             case .auto: languageModeRaw = "auto"
-            case .pinned(.english): languageModeRaw = "en"
-            case .pinned(.chinese): languageModeRaw = "zh"
+            case .pinned(let language): languageModeRaw = language.rawValue
             }
         }
     }

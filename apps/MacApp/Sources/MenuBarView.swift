@@ -46,9 +46,12 @@ struct MenuBarView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Picker("Language", selection: languageSelection) {
-                    Text("Auto").tag(LanguageSelection.auto)
-                    Text("EN").tag(LanguageSelection.english)
-                    Text("中文").tag(LanguageSelection.chinese)
+                    Text("Auto").tag(LanguageMode.auto)
+                    // Driven by Language.allCases so adding a language is a
+                    // CoreModels change only (docs/04 §2).
+                    ForEach(Language.allCases, id: \.self) { language in
+                        Text(language.shortLabel).tag(LanguageMode.pinned(language))
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -126,28 +129,12 @@ struct MenuBarView: View {
 
     // MARK: - Language quick toggle
 
-    private enum LanguageSelection: Hashable {
-        case auto
-        case english
-        case chinese
-    }
-
-    private var languageSelection: Binding<LanguageSelection> {
+    /// `LanguageMode` is itself Hashable, so it doubles as the picker tag —
+    /// no parallel enum to keep in sync with the language list.
+    private var languageSelection: Binding<LanguageMode> {
         Binding(
-            get: {
-                switch settings.languageMode {
-                case .auto: return .auto
-                case .pinned(.english): return .english
-                case .pinned(.chinese): return .chinese
-                }
-            },
-            set: { selection in
-                switch selection {
-                case .auto: settings.languageMode = .auto
-                case .english: settings.languageMode = .pinned(.english)
-                case .chinese: settings.languageMode = .pinned(.chinese)
-                }
-            }
+            get: { settings.languageMode },
+            set: { settings.languageMode = $0 }
         )
     }
 
