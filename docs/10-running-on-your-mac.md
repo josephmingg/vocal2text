@@ -37,20 +37,54 @@ Onboarding walks the permissions in order:
 2. **Accessibility** — System Settings toggle (the app detects the grant live). This one
    permission covers both the hotkey listener and text insertion; Input Monitoring is never
    requested.
-3. **Fn key setup** (only if the Fn hotkey is selected): set System Settings → Keyboard →
-   "Press 🌐 key to" = **Do Nothing**, via the provided button. Also disable the "press Fn
-   twice for Dictation" shortcut if enabled. Prefer skipping this? Pick **Right ⌘** in
-   settings — same behavior, no system setting needed.
+3. **Fn key setup** (only if your push-to-talk key uses Fn / 🌐): set System Settings →
+   Keyboard → "Press 🌐 key to" = **Do Nothing**, via the provided button. Also disable the
+   "press Fn twice for Dictation" shortcut if enabled. Prefer skipping this? Pick
+   **Right ⌘** in settings — same behavior, no system setting needed.
 4. **Warm up** — downloads Whisper large-v3-turbo (~626 MB, one time, from Hugging Face)
    and loads it. Skippable; the first dictation triggers it otherwise.
 
-Then: focus any text field anywhere, **hold Fn, speak, release**. Text lands at the cursor.
+Then: focus any text field anywhere, **hold your push-to-talk key (Fn by default), speak,
+release**. Text lands at the cursor.
 
 - Double-tap the hotkey = hands-free lock (auto-stops at 15 min); tap to finish.
 - Esc while holding = cancel.
 - Menu-bar icon → language pin (Auto/EN/中文/မြန်မာ), profile pin, History, Settings.
 - AI cleanup is **off** until you flip the master switch in Settings → Cleanup (then pick
   Ollama/a custom endpoint; Apple Foundation Models arrives on the macOS 26 SDK build).
+
+## Choosing your push-to-talk key
+
+Settings → General → **Push-to-talk key**. Changes apply immediately — no relaunch.
+
+| Group | Options |
+|---|---|
+| Recommended | 🌐 Fn (default) · Right ⌘ |
+| Modifiers | Left ⌘ · Right ⌥ · Left ⌥ · Right ⌃ · Left ⌃ · Right ⇧ · Left ⇧ |
+| Function keys | F13 · F14 · F15 — for external keyboards |
+| Custom… | Records whatever you press |
+
+Every option behaves identically: hold to talk, double-tap to lock hands-free, Esc to
+cancel.
+
+**Custom…** opens a recorder — hold a single modifier and release it, or press a key
+together with the modifiers you want to hold. It refuses combinations that would break
+ordinary use, and says why: a bare letter, digit, punctuation, Space, Tab, Return or
+Delete (you would no longer be able to type it), Escape (reserved for cancelling a take),
+and Caps Lock (it toggles instead of reporting hold and release).
+
+Two caveats the picker surfaces for you:
+
+- **Single modifier keys keep working in password fields; key combinations do not.** While
+  a password field is focused, macOS secure input withholds key events from every app, but
+  modifier flag changes keep flowing (docs/03 §3.1). That is why 🌐 Fn and Right ⌘ are the
+  recommended pair, and why a recorded chord like ⌥Space is shown with an amber warning.
+- **Known system shortcuts are flagged when you record them** — ⌘Space (Spotlight),
+  ⌃Space (input source), ⌥Space (used by some apps), F11/F12 (system actions on many
+  keyboards).
+
+Updating from an earlier build keeps your key: the old Fn / Right-⌘ / Right-⌥ setting
+migrates to the matching preset on first launch, with nothing to do.
 
 ## What is verified vs. what awaits your hardware
 

@@ -12,12 +12,6 @@ import SessionKit
 @MainActor
 final class SettingsStore: ObservableObject, SessionConfiguring {
 
-    enum HotkeyChoice: String, CaseIterable {
-        case fnKey
-        case rightCommand
-        case rightOption
-    }
-
     // MARK: - Published settings
 
     /// Global cleanup master switch — ships OFF and gates stage 3 entirely
@@ -34,8 +28,11 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(stylePrompt, forKey: Keys.stylePrompt) }
     }
 
-    @Published var hotkeyChoice: HotkeyChoice {
-        didSet { Self.defaults.set(hotkeyChoice.rawValue, forKey: Keys.hotkeyChoice) }
+    /// The push-to-talk binding — a preset or a recorded custom combination
+    /// (docs/13). Persisted as JSON so the shape can grow without another
+    /// migration.
+    @Published var hotkeySpec: HotkeySpec {
+        didSet { Self.persist(hotkeySpec) }
     }
 
     @Published var audioRetentionDays: Int {
@@ -76,14 +73,21 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         cleanupMasterSwitch = defaults.object(forKey: Keys.cleanupMasterSwitch) as? Bool ?? false
         languageMode = Self.languageMode(from: defaults.string(forKey: Keys.languageMode))
         stylePrompt = defaults.string(forKey: Keys.stylePrompt) ?? ""
-        hotkeyChoice =
-            HotkeyChoice(rawValue: defaults.string(forKey: Keys.hotkeyChoice) ?? "") ?? .fnKey
+        let hotkey = Self.loadHotkeySpec(from: defaults)
+        hotkeySpec = hotkey.spec
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
         hudEnabled = defaults.object(forKey: Keys.hudEnabled) as? Bool ?? true
         soundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
+
+        // Settle the legacy hotkey migration on first launch so later reads are
+        // plain decodes. `didSet` does not fire from `init`, hence the explicit
+        // write; the legacy key is left in place for rollback (docs/13 §3).
+        if hotkey.needsPersisting {
+            Self.persist(hotkeySpec)
+        }
     }
 
     // MARK: - SessionConfiguring
@@ -125,11 +129,41 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         }
     }
 
+    /// Resolution order: the stored spec, then the legacy enum raw string
+    /// (migrated once), then the shipping default. A spec that fails to decode
+    /// — a rollback from a future format, or a corrupted value — falls through
+    /// to the same path rather than leaving the app without a hotkey.
+    private static func loadHotkeySpec(
+        from defaults: UserDefaults
+    ) -> (spec: HotkeySpec, needsPersisting: Bool) {
+        if let data = defaults.data(forKey: Keys.hotkeySpec),
+            let spec = try? JSONDecoder().decode(HotkeySpec.self, from: data),
+            // The recorder cannot produce an unbindable spec, but a hand-edited
+            // defaults value or a rollback from a future format can — and an
+            // Escape or Caps Lock binding would break cancelling and never fire.
+            HotkeySpec.validationError(for: spec.kind) == nil {
+            return (spec: spec, needsPersisting: false)
+        }
+        if let legacy = defaults.string(forKey: Keys.legacyHotkeyChoice),
+            let spec = HotkeySpec.migratingLegacyChoice(legacy) {
+            return (spec: spec, needsPersisting: true)
+        }
+        return (spec: HotkeySpec.default, needsPersisting: false)
+    }
+
+    private static func persist(_ spec: HotkeySpec) {
+        guard let data = try? JSONEncoder().encode(spec) else { return }
+        defaults.set(data, forKey: Keys.hotkeySpec)
+    }
+
     private enum Keys {
         static let cleanupMasterSwitch = "settings.cleanupMasterSwitch"
         static let languageMode = "settings.languageMode"
         static let stylePrompt = "settings.stylePrompt"
-        static let hotkeyChoice = "settings.hotkeyChoice"
+        static let hotkeySpec = "settings.hotkeySpec"
+        /// Pre-spec key, read once by the migration and never written again.
+        /// Left in the domain so downgrading to an older build still works.
+        static let legacyHotkeyChoice = "settings.hotkeyChoice"
         static let audioRetentionDays = "settings.audioRetentionDays"
         static let hudEnabled = "settings.hudEnabled"
         static let soundsEnabled = "settings.soundsEnabled"

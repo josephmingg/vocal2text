@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import AVFoundation
 import Combine
+import CoreModels
 import SwiftUI
 
 /// First-run onboarding, pragmatic v1 subset of FR-11.1:
@@ -63,7 +64,7 @@ struct OnboardingView: View {
         var built: [Step] = [.welcome, .microphone, .accessibility]
         // Fn coexistence page only when the chosen hotkey is Fn AND the Globe
         // key still has a system action bound (docs/03 §3.1).
-        if appState.settings.hotkeyChoice == .fnKey && FnKeySetup.globeKeyActionIsConfigured() {
+        if appState.settings.hotkeySpec.usesFnKey && FnKeySetup.globeKeyActionIsConfigured() {
             built.append(.fnSetup)
         }
         built.append(.modelDownload)
@@ -79,7 +80,7 @@ struct OnboardingView: View {
         case .accessibility: AccessibilityStep()
         case .fnSetup: FnSetupStep()
         case .modelDownload: ModelDownloadStep(appState: appState)
-        case .done: DoneStep()
+        case .done: DoneStep(hotkeyLabel: appState.settings.hotkeySpec.label)
         }
     }
 
@@ -308,6 +309,10 @@ private struct ModelDownloadStep: View {
 
 @MainActor
 private struct DoneStep: View {
+    /// Named, not "your dictation key" — the key is customizable now, and this
+    /// is the last screen before the user has to actually press it.
+    let hotkeyLabel: String
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("You're Set")
@@ -315,11 +320,13 @@ private struct DoneStep: View {
                 .bold()
             Text(
                 """
-                Hold your dictation key, speak, release. Double-tap for \
+                Hold **\(hotkeyLabel)**, speak, release. Double-tap it for \
                 hands-free lock; press Escape while recording to cancel. \
-                Everything else lives in the menu-bar icon.
+                You can change the key any time in Settings → General.
                 """
             )
+            Text("Everything else lives in the menu-bar icon.")
+                .foregroundStyle(.secondary)
         }
     }
 }

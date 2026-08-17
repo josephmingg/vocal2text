@@ -39,6 +39,12 @@ final class AppState: ObservableObject {
     let database: DatabaseStore?
     @Published var hudState: HUDState
 
+    /// Set by `AppDelegate` once the tap is built. Settings needs it to suspend
+    /// the global hotkey while the user records a replacement — otherwise
+    /// pressing the current key in the recorder starts a real dictation behind
+    /// the sheet.
+    weak var hotkeyMonitor: HotkeyMonitor?
+
     /// Retained so onboarding's "Warm up now" can trigger the guided model
     /// download/load explicitly (FR-2.4).
     private let engine: WhisperKitEngine
