@@ -9,8 +9,9 @@ import TextPipeline
 /// delivery, persistence, configuration) is injected via `Dependencies`, so
 /// the whole machine runs on Linux under test.
 ///
-/// Flow per take: press resolves and pins the profile (FR-3.6), starts audio,
-/// and fires the cleanup prewarm; release stops audio and runs
+/// Flow per take: press starts audio, pins the profile (FR-3.6), and fires
+/// the cleanup prewarm — audio first, the other two concurrently beside it;
+/// release stops audio, joins the pinned profile, and runs
 /// transcribe → stage 1 → stage 2 (dictionary) → stage 3 (cleanup, optional)
 /// → stage 4 → deliver → save, measuring each stage with `ContinuousClock`.
 public actor DictationSession {
@@ -87,10 +88,19 @@ public actor DictationSession {
 
     // MARK: - State
 
+    /// The press-time profile resolution, still in flight. Resolution can
+    /// block on platform I/O (macOS reads the frontmost browser's tab URL via
+    /// an osascript round-trip, up to 1.5 s), so it runs concurrently with
+    /// audio start and is joined at release — the profile is not needed until
+    /// then. It stays a *press-time* snapshot either way (FR-3.6): the
+    /// frontmost context is sampled when the task starts, not when it is read.
+    typealias PendingResolution = Task<
+        (profile: Profile, routeKind: TranscriptRecord.RouteKind, pressTimeBundleID: String?),
+        Never
+    >
+
     private struct ActiveTake {
-        var profile: Profile
-        var routeKind: TranscriptRecord.RouteKind
-        var pressTimeBundleID: String?
+        var resolution: PendingResolution
         var capture: CaptureSession
         var pressedAt: ContinuousClock.Instant
     }
@@ -158,10 +168,15 @@ public actor DictationSession {
 
     // MARK: - Press lifecycle
 
-    /// Hotkey press: resolve and pin the profile (FR-3.6), fire the cleanup
-    /// prewarm, and start audio capture. No-op unless idle. If audio fails to
-    /// start there is nothing to persist; the error lands in `lastError` and
-    /// the session returns to idle.
+    /// Hotkey press: start audio capture, pin the profile (FR-3.6), and fire
+    /// the cleanup prewarm. No-op unless idle. If audio fails to start there
+    /// is nothing to persist; the error lands in `lastError` and the session
+    /// returns to idle.
+    ///
+    /// Capture start is the *first* thing awaited. Profile resolution and the
+    /// prewarm both run concurrently beside it, because either can block on
+    /// platform I/O and any millisecond spent before the mic opens is speech
+    /// the user already spoke and will never get back.
     public func pressBegan() async {
         guard phaseValue == .idle else { return }
         lastError = nil
@@ -169,7 +184,8 @@ public actor DictationSession {
         pendingCancel = false
         transition(to: .arming)
 
-        let resolved = await deps.profileResolution()
+        let resolve = deps.profileResolution
+        let resolution = PendingResolution { await resolve() }
 
         let prewarm = deps.prewarmCleanup
         prewarmTask = Task { await prewarm() }
@@ -178,9 +194,7 @@ public actor DictationSession {
         do {
             let capture = try await deps.audio.start()
             take = ActiveTake(
-                profile: resolved.profile,
-                routeKind: resolved.routeKind,
-                pressTimeBundleID: resolved.pressTimeBundleID,
+                resolution: resolution,
                 capture: capture,
                 pressedAt: pressedAt
             )
@@ -200,6 +214,7 @@ public actor DictationSession {
             take = nil
             pendingRelease = nil
             pendingCancel = false
+            resolution.cancel()
             lastError = .audioUnreadable("capture failed to start: \(error)")
             transition(to: .idle)
         }
@@ -227,6 +242,7 @@ public actor DictationSession {
         }
         guard case .recording = phaseValue, let active = take else { return }
         take = nil
+        active.resolution.cancel()
         await active.capture.cancel()
         transition(to: .cancelled)
         transition(to: .idle)
@@ -249,12 +265,18 @@ public actor DictationSession {
         // stands in for "speech detected" — a sub-500 ms hold is discarded
         // silently only when the audio is also shorter than 500 ms.
         if held < .milliseconds(500), audio.durationSeconds < 0.5 {
+            active.resolution.cancel()
             transition(to: .idle)
             return
         }
 
+        // Join the press-time resolution started in `pressBegan`. It has had
+        // the whole utterance to finish, so this is normally already complete.
+        let resolved = await active.resolution.value
+        let profile = resolved.profile
+
         let languageMode: LanguageMode
-        if let override = active.profile.languageOverride {
+        if let override = profile.languageOverride {
             languageMode = override
         } else {
             languageMode = await deps.config.globalLanguageMode
@@ -277,7 +299,7 @@ public actor DictationSession {
         let transcriptionSeconds = Self.seconds(transcriptionStart.duration(to: clock.now))
 
         let language = result.detectedLanguage
-        let formatting = active.profile.formatting
+        let formatting = profile.formatting
 
         let dictionaryStart = clock.now
         let normalized = Stage1Normalizer.normalize(
@@ -296,8 +318,10 @@ public actor DictationSession {
         let masterSwitch = await deps.config.cleanupMasterSwitch
         if !masterSwitch {
             cleanupOutcome = .skipped(reason: .masterSwitchOff)
-        } else if !active.profile.cleanupEnabled {
+        } else if !profile.cleanupEnabled {
             cleanupOutcome = .skipped(reason: .profileDisabled)
+        } else if !Self.cleanupAllowed(for: language, profile: profile) {
+            cleanupOutcome = .skipped(reason: .languageOptOut)
         } else if let pipeline = deps.cleanup {
             transition(to: .cleaning)
             // History must record what actually ran (FR-5.1). Only one pipeline
@@ -306,7 +330,7 @@ public actor DictationSession {
             // (docs/11).
             let providerID = deps.cleanupProviderID
             let stylePrompt: String
-            if active.profile.ignoresGlobalStyle {
+            if profile.ignoresGlobalStyle {
                 stylePrompt = ""
             } else {
                 stylePrompt = await deps.config.globalStylePrompt
@@ -315,7 +339,7 @@ public actor DictationSession {
             let request = CleanupRequest(
                 text: stage2Text,
                 language: language,
-                profilePrompt: active.profile.promptText,
+                profilePrompt: profile.promptText,
                 stylePrompt: stylePrompt,
                 protectedTerms: writtenForms
             )
@@ -343,7 +367,7 @@ public actor DictationSession {
 
         transition(to: .delivering)
         let context = DeliveryContext(
-            pressTimeAppBundleID: active.pressTimeBundleID,
+            pressTimeAppBundleID: resolved.pressTimeBundleID,
             isLockMode: isLockMode,
             formatting: formatting
         )
@@ -358,7 +382,7 @@ public actor DictationSession {
             return
         }
 
-        var targetBundleID = active.pressTimeBundleID
+        var targetBundleID = resolved.pressTimeBundleID
         if case .inserted(_, let appBundleID) = delivery, let appBundleID {
             targetBundleID = appBundleID
         }
@@ -371,8 +395,8 @@ public actor DictationSession {
             deliveredText: formatted,
             durationSeconds: audio.durationSeconds,
             targetAppBundleID: targetBundleID,
-            profileName: active.profile.name,
-            routeKind: active.routeKind,
+            profileName: profile.name,
+            routeKind: resolved.routeKind,
             cleanup: cleanupOutcome,
             timings: TimingBreakdown(
                 captureSeconds: captureSeconds,
@@ -390,6 +414,23 @@ public actor DictationSession {
     }
 
     // MARK: - Helpers
+
+    /// Whether stage 3 may run for this language under this profile.
+    ///
+    /// Some languages are worse off with cleanup than without it: the small
+    /// local models this app targets corrupt Burmese rather than tidy it
+    /// (docs/04 Appendix A), and a cleanup step that damages the transcript is
+    /// strictly worse than no cleanup at all. Those languages therefore stay
+    /// on the deterministic stages by default.
+    ///
+    /// Pinning the language on a profile is the opt-in. It is an explicit,
+    /// per-profile act — "this profile is for Burmese" — so a user who wants
+    /// to experiment with a capable model has a way in, while someone who
+    /// merely code-switches into Burmese mid-session never gets surprised.
+    static func cleanupAllowed(for language: Language, profile: Profile) -> Bool {
+        if language.allowsCleanupByDefault { return true }
+        return profile.languageOverride?.pinnedLanguage == language
+    }
 
     /// Maps a `CleanupPipeline` fallback reason onto history metadata: the
     /// "validator: <rule>" prefix and the protected-terms guard are validator

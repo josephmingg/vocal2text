@@ -12,21 +12,49 @@ actor CaptureLog {
     func recordCancel() { cancelCount += 1 }
 }
 
+/// A one-shot gate: `waitForOpen` suspends until someone calls `open`.
+/// Used to assert ordering between the press path's concurrent steps.
+actor CaptureGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let resumed = waiters
+        waiters = []
+        for waiter in resumed { waiter.resume() }
+    }
+
+    func waitForOpen() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
 /// `AudioCapturing` fake: `start` always succeeds, the chunk stream is empty
 /// (the transcribe-on-release flow never reads it), and `finish` returns the
 /// scripted utterance.
 struct ScriptedAudioCapturing: AudioCapturing {
     let chunk: PCMChunk
     let log: CaptureLog
+    /// Fired inside `start()`, so tests can observe when capture went live.
+    let onStart: @Sendable () async -> Void
 
-    init(chunk: PCMChunk, log: CaptureLog = CaptureLog()) {
+    init(
+        chunk: PCMChunk,
+        log: CaptureLog = CaptureLog(),
+        onStart: @escaping @Sendable () async -> Void = {}
+    ) {
         self.chunk = chunk
         self.log = log
+        self.onStart = onStart
     }
 
     func start() async throws -> CaptureSession {
         let chunk = self.chunk
         let log = self.log
+        await onStart()
         return CaptureSession(
             chunks: AsyncStream { continuation in
                 continuation.finish()

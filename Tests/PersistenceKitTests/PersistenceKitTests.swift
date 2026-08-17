@@ -4,6 +4,7 @@ import PersistenceKit
 import Testing
 
 #if canImport(GRDB)
+import GRDB
 
 private func makeStore() throws -> (store: DatabaseStore, path: String) {
     let path = FileManager.default.temporaryDirectory
@@ -236,6 +237,104 @@ private func makeRecord(
 
     try store.deleteProfile(id: profile.id)
     #expect(try store.profiles().isEmpty)
+}
+
+/// A row written by a newer build (an unrecognized `language`) or a mangled
+/// JSON column must cost the user that one row, not the whole history list.
+@Test func unreadableRowIsSkippedRatherThanFailingTheWholeList() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let good = makeRecord(rawText: "readable", createdAt: Date(timeIntervalSince1970: 1_000))
+    let fromTheFuture = makeRecord(
+        rawText: "written by a later version", createdAt: Date(timeIntervalSince1970: 2_000)
+    )
+    try store.save(good)
+    try store.save(fromTheFuture)
+
+    // Rewrite one row's language to a value this build does not know.
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "UPDATE transcript SET language = ? WHERE id = ?",
+            arguments: ["xx", fromTheFuture.id.uuidString]
+        )
+    }
+
+    let all = try store.allTranscripts()
+    #expect(all.map(\.id) == [good.id])
+
+    // Search follows the same rule.
+    let found = try store.search("readable")
+    #expect(found.map(\.id) == [good.id])
+
+    // Asking for that row by id still reports the problem.
+    #expect(throws: (any Error).self) { try store.transcript(id: fromTheFuture.id) }
+}
+
+/// "Delete All" must remove rows this build cannot decode — they are exactly
+/// the ones the user can no longer see or delete individually, while their
+/// raw text still sits in the file.
+@Test func deleteAllTranscriptsRemovesUndecodableRowsToo() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let visible = makeRecord(rawText: "readable", createdAt: Date(timeIntervalSince1970: 1_000))
+    let fromTheFuture = makeRecord(
+        rawText: "private dictation", createdAt: Date(timeIntervalSince1970: 2_000)
+    )
+    try store.save(visible)
+    try store.save(fromTheFuture)
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "UPDATE transcript SET language = ? WHERE id = ?",
+            arguments: ["xx", fromTheFuture.id.uuidString]
+        )
+    }
+    // The forged row is invisible to the list query…
+    #expect(try store.allTranscripts().count == 1)
+
+    // …but Delete All still takes it.
+    #expect(try store.deleteAllTranscripts() == 2)
+
+    let remaining = try DatabaseQueue(path: path).read { db in
+        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript") ?? -1
+    }
+    #expect(remaining == 0)
+}
+
+/// One profile document a newer build wrote (or one mangled document) must
+/// not silently discard the user's whole profile set — the app treats a load
+/// failure as "fall back to built-ins".
+@Test func unreadableProfileRowIsSkippedNotFatal() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let good = Profile(name: "Email")
+    try store.save(good)
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "INSERT INTO profile (id, name, document) VALUES (?, ?, ?)",
+            arguments: [UUID().uuidString, "Broken", "not json"]
+        )
+    }
+    #expect(try store.profiles() == [good])
+}
+
+/// Same rule for the dictionary: one bad entry must not empty the whole
+/// dictionary (the session reads it on every single dictation).
+@Test func unreadableDictionaryRowIsSkippedNotFatal() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let good = DictionaryEntry(spoken: "cloud code", written: "Claude Code")
+    try store.save(good)
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "INSERT INTO dictionary_entry (id, document) VALUES (?, ?)",
+            arguments: [UUID().uuidString, "{broken"]
+        )
+    }
+    #expect(try store.dictionaryEntries() == [good])
 }
 
 #else

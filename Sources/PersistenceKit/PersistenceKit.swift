@@ -154,6 +154,8 @@ public final class DatabaseStore: Sendable {
         }
     }
 
+    /// Fetching one row surfaces the decode failure — the caller asked for
+    /// exactly this record and deserves to know it is unreadable.
     public func transcript(id: UUID) throws -> TranscriptRecord? {
         try dbQueue.read { db -> TranscriptRecord? in
             let row = try Row.fetchOne(
@@ -171,13 +173,27 @@ public final class DatabaseStore: Sendable {
                 db,
                 sql: "SELECT \(Self.transcriptColumns) FROM transcript ORDER BY createdAt DESC"
             )
-            return try rows.map(Self.record(from:))
+            return Self.decodedRecords(from: rows)
         }
     }
 
     public func deleteTranscript(id: UUID) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM transcript WHERE id = ?", arguments: [id.uuidString])
+        }
+    }
+
+    /// Removes every transcript row, decodable or not, and returns the count.
+    ///
+    /// Deliberately one SQL statement rather than delete-by-enumerated-id:
+    /// `allTranscripts()` skips rows this build cannot decode, so enumerating
+    /// it would silently spare exactly the rows the user can no longer see —
+    /// while their raw text still sits in the file. "Delete All" must mean
+    /// all. (The FTS delete triggers fire per row either way.)
+    public func deleteAllTranscripts() throws -> Int {
+        try dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM transcript")
+            return db.changesCount
         }
     }
 
@@ -192,19 +208,17 @@ public final class DatabaseStore: Sendable {
             var seen = Set<UUID>()
             var results: [TranscriptRecord] = []
 
-            func collect(_ rows: [Row]) throws {
-                for row in rows {
-                    let record = try Self.record(from: row)
-                    if seen.insert(record.id).inserted {
-                        results.append(record)
-                    }
+            func collect(_ rows: [Row]) {
+                for record in Self.decodedRecords(from: rows)
+                where seen.insert(record.id).inserted {
+                    results.append(record)
                 }
             }
 
             // Quote as one FTS5 phrase so user text is never parsed as query syntax.
             let phrase = "\"" + trimmed.replacingOccurrences(of: "\"", with: "\"\"") + "\""
 
-            try collect(try Row.fetchAll(
+            collect(try Row.fetchAll(
                 db,
                 sql: """
                     SELECT \(Self.transcriptColumns) FROM transcript
@@ -217,7 +231,7 @@ public final class DatabaseStore: Sendable {
 
             // FTS5's trigram tokenizer needs at least three characters to match.
             if trimmed.count >= 3 {
-                try collect(try Row.fetchAll(
+                collect(try Row.fetchAll(
                     db,
                     sql: """
                         SELECT \(Self.transcriptColumns) FROM transcript
@@ -237,7 +251,7 @@ public final class DatabaseStore: Sendable {
                     .replacingOccurrences(of: "%", with: "\\%")
                     .replacingOccurrences(of: "_", with: "\\_")
                 let pattern = "%" + escaped + "%"
-                try collect(try Row.fetchAll(
+                collect(try Row.fetchAll(
                     db,
                     sql: """
                         SELECT \(Self.transcriptColumns) FROM transcript
@@ -269,13 +283,13 @@ public final class DatabaseStore: Sendable {
 
     public func dictionaryEntries() throws -> [DictionaryEntry] {
         try dbQueue.read { db -> [DictionaryEntry] in
-            let documents = try String.fetchAll(
+            let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT document FROM dictionary_entry ORDER BY rowid"
+                sql: "SELECT id, document FROM dictionary_entry ORDER BY rowid"
             )
-            return try documents.map {
-                try Self.decodeJSON(DictionaryEntry.self, from: $0, column: "dictionary_entry.document")
-            }
+            return Self.decodedDocuments(
+                DictionaryEntry.self, from: rows, column: "dictionary_entry.document"
+            )
         }
     }
 
@@ -306,13 +320,11 @@ public final class DatabaseStore: Sendable {
 
     public func profiles() throws -> [Profile] {
         try dbQueue.read { db -> [Profile] in
-            let documents = try String.fetchAll(
+            let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT document FROM profile ORDER BY name, rowid"
+                sql: "SELECT id, document FROM profile ORDER BY name, rowid"
             )
-            return try documents.map {
-                try Self.decodeJSON(Profile.self, from: $0, column: "profile.document")
-            }
+            return Self.decodedDocuments(Profile.self, from: rows, column: "profile.document")
         }
     }
 
@@ -344,6 +356,46 @@ public final class DatabaseStore: Sendable {
             return try JSONDecoder().decode(type, from: data)
         } catch {
             throw DatabaseStoreError.invalidJSON(column: column)
+        }
+    }
+
+    /// Decodes a list result, dropping rows that will not decode instead of
+    /// failing the whole query.
+    ///
+    /// A row can be unreadable because a newer build wrote an enum case this
+    /// one does not know (a `language` from a later version, say) or because
+    /// a JSON column got mangled. Either way, one bad row must not make the
+    /// user's entire history disappear — everything else in the table is
+    /// still perfectly good.
+    /// The `decodedRecords` rule applied to a JSON-document table: one row a
+    /// newer build wrote (or one mangled document) must not hide every other
+    /// row. Skipping is safe for these tables specifically because nothing
+    /// destructive enumerates them — the transcript Delete-All lesson: any
+    /// future "delete all" must be one SQL statement, never
+    /// fetch-decode-delete-each.
+    private static func decodedDocuments<T: Decodable>(
+        _ type: T.Type, from rows: [Row], column: String
+    ) -> [T] {
+        rows.compactMap { row in
+            do {
+                return try decodeJSON(type, from: row["document"], column: column)
+            } catch {
+                let id: String? = row["id"]
+                print("Vocal: skipping unreadable \(column) row \(id ?? "<unknown>"): \(error)")
+                return nil
+            }
+        }
+    }
+
+    private static func decodedRecords(from rows: [Row]) -> [TranscriptRecord] {
+        rows.compactMap { row in
+            do {
+                return try record(from: row)
+            } catch {
+                let id: String? = row["id"]
+                print("Vocal: skipping unreadable history row \(id ?? "<unknown>"): \(error)")
+                return nil
+            }
         }
     }
 
