@@ -1,6 +1,6 @@
 # Vocal — developer entry points. CI and humans use the same commands.
 
-.PHONY: test build generate mac clean reset-tcc
+.PHONY: test build generate generate-free mac clean reset-tcc
 
 # Build + run all package tests (pure targets work on Linux; full graph on macOS).
 test:
@@ -12,6 +12,20 @@ build:
 # Generate the Xcode project for the app shells (requires: brew install xcodegen).
 generate:
 	xcodegen generate
+
+# Generate an Xcode project signable with a FREE Apple ID.
+#
+# A personal team cannot provision App Groups, and signing fails outright
+# rather than degrading — so this variant drops every App Group entitlement
+# plus the two extensions that exist only to cross that boundary (keyboard,
+# share sheet). Main-app dictation, the Action Button, history, dictionary and
+# the Dynamic Island all survive; see docs/14 §1a.
+#
+# Produces VocalFree.xcodeproj, beside (not replacing) the full Vocal.xcodeproj.
+generate-free:
+	python3 scripts/free-account-spec.py project.yml project-free.yml
+	xcodegen generate --spec project-free.yml
+	@echo "✅ VocalFree.xcodeproj — open it, set your Team on VocalIOS + VocalWidgets, Run."
 
 # Build the macOS app from the command line after `make generate`.
 mac: generate
@@ -32,7 +46,7 @@ share: install
 	@echo "✅ ~/Desktop/Vocal.zip ready to AirDrop."
 
 clean:
-	rm -rf .build Vocal.xcodeproj
+	rm -rf .build Vocal.xcodeproj VocalFree.xcodeproj project-free.yml
 
 # Development hygiene: clear wedged TCC grants after signing changes (docs/03 §3.4).
 # Both bundle IDs. Debug runs from Xcode are com.vocal.mac.dev, but `make

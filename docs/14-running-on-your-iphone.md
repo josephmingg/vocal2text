@@ -4,6 +4,10 @@ Companion to `docs/10-running-on-your-mac.md`. Everything below needs a
 physical iPhone, a Mac with Xcode, and your Apple ID — none of it can be done
 in CI, which is why it is a checklist rather than a claim.
 
+Sections 2–4 (keyboard, share sheet) assume a paid Developer Program build.
+On a free Apple ID they are unreachable by construction, not by oversight —
+see §1.
+
 ## 0. What CI already proves, and what it does not
 
 Green CI means the package tests pass on Linux and macOS, and that
@@ -15,6 +19,51 @@ lands in WeChat. Those are the acceptance criteria AC-i1 … AC-i9 in
 
 ## 1. First build to the device
 
+Which of the two builds you want is decided by your Apple account, so start
+there.
+
+**A free (personal) Apple ID cannot provision App Groups.** This is not a
+degradation you can shrug off: all four iOS targets declare that entitlement,
+so Xcode fails signing outright — *"Personal development teams do not support
+the App Groups capability"* — and nothing installs. Free provisioning profiles
+also expire after 7 days, so the app stops launching until you re-run it from
+Xcode.
+
+| | Free Apple ID (`make generate-free`) | Paid Developer Program (`make generate`) |
+|---|---|---|
+| Main-app dictation, Action Button, history, dictionary | ✅ | ✅ |
+| Dynamic Island / Lock Screen indicator | ✅ | ✅ |
+| Keyboard (mode D2b) | ❌ | ✅ |
+| Share-sheet voice-note import | ❌ | ✅ |
+| Re-install every | 7 days | 1 year |
+
+### 1a. Free Apple ID
+
+```sh
+brew install xcodegen        # once
+make generate-free           # writes VocalFree.xcodeproj
+open VocalFree.xcodeproj
+```
+
+`scripts/free-account-spec.py` derives the spec from `project.yml`, dropping
+every App Group entitlement and the two extensions that exist only to cross
+that boundary. The widget stays: the Dynamic Island reads its state from
+ActivityKit, never from the shared container, so it needs no entitlement.
+
+No source changes are involved — the app already treats an unreachable
+container as "no bridge" (`BridgeStore.appGroup()` returns nil,
+`isBridgeAvailable` goes false), and the Keyboard settings screen says so
+rather than failing silently.
+
+Set **Team** on `VocalIOS` and `VocalWidgets`, pick your iPhone, Run. Then skip
+to §1c; §2 and §3 do not apply.
+
+What you lose is one paste: dictate in the app, the transcript auto-copies, and
+you paste it into WeChat with the system keyboard. That is mode D1 in docs/02,
+and it is the flow that shipped in v0.1 and has the most road behind it.
+
+### 1b. Paid Developer Program
+
 ```sh
 brew install xcodegen        # once
 make generate                # writes Vocal.xcodeproj
@@ -25,7 +74,7 @@ open Vocal.xcodeproj
 of the four iOS targets — `VocalIOS`, `VocalKeyboard`, `VocalShareExt`,
 `VocalWidgets` — open Signing & Capabilities and:
 
-1. Set **Team** to your personal team.
+1. Set **Team** to your team.
 2. Confirm **App Groups** is present and `group.com.vocal.shared` is ticked.
    Xcode registers the group on first use; if the checkbox is empty, press `+`
    and type it exactly. All four targets must agree — the identifier lives in
@@ -34,12 +83,11 @@ of the four iOS targets — `VocalIOS`, `VocalKeyboard`, `VocalShareExt`,
 
 Then pick your iPhone as the run destination and run the `VocalIOS` scheme.
 
-A free (non-paid) Apple Developer account can sign this, but a free provisioning
-profile expires after 7 days and **App Groups are not available on free
-accounts** — without a paid membership the keyboard cannot reach the app and
-`CaptureSessionCoordinator.isBridgeAvailable` will be false (the Keyboard
-settings screen says so rather than failing silently). If you are not enrolled,
-the main-app dictation flow (mode D1) still works completely.
+### 1c. Trusting the build
+
+The phone refuses to launch a sideloaded app until you allow it: **Settings →
+General → VPN & Device Management → Developer App → Trust**. First install
+only.
 
 ### First run on device
 
@@ -132,7 +180,7 @@ one the 5-minute default is protecting.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Keyboard says "Needs Full Access" | Full Access off | §2 step 2 |
-| Keyboard settings say "Unavailable" | App Group entitlement missing or unprovisioned | §1 step 2; needs a paid account |
+| Keyboard settings say "Unavailable" | App Group entitlement missing or unprovisioned | Expected on a free-account build (§1a). On a paid build, §1b step 2 |
 | Mic key always says "Open Vocal" | No armed session, or the app was killed so its status went stale (90 s) | Arm again; leave Vocal running |
 | Nothing inserts after a take | Reply arrived for a different request, or older than 2 min | Both are deliberate guards — retry; the transcript is still in History |
 | Share sheet has no "Save to Vocal" | The item is not `public.audio` (e.g. a video container) | Out of scope this pass |
