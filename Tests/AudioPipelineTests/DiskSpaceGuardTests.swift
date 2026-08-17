@@ -100,3 +100,93 @@ import Testing
     #expect(AudioRetentionPolicy.isExpired(createdAt: nil, retentionDays: 30))
     #expect(!AudioRetentionPolicy.isExpired(createdAt: nil, retentionDays: AudioRetentionPolicy.forever))
 }
+
+// MARK: - Cancelled-take recovery (FR-1.6)
+
+private func makeRecoveryDirectory() -> URL {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("vocal-recovery-test-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
+}
+
+@discardableResult
+private func writeSidecar(
+    in directory: URL,
+    samples: [Float],
+    modified: Date = Date()
+) -> URL {
+    let url = directory
+        .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString)
+        .appendingPathExtension("pcmf32")
+    let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    try? data.write(to: url)
+    try? FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+    return url
+}
+
+@Test func samplesRoundTripThroughASidecar() throws {
+    let directory = makeRecoveryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let original: [Float] = [0, 0.25, -0.5, 0.75, -1]
+    let url = writeSidecar(in: directory, samples: original)
+
+    let read = try #require(RecoveryStore.samples(at: url))
+    #expect(read == original)
+}
+
+@Test func theNewestRecoverableTakeWins() throws {
+    let directory = makeRecoveryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let oneSecond = [Float](repeating: 0.1, count: PCMChunk.sampleRate)
+    let now = Date()
+    writeSidecar(in: directory, samples: oneSecond, modified: now.addingTimeInterval(-600))
+    let newest = writeSidecar(in: directory, samples: oneSecond, modified: now.addingTimeInterval(-60))
+
+    let candidate = try #require(RecoveryStore.latestRecoverable(in: directory, now: now))
+    #expect(candidate.url == newest)
+    #expect(abs(candidate.durationSeconds - 1.0) < 0.01)
+}
+
+@Test func takesPastTheRecoveryWindowAreNotOffered() {
+    let directory = makeRecoveryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let now = Date()
+    // 25 hours old: outside the FR-1.6 window the reaper enforces.
+    writeSidecar(
+        in: directory,
+        samples: [Float](repeating: 0.1, count: PCMChunk.sampleRate),
+        modified: now.addingTimeInterval(-25 * 60 * 60)
+    )
+    #expect(RecoveryStore.latestRecoverable(in: directory, now: now) == nil)
+}
+
+@Test func accidentalTapsAreNotOfferedAsRecoverableTakes() {
+    let directory = makeRecoveryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    // 0.2 s — the tail of a mis-tap, not a take worth handing back.
+    writeSidecar(in: directory, samples: [Float](repeating: 0.1, count: PCMChunk.sampleRate / 5))
+    #expect(RecoveryStore.latestRecoverable(in: directory) == nil)
+}
+
+@Test func anEmptyDirectoryOffersNothing() {
+    let directory = makeRecoveryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    #expect(RecoveryStore.latestRecoverable(in: directory) == nil)
+}
+
+@Test func discardingRemovesTheSidecarSoItIsOfferedOnlyOnce() {
+    let directory = makeRecoveryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let url = writeSidecar(
+        in: directory, samples: [Float](repeating: 0.1, count: PCMChunk.sampleRate)
+    )
+    #expect(RecoveryStore.latestRecoverable(in: directory) != nil)
+    RecoveryStore.discard(at: url)
+    #expect(RecoveryStore.latestRecoverable(in: directory) == nil)
+}

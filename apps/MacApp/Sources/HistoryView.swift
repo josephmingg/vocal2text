@@ -94,6 +94,17 @@ struct HistoryView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    // A recovered take was cancelled at the time and delivered
+                    // later, so its timestamp is not when it was spoken — say
+                    // so rather than let it read as an ordinary dictation.
+                    if record.source == .recovered {
+                        Text("Recovered")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
                 }
                 Text(record.deliveredText)
                     .lineLimit(2)

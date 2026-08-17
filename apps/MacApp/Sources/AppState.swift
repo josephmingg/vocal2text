@@ -108,6 +108,12 @@ final class AppState: ObservableObject {
     /// resolver, the menu-bar pin picker, and the editor agree on UUIDs
     /// (FR-8.3).
     let profileStore: ProfileStore
+    /// The cancelled (or crash-interrupted) take still inside its 24 h window,
+    /// if any — what the menu bar offers back (FR-1.6, docs/11 G9). Refreshed
+    /// at launch, when a take is cancelled, and whenever the menu is opened;
+    /// nil while a take is in flight, since that take's own sidecar is on disk
+    /// and is not something to hand back.
+    @Published private(set) var recoverableTake: RecoveryStore.Candidate? = nil
 
     init() {
         let settings = SettingsStore()
@@ -257,6 +263,9 @@ final class AppState: ObservableObject {
         // Enforce the retention window on the recordings already on disk.
         Self.sweepRetainedAudio(retentionDays: settings.audioRetentionDays)
         startPhaseMirror()
+        // A take interrupted by a crash or a quit leaves its sidecar behind, so
+        // the offer has to survive a relaunch to be worth anything (FR-1.6).
+        refreshRecoverableTake()
     }
 
     /// Appends one captured microphone level, keeping the most recent
@@ -335,6 +344,65 @@ final class AppState: ObservableObject {
         enqueueControl { session in await session.cancel() }
     }
 
+    // MARK: - Cancelled-take recovery (FR-1.6, docs/11 G9)
+
+    /// Rescans for a recoverable take. The scan lists and stats a directory, so
+    /// it runs off the main actor even though it is small.
+    func refreshRecoverableTake() {
+        // A take in flight owns the newest sidecar; offering it back mid-press
+        // would hand the user the recording they are still making.
+        guard isIdle else {
+            recoverableTake = nil
+            return
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            let candidate = RecoveryStore.latestRecoverable()
+            await MainActor.run {
+                guard let self, self.isIdle else { return }
+                self.recoverableTake = candidate
+            }
+        }
+    }
+
+    /// Runs the newest cancelled take back through the full pipeline, exactly
+    /// as if it had never been cancelled, and delivers it into whatever is
+    /// frontmost now.
+    ///
+    /// The recording is deleted only once the session reports it consumed —
+    /// "recover" that loses the audio on a transcription failure would be a
+    /// worse offer than not making one.
+    func recoverLastCancelledTake() {
+        guard let candidate = recoverableTake else { return }
+        // Clear the offer immediately: the scan is asynchronous, and a second
+        // click before it finishes would run the same audio twice.
+        recoverableTake = nil
+        let url = candidate.url
+        enqueueControl { session in
+            guard let samples = RecoveryStore.samples(at: url), !samples.isEmpty else {
+                // Unreadable or empty: nothing to recover and nothing to keep.
+                RecoveryStore.discard(at: url)
+                return
+            }
+            if await session.recover(audio: PCMChunk(samples: samples)) {
+                RecoveryStore.discard(at: url)
+            }
+        }
+        // Re-offer the take if the session declined it or transcription failed.
+        let pending = controlTask
+        Task { [weak self] in
+            await pending?.value
+            self?.refreshRecoverableTake()
+        }
+    }
+
+    /// Whether no take is currently being recorded or processed.
+    private var isIdle: Bool {
+        switch hudState.mode {
+        case .listening, .processing: return false
+        case .hidden, .error, .notice: return true
+        }
+    }
+
     /// Chains session control calls so hotkey edges arrive in press order —
     /// independently spawned Tasks would race a release past its press.
     private func enqueueControl(
@@ -376,6 +444,10 @@ final class AppState: ObservableObject {
             hudState.mode = .hidden
             hudState.partialText = ""
             hudState.levels = []
+            // The take just became recoverable; the offer has to appear without
+            // waiting for the next launch. Ordered after `mode` so the idle
+            // check inside sees the take as over (FR-1.6).
+            refreshRecoverableTake()
         case .idle:
             // The take is over: any first-run hint still in flight is stale
             // (docs/11 G16).

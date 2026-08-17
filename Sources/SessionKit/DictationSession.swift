@@ -338,6 +338,63 @@ public actor DictationSession {
         // Join the press-time resolution started in `pressBegan`. It has had
         // the whole utterance to finish, so this is normally already complete.
         let resolved = await active.resolution.value
+        _ = await runPipeline(
+            audio: audio,
+            resolved: resolved,
+            isLockMode: isLockMode,
+            captureSeconds: captureSeconds,
+            source: .dictation
+        )
+    }
+
+    /// Recovers a cancelled take's audio (FR-1.6, docs/11 G9): the identical
+    /// post-capture pipeline — transcribe, dictionary, cleanup gating,
+    /// formatting, delivery, history — so a recovered take is indistinguishable
+    /// from one that was never cancelled, except for its `source`.
+    ///
+    /// The profile is resolved fresh: the take is being delivered *now*, into
+    /// whatever is frontmost now, so pinning the app from a press minutes ago
+    /// would route by a context that no longer exists.
+    ///
+    /// Returns whether the audio was consumed. `false` means the take is still
+    /// worth another attempt later — the session was busy, or transcription
+    /// failed — so the caller must keep the recording rather than discard it.
+    @discardableResult
+    public func recover(audio: PCMChunk) async -> Bool {
+        guard phaseValue == .idle, audio.durationSeconds > 0 else { return false }
+        lastError = nil
+        transition(to: .transcribing)
+        let resolved = await deps.profileResolution()
+        return await runPipeline(
+            audio: audio,
+            resolved: resolved,
+            isLockMode: false,
+            captureSeconds: audio.durationSeconds,
+            source: .recovered
+        )
+    }
+
+    /// Everything a take does once its audio exists. Shared by the live press
+    /// path and recovery so the two can never drift apart.
+    ///
+    /// Returns whether the take reached a terminal outcome that consumes its
+    /// audio. Only a transcription failure returns `false`: nothing was
+    /// produced from the recording, so re-running it is a real second chance.
+    /// A secure-field block returns `true` — FR-3.2 means that take leaves no
+    /// trace, and holding its raw audio back for another try would defeat the
+    /// rule it just enforced.
+    @discardableResult
+    private func runPipeline(
+        audio: PCMChunk,
+        resolved: (
+            profile: Profile,
+            routeKind: TranscriptRecord.RouteKind,
+            pressTimeBundleID: String?
+        ),
+        isLockMode: Bool,
+        captureSeconds: Double,
+        source: TranscriptSource
+    ) async -> Bool {
         let profile = resolved.profile
 
         let languageMode: LanguageMode
@@ -359,7 +416,7 @@ public actor DictationSession {
             lastError =
                 (error as? TranscriptionError) ?? .engineUnavailable(String(describing: error))
             transition(to: .idle)
-            return
+            return false
         }
         let transcriptionSeconds = Self.seconds(transcriptionStart.duration(to: clock.now))
 
@@ -446,7 +503,7 @@ public actor DictationSession {
         // persisted — no history row for this take.
         if case .blockedSecureField = delivery {
             transition(to: .idle)
-            return
+            return true
         }
 
         var targetBundleID = resolved.pressTimeBundleID
@@ -466,7 +523,7 @@ public actor DictationSession {
         let record = TranscriptRecord(
             id: transcriptID,
             createdAt: deps.now(),
-            source: .dictation,
+            source: source,
             language: language,
             rawText: result.text,
             deliveredText: formatted,
@@ -475,20 +532,21 @@ public actor DictationSession {
             profileName: profile.name,
             routeKind: resolved.routeKind,
             cleanup: cleanupOutcome,
-            audioPath: audioPath,
             timings: TimingBreakdown(
                 captureSeconds: captureSeconds,
                 transcriptionSeconds: transcriptionSeconds,
                 dictionarySeconds: dictionarySeconds,
                 cleanupSeconds: cleanupSeconds,
                 deliverySeconds: deliverySeconds
-            )
+            ),
+            audioPath: audioPath
         )
         // A failed save must not un-deliver text that already landed; the
         // session still returns to idle (history write errors surface via
         // PersistenceKit, not here).
         try? await deps.store.save(record)
         transition(to: .idle)
+        return true
     }
 
     // MARK: - Helpers

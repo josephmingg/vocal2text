@@ -50,6 +50,89 @@ public enum RecoveryFileReaper {
     }
 }
 
+/// Reads back the crash/cancel sidecars `MicrophoneCapture` writes (FR-1.6,
+/// FR-11.3): raw 16 kHz mono Float32, no header. The reaper writes the
+/// retention policy; this reads what is still inside it.
+public enum RecoveryStore {
+    /// One recoverable take: its file and when it was written.
+    public struct Candidate: Sendable, Hashable {
+        public var url: URL
+        public var modified: Date
+        /// Seconds of audio, from the file size — 4 bytes per sample at
+        /// 16 kHz, so no decode is needed to describe the take to the user.
+        public var durationSeconds: Double
+
+        public init(url: URL, modified: Date, durationSeconds: Double) {
+            self.url = url
+            self.modified = modified
+            self.durationSeconds = durationSeconds
+        }
+    }
+
+    /// The newest sidecar still inside the 24 h window, if any.
+    ///
+    /// Only takes worth recovering are offered: a file under half a second is
+    /// the tail of an accidental tap, and offering it back as "your cancelled
+    /// recording" would be a worse answer than offering nothing.
+    public static func latestRecoverable(
+        in directory: URL = FileManager.default.temporaryDirectory,
+        now: Date = Date(),
+        minimumSeconds: Double = 0.5
+    ) -> Candidate? {
+        let fileManager = FileManager.default
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return nil }
+
+        var best: Candidate?
+        for entry in entries
+        where entry.lastPathComponent.hasPrefix(RecoveryFileReaper.recoveryFilePrefix)
+            && entry.pathExtension == "pcmf32"
+        {
+            let values = try? entry.resourceValues(forKeys: [
+                .contentModificationDateKey, .fileSizeKey,
+            ])
+            guard
+                let modified = values?.contentModificationDate,
+                let size = values?.fileSize,
+                now.timeIntervalSince(modified) <= RecoveryFileReaper.recoveryRetention
+            else { continue }
+            let seconds = Double(size / MemoryLayout<Float>.size) / Double(PCMChunk.sampleRate)
+            guard seconds >= minimumSeconds else { continue }
+            let candidate = Candidate(url: entry, modified: modified, durationSeconds: seconds)
+            if best == nil || modified > best!.modified {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    /// Decodes a sidecar back into samples. Returns nil rather than a partial
+    /// take when the file is truncated to nothing or unreadable.
+    public static func samples(at url: URL) -> [Float]? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        let count = data.count / MemoryLayout<Float>.size
+        guard count > 0 else { return nil }
+        // The sidecar is written in host byte order by the same machine that
+        // reads it, so a straight reinterpretation is correct — and a
+        // trailing partial sample (a crash mid-write) is dropped by `count`.
+        return data.withUnsafeBytes { raw in
+            let buffer = raw.bindMemory(to: Float.self)
+            return Array(buffer.prefix(count))
+        }
+    }
+
+    /// Removes a sidecar once its take has been recovered, so the same
+    /// recording is never offered twice.
+    public static func discard(at url: URL) {
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
 /// Converts captured audio into the 0…1 levels the HUD waveform draws
 /// (FR-4.1). Pure and tested on every platform; the capture actor feeds it.
 public enum AudioLevelMeter {
