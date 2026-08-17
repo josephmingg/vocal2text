@@ -5,9 +5,10 @@ import SwiftUI
 /// "Press your desired key or combination now" — the Custom… half of the
 /// push-to-talk picker (docs/13 §5).
 ///
-/// Capture uses a local `NSEvent` monitor while the sheet is key: no event tap,
-/// so recording a hotkey needs no permission the app does not already hold, and
-/// nothing outside this window ever sees the keystrokes.
+/// Capture uses a local `NSEvent` monitor for the duration of the sheet: no
+/// event tap, so recording needs no permission the app does not already hold,
+/// and no other process ever sees the keystrokes. The monitor is local, so it
+/// consumes key events destined for Vocal only, and only while the sheet is up.
 @MainActor
 struct HotkeyRecorderSheet: View {
 
@@ -105,6 +106,37 @@ struct HotkeyAdvisoryLabel: View {
     }
 }
 
+/// The facts a capture needs, lifted off the `NSEvent` on the event-monitor's
+/// own thread. `NSEvent` is not `Sendable`, so this value — which is — is what
+/// crosses to the main actor.
+///
+/// `NSEvent.ModifierFlags` and `CGEventFlags` share bit positions, so the raw
+/// flags feed `HotkeyFlagMask` directly, with no translation table.
+private struct RecordedKeyEvent: Sendable {
+    enum Kind: Sendable {
+        case keyDown
+        case flagsChanged
+    }
+
+    var kind: Kind
+    var keyCode: UInt16
+    var flags: UInt64
+    var isRepeat: Bool
+
+    /// Fails for any event type outside the monitor's mask.
+    init?(_ event: NSEvent) {
+        switch event.type {
+        case .keyDown: kind = .keyDown
+        case .flagsChanged: kind = .flagsChanged
+        default: return nil
+        }
+        keyCode = event.keyCode
+        flags = UInt64(event.modifierFlags.rawValue)
+        // `isARepeat` is only defined for key events.
+        isRepeat = event.type == .keyDown && event.isARepeat
+    }
+}
+
 /// Capture state for `HotkeyRecorderSheet`.
 ///
 /// Capture rule (docs/13 §5): the first stable combination wins — a
@@ -142,10 +174,11 @@ final class HotkeyRecorder: ObservableObject {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) {
             [weak self] event in
-            MainActor.assumeIsolated {
-                guard let self else { return event }
-                return self.consume(event)
-            }
+            guard let recorded = RecordedKeyEvent(event) else { return event }
+            // Only Sendable values cross to the main actor — NSEvent is not
+            // Sendable, so it stays on this side of the hop.
+            let swallow = MainActor.assumeIsolated { self?.consume(recorded) ?? false }
+            return swallow ? nil : event
         }
     }
 
@@ -156,24 +189,23 @@ final class HotkeyRecorder: ObservableObject {
         monitor = nil
     }
 
-    /// Returns nil to swallow the event: while the sheet records, keystrokes
-    /// belong to the recorder and must not reach menus or text fields.
-    private func consume(_ event: NSEvent) -> NSEvent? {
-        switch event.type {
+    /// Returns true when the event must not travel on. Key presses are
+    /// swallowed — while the sheet records, they belong to the recorder and
+    /// must not type or fire a menu shortcut. Modifier changes pass through so
+    /// the rest of the app keeps an accurate picture of what is held down.
+    private func consume(_ event: RecordedKeyEvent) -> Bool {
+        switch event.kind {
         case .flagsChanged:
             handleFlagsChanged(event)
+            return false
         case .keyDown:
             handleKeyDown(event)
-        default:
-            return event
+            return true
         }
-        return nil
     }
 
-    private func handleFlagsChanged(_ event: NSEvent) {
-        // NSEvent.ModifierFlags and CGEventFlags share bit positions, so the
-        // raw value feeds the shared mask helpers directly.
-        let flags = UInt64(event.modifierFlags.rawValue) & HotkeyFlagMask.significant
+    private func handleFlagsChanged(_ event: RecordedKeyEvent) {
+        let flags = event.flags & HotkeyFlagMask.significant
         liveFlags = flags
         guard let mask = HotkeyKeyCode.modifierFlagMask(for: event.keyCode) else {
             pendingModifier = nil
@@ -192,17 +224,14 @@ final class HotkeyRecorder: ObservableObject {
         }
     }
 
-    private func handleKeyDown(_ event: NSEvent) {
-        guard !event.isARepeat else { return }
+    private func handleKeyDown(_ event: RecordedKeyEvent) {
+        guard !event.isRepeat else { return }
         guard event.keyCode != HotkeyKeyCode.escape else {
             onEscape?()
             return
         }
         pendingModifier = nil
-        let requiredFlags = HotkeyFlagMask.normalized(
-            UInt64(event.modifierFlags.rawValue),
-            forKeyCode: event.keyCode
-        )
+        let requiredFlags = HotkeyFlagMask.normalized(event.flags, forKeyCode: event.keyCode)
         liveFlags = requiredFlags
         capture(.key(keyCode: event.keyCode, requiredFlags: requiredFlags))
     }
