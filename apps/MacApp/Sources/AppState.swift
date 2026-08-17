@@ -1,4 +1,5 @@
 import ASRKit
+import ASREngineSherpaOnnx
 import ASREngineWhisperKit
 import AudioPipeline
 import CleanupKit
@@ -42,6 +43,13 @@ final class AppState: ObservableObject {
     /// Retained so onboarding's "Warm up now" can trigger the guided model
     /// download/load explicitly (FR-2.4).
     private let engine: WhisperKitEngine
+    /// Burmese engine (docs/04 §1): pinned မြန်မာ dictations route here via
+    /// `routedEngine`; retained for the first-run download HUD hint.
+    private let burmeseEngine: SherpaOnnxEngine
+    /// What the session actually transcribes through: primary + per-language
+    /// overrides. Warm-up goes through this too, so it prepares whichever
+    /// engine the current language mode routes to.
+    private let routedEngine: LanguageRoutingEngine
 
     /// Whether the configured cleanup provider sends text off-device — drives
     /// the HUD privacy badge (FR-7.4). Ollama at localhost: false.
@@ -74,9 +82,18 @@ final class AppState: ObservableObject {
         )
 
         let engine = WhisperKitEngine()
+        // Pinned မြန်မာ routes to the Burmese engine (Omnilingual CTC 1B,
+        // 10.78% CER on FLEURS my_mm — docs/11 G13); everything else,
+        // including auto mode, stays on WhisperKit. The routing contract is
+        // documented on LanguageRoutingEngine.
+        let burmeseEngine = SherpaOnnxEngine(variant: .omnilingual1B)
+        let routedEngine = LanguageRoutingEngine(
+            primary: engine,
+            overrides: [.burmese: burmeseEngine]
+        )
         let dependencies = DictationSession.Dependencies(
             audio: MicrophoneCaptureAdapter(microphone: MicrophoneCapture()),
-            engine: engine,
+            engine: routedEngine,
             // The pipeline is wired unconditionally; the session's own
             // precedence gating (docs/05 §0: master switch → per-profile
             // opt-in) decides per dictation whether stage 3 runs, and an
@@ -124,6 +141,8 @@ final class AppState: ObservableObject {
         self.settings = settings
         self.database = database
         self.engine = engine
+        self.burmeseEngine = burmeseEngine
+        self.routedEngine = routedEngine
         self.profiles = profiles
         self.cleanupLeavesDevice = provider.leavesDevice
         self.hudState = HUDState(
@@ -140,9 +159,10 @@ final class AppState: ObservableObject {
     }
 
     /// Loads (downloading on first run) the ASR model so the first dictation
-    /// is fast. Called from onboarding's "Warm up now" (FR-2.4).
+    /// is fast. Called from onboarding's "Warm up now" (FR-2.4). Goes through
+    /// the router: pinned မြန်မာ warms the Burmese engine instead.
     func warmUp() async throws {
-        try await engine.prepare(languageMode: settings.languageMode)
+        try await routedEngine.prepare(languageMode: settings.languageMode)
     }
 
     // MARK: - Dictation controls
@@ -151,13 +171,28 @@ final class AppState: ObservableObject {
         hudState.partialText = ""
         hudState.languageLabel = Self.languageLabel(for: settings.languageMode)
         hudState.isRemoteCleanup = cleanupLeavesDevice && settings.cleanupMasterSwitch
-        // First-run honesty (FR-2.4): if the model isn't resident yet, the
-        // release will trigger a ~600 MB download + Neural Engine compile that
-        // can take minutes — say so instead of looking frozen.
+        // First-run honesty (FR-2.4): if the routed model isn't resident yet,
+        // the release will trigger a download (WhisperKit ~600 MB, Burmese
+        // ~790 MB) or a slow load — say so instead of looking frozen.
         let engine = engine
+        let burmeseEngine = burmeseEngine
+        let mode = settings.languageMode
         Task { [weak self] in
-            let loaded = await engine.isModelLoaded
-            if !loaded {
+            if mode == .pinned(.burmese) {
+                let loaded = await burmeseEngine.isModelLoaded
+                guard !loaded else { return }
+                let availability = await burmeseEngine.availability(for: .burmese)
+                let hint: String
+                if case .needsDownload = availability {
+                    hint =
+                        "First Burmese run: downloading the မြန်မာ speech model (~790 MB) — this can take a while. Later dictations skip it."
+                } else {
+                    hint = "Loading the မြန်မာ speech model — the first dictation after launch takes longer."
+                }
+                self?.hudState.partialText = hint
+            } else {
+                let loaded = await engine.isModelLoaded
+                guard !loaded else { return }
                 self?.hudState.partialText =
                     "First run: downloading the speech model (~600 MB) and preparing it — this can take several minutes. Later dictations are instant."
             }

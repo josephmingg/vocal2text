@@ -4,6 +4,30 @@
 // `swift test` stays green everywhere and CI's macOS job exercises the full graph.
 import PackageDescription
 
+// sherpa-onnx (the Burmese engine runtime, docs/04 §1) ships Apple-only
+// binary xcframeworks. The dependency is host-conditioned rather than
+// platform-conditioned: on a Linux host SwiftPM would still have to resolve
+// the package and its pinned binary artifacts even though no target here
+// could ever build them, so the manifest simply doesn't declare it there.
+// Darwin hosts (swift test on macOS CI, Xcode for both apps) get the real
+// dependency; ASREngineSherpaOnnx compiles to a stub everywhere else, the
+// same shape as the WhisperKit guard.
+//
+// Pinned exact: the adapter is written against the v1.13.5 Swift shim and
+// that tag's checksummed xcframeworks. Bump deliberately, re-reading the
+// shim's signatures, not via automatic minor updates.
+#if canImport(Darwin)
+let sherpaOnnxDependencies: [Package.Dependency] = [
+    .package(url: "https://github.com/k2-fsa/sherpa-onnx", exact: "1.13.5")
+]
+let sherpaOnnxProducts: [Target.Dependency] = [
+    .product(name: "sherpa-onnx", package: "sherpa-onnx", condition: .when(platforms: [.macOS, .iOS]))
+]
+#else
+let sherpaOnnxDependencies: [Package.Dependency] = []
+let sherpaOnnxProducts: [Target.Dependency] = []
+#endif
+
 let package = Package(
     name: "DictationCore",
     platforms: [
@@ -23,11 +47,12 @@ let package = Package(
         .library(name: "PersistenceKit", targets: ["PersistenceKit"]),
         .library(name: "ASREngineWhisperKit", targets: ["ASREngineWhisperKit"]),
         .library(name: "ASREngineAppleSpeech", targets: ["ASREngineAppleSpeech"]),
+        .library(name: "ASREngineSherpaOnnx", targets: ["ASREngineSherpaOnnx"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.0.0"),
-    ],
+    ] + sherpaOnnxDependencies,
     targets: [
         // ── Pure targets (Linux + Apple) ────────────────────────────────
         .target(name: "CoreModels"),
@@ -67,6 +92,12 @@ let package = Package(
             ]
         ),
         .target(name: "ASREngineAppleSpeech", dependencies: ["CoreModels", "ASRKit"]),
+        // Burmese engine (docs/04 §1, docs/11 G13): Omnilingual ASR CTC via
+        // sherpa-onnx. ModelStore supplies the archive download machinery.
+        .target(
+            name: "ASREngineSherpaOnnx",
+            dependencies: ["CoreModels", "ASRKit", "ModelStore"] + sherpaOnnxProducts
+        ),
 
         // ── Tests ───────────────────────────────────────────────────────
         .testTarget(name: "CoreModelsTests", dependencies: ["CoreModels"]),
@@ -95,6 +126,10 @@ let package = Package(
             ]
         ),
         .testTarget(name: "AudioPipelineTests", dependencies: ["AudioPipeline"]),
+        .testTarget(
+            name: "ASREngineSherpaOnnxTests",
+            dependencies: ["ASREngineSherpaOnnx", "ASRKit", "ModelStore"]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
