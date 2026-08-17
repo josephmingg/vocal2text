@@ -337,6 +337,190 @@ private func makeRecord(
     #expect(try store.dictionaryEntries() == [good])
 }
 
+// MARK: - FTS surrogate rowid (docs/11 G7)
+
+/// The v1 schema, verbatim, so the migration can be tested against a database
+/// shaped exactly like the ones already in the field.
+private func makeV1Database(at path: String) throws -> DatabaseQueue {
+    let queue = try DatabaseQueue(path: path)
+    try queue.write { db in
+        try db.execute(sql: """
+            CREATE TABLE transcript (
+                id TEXT PRIMARY KEY NOT NULL,
+                createdAt DOUBLE NOT NULL,
+                source TEXT NOT NULL,
+                language TEXT NOT NULL,
+                rawText TEXT NOT NULL,
+                deliveredText TEXT NOT NULL,
+                durationSeconds DOUBLE NOT NULL,
+                targetAppBundleID TEXT,
+                targetAppName TEXT,
+                profileName TEXT NOT NULL,
+                routeKind TEXT NOT NULL,
+                cleanup TEXT NOT NULL,
+                timings TEXT NOT NULL,
+                audioPath TEXT,
+                isCancelled INTEGER NOT NULL DEFAULT 0,
+                importedFilename TEXT
+            )
+            """)
+        try db.execute(sql: """
+            CREATE TABLE dictionary_entry (
+                id TEXT PRIMARY KEY NOT NULL,
+                document TEXT NOT NULL
+            )
+            """)
+        try db.execute(sql: """
+            CREATE TABLE profile (
+                id TEXT PRIMARY KEY NOT NULL,
+                name TEXT NOT NULL,
+                document TEXT NOT NULL
+            )
+            """)
+        try db.execute(sql: """
+            CREATE VIRTUAL TABLE transcript_fts_latin USING fts5(
+                rawText, deliveredText, content='transcript', tokenize='unicode61')
+            """)
+        try db.execute(sql: """
+            CREATE VIRTUAL TABLE transcript_fts_tri USING fts5(
+                rawText, deliveredText, content='transcript', tokenize='trigram')
+            """)
+        try db.execute(sql: """
+            CREATE TRIGGER transcript_after_insert AFTER INSERT ON transcript BEGIN
+                INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+                INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+            END
+            """)
+        // GRDB records applied migrations in this table; naming v1 as already
+        // applied is what makes the store treat this file as a v1 database
+        // instead of creating the schema from scratch.
+        try db.execute(sql: "CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+        try db.execute(sql: "INSERT INTO grdb_migrations (identifier) VALUES ('v1')")
+    }
+    return queue
+}
+
+@Test func searchSurvivesAVacuum() throws {
+    // The G7 corruption scenario: FTS entries keyed on an implicit rowid that
+    // VACUUM is free to renumber. With the v2 surrogate key the numbers are
+    // data, so the index still points at the right rows afterwards.
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let first = makeRecord(rawText: "quarterly roadmap review")
+    let second = makeRecord(rawText: "dentist appointment tuesday")
+    let third = makeRecord(rawText: "周六去爬山吗")
+    try store.save(first)
+    try store.save(second)
+    try store.save(third)
+    // Deleting first makes VACUUM actually rebuild — a file with no free pages
+    // would renumber nothing and the test would pass vacuously.
+    try store.deleteTranscript(id: first.id)
+
+    try store.vacuum()
+
+    #expect(try store.search("dentist").map(\.id) == [second.id])
+    #expect(try store.search("爬山").map(\.id) == [third.id])
+    #expect(try store.search("roadmap").isEmpty)
+    #expect(try store.allTranscripts().count == 2)
+}
+
+@Test func transcriptRowidIsAnIntegerPrimaryKey() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    _ = store
+
+    let queue = try DatabaseQueue(path: path)
+    let sql: String? = try queue.read { db in
+        try String.fetchOne(
+            db, sql: "SELECT sql FROM sqlite_master WHERE type='table' AND name='transcript'"
+        )
+    }
+    // An INTEGER PRIMARY KEY column *is* the rowid, which is what makes the
+    // numbering stable across a rebuild.
+    #expect(sql?.contains("INTEGER PRIMARY KEY") == true)
+}
+
+@Test func rowidsAreNotReusedAfterDeletion() throws {
+    // AUTOINCREMENT: a new transcript must never land on a deleted row's
+    // rowid, where it could inherit a stale FTS entry.
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let first = makeRecord(rawText: "first take")
+    try store.save(first)
+    let firstSeq: Int64? = try DatabaseQueue(path: path).read { db in
+        try Int64.fetchOne(db, sql: "SELECT seq FROM transcript WHERE id = ?",
+                           arguments: [first.id.uuidString])
+    }
+    try store.deleteTranscript(id: first.id)
+
+    let second = makeRecord(rawText: "second take")
+    try store.save(second)
+    let secondSeq: Int64? = try DatabaseQueue(path: path).read { db in
+        try Int64.fetchOne(db, sql: "SELECT seq FROM transcript WHERE id = ?",
+                           arguments: [second.id.uuidString])
+    }
+
+    #expect(firstSeq != nil)
+    #expect(secondSeq != nil)
+    #expect(secondSeq != firstSeq)
+    #expect(try store.search("second").map(\.id) == [second.id])
+    #expect(try store.search("first").isEmpty)
+}
+
+@Test func migratingAV1DatabasePreservesHistoryAndSearch() throws {
+    // The owner's Mac already holds a v1 database. Opening it with this build
+    // must keep every row and leave search working.
+    let path = FileManager.default.temporaryDirectory
+        .appendingPathComponent("vocal-db-v1-\(UUID().uuidString).sqlite").path
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let ids = [UUID(), UUID(), UUID()]
+    let texts = ["standup notes for monday", "ကျွန်တော် ထမင်းစားပြီ", "周六去爬山吗"]
+    do {
+        let queue = try makeV1Database(at: path)
+        try queue.write { db in
+            for (index, id) in ids.enumerated() {
+                try db.execute(
+                    sql: """
+                        INSERT INTO transcript (
+                            id, createdAt, source, language, rawText, deliveredText,
+                            durationSeconds, profileName, routeKind, cleanup, timings, isCancelled
+                        ) VALUES (?, ?, 'dictation', 'en', ?, ?, 2.5, 'Default', 'defaultRoute',
+                                  ?, ?, 0)
+                        """,
+                    arguments: [
+                        id.uuidString,
+                        Double(1_723_000_000 + index),
+                        texts[index],
+                        texts[index],
+                        #"{"skipped":{"reason":"masterSwitchOff"}}"#,
+                        #"{"captureSeconds":2.5,"transcriptionSeconds":0.5,"dictionarySeconds":0.1,"cleanupSeconds":0,"deliverySeconds":0.1}"#
+                    ]
+                )
+            }
+        }
+    }
+
+    // Opening runs the v2 migration.
+    let store = try DatabaseStore(path: path)
+
+    #expect(try store.allTranscripts().count == 3)
+    #expect(Set(try store.allTranscripts().map(\.rawText)) == Set(texts))
+    // Search works against the rebuilt indexes, in every script.
+    #expect(try store.search("standup").map(\.id) == [ids[0]])
+    #expect(try store.search("ထမင်း").map(\.id) == [ids[1]])
+    #expect(try store.search("爬山").map(\.id) == [ids[2]])
+    // And still works after the rebuild that used to corrupt it.
+    try store.vacuum()
+    #expect(try store.search("standup").map(\.id) == [ids[0]])
+    #expect(try store.allTranscripts().count == 3)
+}
+
+
 #else
 
 @Test func persistenceIsUnsupportedWithoutGRDB() {

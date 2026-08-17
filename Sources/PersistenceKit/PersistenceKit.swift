@@ -78,37 +78,120 @@ public final class DatabaseStore: Sendable {
                     tokenize='trigram'
                 )
                 """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_insert AFTER INSERT ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                END
-                """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_delete AFTER DELETE ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                END
-                """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_update AFTER UPDATE ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                END
-                """)
+            try Self.createTranscriptFTSTriggers(db)
         }
+
+        // v2 (docs/03 §5, docs/11 G7): give `transcript` an INTEGER PRIMARY KEY
+        // so its rowids stop being volatile.
+        //
+        // Both FTS indexes are external-content tables keyed on the content
+        // table's rowid. v1's `id TEXT PRIMARY KEY` leaves rowid implicit, and
+        // SQLite is free to renumber implicit rowids when the database is
+        // rebuilt — VACUUM does exactly that. Every FTS entry would then point
+        // at whichever row inherited its old number: search would answer with
+        // other people's transcripts, or nothing at all, with no error to
+        // notice. A column declared INTEGER PRIMARY KEY *is* the rowid, so its
+        // values are data and survive any rebuild.
+        //
+        // AUTOINCREMENT on top: without it SQLite reuses the numbers of deleted
+        // rows, so a new transcript can land on a dead row's rowid and inherit
+        // any FTS entry a failed delete-trigger left behind. Monotonic ids make
+        // that class of staleness impossible for the cost of one counter row.
+        migrator.registerMigration("v2-transcript-surrogate-rowid") { db in
+            // The triggers name `transcript`; they are recreated against the
+            // rebuilt table below.
+            try db.execute(sql: "DROP TRIGGER IF EXISTS transcript_after_insert")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS transcript_after_delete")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS transcript_after_update")
+
+            try db.execute(sql: """
+                CREATE TABLE transcript_v2 (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    createdAt DOUBLE NOT NULL,
+                    source TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    rawText TEXT NOT NULL,
+                    deliveredText TEXT NOT NULL,
+                    durationSeconds DOUBLE NOT NULL,
+                    targetAppBundleID TEXT,
+                    targetAppName TEXT,
+                    profileName TEXT NOT NULL,
+                    routeKind TEXT NOT NULL,
+                    cleanup TEXT NOT NULL,
+                    timings TEXT NOT NULL,
+                    audioPath TEXT,
+                    isCancelled INTEGER NOT NULL DEFAULT 0,
+                    importedFilename TEXT
+                )
+                """)
+            // Ordered by the existing rowid so the surrogate numbers follow
+            // insertion order, keeping `ORDER BY rowid` tie-breaks meaningful.
+            try db.execute(sql: """
+                INSERT INTO transcript_v2 (\(Self.transcriptColumns))
+                    SELECT \(Self.transcriptColumns) FROM transcript ORDER BY rowid
+                """)
+            try db.execute(sql: "DROP TABLE transcript")
+            try db.execute(sql: "ALTER TABLE transcript_v2 RENAME TO transcript")
+
+            try Self.createTranscriptFTSTriggers(db)
+            // The copied rows carry new rowids, so every FTS entry inherited
+            // from v1 now points at the wrong row: discard and re-derive both
+            // indexes from the content table.
+            try db.execute(
+                sql: "INSERT INTO transcript_fts_latin(transcript_fts_latin) VALUES('rebuild')"
+            )
+            try db.execute(
+                sql: "INSERT INTO transcript_fts_tri(transcript_fts_tri) VALUES('rebuild')"
+            )
+        }
+
         try migrator.migrate(queue)
         dbQueue = queue
+    }
+
+    /// The three triggers that keep both external-content FTS indexes in step
+    /// with `transcript`. Shared by the v1 create and the v2 table rebuild so
+    /// the two can never disagree.
+    private static func createTranscriptFTSTriggers(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE TRIGGER transcript_after_insert AFTER INSERT ON transcript BEGIN
+                INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+                INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+            END
+            """)
+        try db.execute(sql: """
+            CREATE TRIGGER transcript_after_delete AFTER DELETE ON transcript BEGIN
+                INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+                INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+            END
+            """)
+        try db.execute(sql: """
+            CREATE TRIGGER transcript_after_update AFTER UPDATE ON transcript BEGIN
+                INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+                INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+                INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+                INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+            END
+            """)
+    }
+
+    /// Compacts the database file, reclaiming space from deleted history.
+    ///
+    /// Safe only because of the v2 surrogate rowid: under v1's implicit rowids
+    /// this call was the documented way to corrupt search (docs/11 G7).
+    public func vacuum() throws {
+        try dbQueue.writeWithoutTransaction { db in
+            try db.execute(sql: "VACUUM")
+        }
     }
 
     // MARK: - Transcripts

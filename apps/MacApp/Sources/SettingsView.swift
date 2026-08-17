@@ -295,6 +295,11 @@ private struct HistoryPrivacyPane: View {
             // enumerating it would silently spare them — breaking the
             // dialog's "permanently removes every transcript" promise.
             let count = try database.deleteAllTranscripts()
+            // Deleting rows only unlinks them: the transcript text stays
+            // readable in the file's free pages until it is overwritten.
+            // Compacting is what makes "permanently removes" true, and it is
+            // only safe to run now that rowids are stable (docs/11 G7).
+            try database.vacuum()
             statusText = "Deleted \(count) transcript\(count == 1 ? "" : "s")."
         } catch {
             statusText = "Delete failed: \(error.localizedDescription)"
