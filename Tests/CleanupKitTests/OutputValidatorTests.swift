@@ -219,15 +219,19 @@ struct BurmeseOutputValidatorTests {
 
     /// Unspaced scripts pack more meaning per character, so the ratio bounds
     /// start applying at a lower character count than for English.
+    /// Bare consonants, deliberately: a Myanmar syllable's `String.count` is
+    /// not what it looks like. U+102C and U+1038 are excluded from
+    /// `SpacingMark` by UAX #29, so they break the cluster instead of joining
+    /// it and "ကောင်း" is four Characters, not one. Unmarked letters make the
+    /// length of this fixture self-evident.
     @Test func burmeseUsesTheUnspacedRatioThreshold() {
-        let longInput = String(repeating: "ကောင်း", count: 16)
+        let longInput = String(repeating: "ကခဂဃင", count: 8)
         // Past the 20-character unspaced threshold, so the [0.4, 2.5] bounds
         // apply — the same input under English's 60-character threshold would
         // still be in "short input, may legitimately collapse" territory.
-        #expect(longInput.count > 20)
-        #expect(longInput.count < 60)
+        #expect(longInput.count == 40)
         let result = OutputValidator.validate(
-            output: "ကောင်း", input: longInput, language: .burmese
+            output: "က", input: longInput, language: .burmese
         )
         #expect(result == .rejected(rule: "ratio"))
     }

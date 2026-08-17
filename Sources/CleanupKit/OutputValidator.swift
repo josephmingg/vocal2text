@@ -50,6 +50,10 @@ public enum OutputValidator {
             inputCount > 0 ? Double(cleaned.count) / Double(inputCount) : Double.infinity
         // Unspaced scripts pack far more meaning per character, so the
         // "long enough for ratio bounds to be meaningful" line sits lower.
+        // Burmese reaches it sooner still, since a Myanmar syllable spans two
+        // to four Swift Characters — which errs toward applying the tighter
+        // [0.4, 2.5] bounds, and that is the safe direction for the language
+        // most at risk of a model mangling it.
         let longInputThreshold = language.isUnspacedScript ? 20 : 60
         if inputCount > longInputThreshold {
             if ratio < 0.4 || ratio > 2.5 {

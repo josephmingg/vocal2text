@@ -174,8 +174,13 @@ enum MyText {
     }
 
     /// Appends ။ when a Burmese utterance ends without any terminal mark.
-    /// Mirrors the English terminal-period rule; the three-syllable-ish floor
-    /// is expressed in characters because the script has no word boundaries.
+    ///
+    /// Mirrors the English terminal-period rule, but the floor is a character
+    /// count rather than a word count because the script has no word
+    /// boundaries. Six is deliberately low: a Myanmar syllable is typically
+    /// two to four Swift Characters — U+102C and U+1038 are excluded from
+    /// `SpacingMark` by UAX #29, so they break the grapheme cluster rather
+    /// than joining it — which puts the floor at roughly two syllables.
     static func appendingSectionIfSentenceLike(_ text: String) -> String {
         guard let last = text.last else { return text }
         guard !isMark(last), !last.isPunctuation else { return text }
