@@ -156,7 +156,8 @@ final class AppState: ObservableObject {
         // can take minutes — say so instead of looking frozen.
         let engine = engine
         Task { [weak self] in
-            if await !engine.isModelLoaded {
+            let loaded = await engine.isModelLoaded
+            if !loaded {
                 self?.hudState.partialText =
                     "First run: downloading the speech model (~600 MB) and preparing it — this can take several minutes. Later dictations are instant."
             }

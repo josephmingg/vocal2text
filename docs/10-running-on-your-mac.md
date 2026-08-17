@@ -13,6 +13,12 @@ make generate          # produces Vocal.xcodeproj (gitignored)
 open Vocal.xcodeproj
 ```
 
+> **⚠️ Every `make generate` rebuilds `Vocal.xcodeproj` and RESETS your signing
+> Team selection.** After any `make generate`, re-open Signing & Capabilities
+> and re-pick your team (30 seconds), or the build fails with a signing error.
+> You only need `make generate` when `project.yml` changed — a plain `git pull`
+> of source-code changes needs no regeneration.
+
 In Xcode:
 
 1. Select the **VocalMac** scheme → your Mac as destination.
