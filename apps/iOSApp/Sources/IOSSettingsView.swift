@@ -5,12 +5,31 @@ import SwiftUI
 /// switch, style prompt, profile pick, delivery options.
 struct IOSSettingsView: View {
     @ObservedObject var appState: IOSAppState
+    @ObservedObject var coordinator: CaptureSessionCoordinator
+    @ObservedObject var processor: ImportProcessor
     @State private var isWarming = false
     @State private var warmState: String?
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("On other apps") {
+                    NavigationLink {
+                        KeyboardSessionView(coordinator: coordinator)
+                    } label: {
+                        LabeledContent("Keyboard", value: keyboardSummary)
+                    }
+                    NavigationLink {
+                        IOSImportsView(processor: processor)
+                    } label: {
+                        LabeledContent(
+                            "Voice notes",
+                            value: coordinator.pendingImportCount == 0
+                                ? "None waiting" : "\(coordinator.pendingImportCount) waiting"
+                        )
+                    }
+                }
+
                 Section("Speech model") {
                     Button {
                         warmUp()
@@ -67,6 +86,14 @@ struct IOSSettingsView: View {
             }
             .navigationTitle("Settings")
         }
+    }
+
+    private var keyboardSummary: String {
+        guard coordinator.isBridgeAvailable else { return "Unavailable" }
+        guard let session = coordinator.session, session.isArmed(at: Date()) else {
+            return "Not armed"
+        }
+        return "Armed · \(KeyboardSessionView.remainingText(session.remaining(at: Date())))"
     }
 
     private var profileBinding: Binding<String> {
