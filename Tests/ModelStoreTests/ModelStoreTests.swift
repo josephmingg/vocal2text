@@ -56,12 +56,17 @@ private func writeFile(at url: URL, bytes count: Int) throws {
 
 // MARK: - Catalog
 
+/// Scoped to the WhisperKit entries. It used to assert these properties of
+/// every catalog entry, which quietly encoded "the catalog is Whisper-only" —
+/// an assumption v1.1 retires, since Whisper cannot serve Burmese at all
+/// (docs/04 Appendix A). The claim worth keeping is about the Whisper models
+/// themselves.
 @Test func builtInCatalogListsWhisperKitEnglishChineseModels() {
-    let ids = ModelCatalog.builtIn.map(\.id)
+    let whisper = ModelCatalog.builtIn.filter { $0.engine == "whisperkit" }
+    let ids = whisper.map(\.id)
     #expect(ids.contains("whisper-large-v3-turbo"))
     #expect(ids.contains("whisper-small"))
-    for spec in ModelCatalog.builtIn {
-        #expect(spec.engine == "whisperkit")
+    for spec in whisper {
         #expect(spec.approximateBytes > 0)
         #expect(spec.languages.contains(.english))
         #expect(spec.languages.contains(.chinese))
