@@ -1,4 +1,7 @@
 # XcodeGen manifest — `make generate` produces Vocal.xcodeproj (gitignored).
+#
+# NOTE: regenerating resets the Xcode signing Team. After `make generate`,
+# re-select your team once per target in Signing & Capabilities (docs/14).
 name: Vocal
 options:
   bundleIdPrefix: com.vocal
@@ -12,6 +15,11 @@ settings:
     ENABLE_HARDENED_RUNTIME: NO
     CODE_SIGN_STYLE: Automatic
     ENABLE_APP_SANDBOX: NO
+    # The one place the App Group identifier is written. Every target that
+    # touches the shared container declares it twice — once as an entitlement,
+    # once as an Info.plist key BridgeKit reads (AppGroup.identifierInfoKey) —
+    # and the YAML anchor below feeds both, so they cannot drift.
+    VOCAL_APP_GROUP: &appGroup group.com.vocal.shared
 
 packages:
   DictationCore:
@@ -24,16 +32,30 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: apps/iOSApp/Sources
+      # Live Activity attributes must be byte-identical in the app and the
+      # widget, so the same file is compiled into both.
+      - path: apps/iOSShared/Sources
     info:
       path: apps/iOSApp/Info.plist
       properties:
         CFBundleDisplayName: Vocal
         CFBundleShortVersionString: "1.1.0"
         CFBundleVersion: "2"
-        NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation button."
+        NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation button, or while a capture session you armed is running."
         UIBackgroundModes: [audio]
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: false
+        VocalAppGroupIdentifier: *appGroup
+        CFBundleURLTypes:
+          - CFBundleURLName: com.vocal.ios.deeplink
+            CFBundleURLSchemes: [vocal]
+    entitlements:
+      path: apps/iOSApp/VocalIOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - *appGroup
     dependencies:
       - package: DictationCore
         products:
@@ -45,12 +67,130 @@ targets:
           - ASRKit
           - SessionKit
           - AudioPipeline
+          - BridgeKit
           - PersistenceKit
           - ASREngineWhisperKit
           - ASREngineAppleSpeech
+      - target: VocalKeyboard
+        embed: true
+      - target: VocalShareExt
+        embed: true
+      - target: VocalWidgets
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vocal.ios
+        TARGETED_DEVICE_FAMILY: "1"
+
+  # Insert-only keyboard (docs/02 §3.1 D2b). Its dependency list is the point:
+  # CoreModels + BridgeKit and nothing else, so no ASR model, no database, and
+  # no networking framework can be linked into a process that runs inside
+  # other people's apps under a ~48–80 MB jetsam ceiling.
+  VocalKeyboard:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: apps/iOSKeyboard/Sources
+    info:
+      path: apps/iOSKeyboard/Info.plist
+      properties:
+        CFBundleDisplayName: Vocal
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
+        VocalAppGroupIdentifier: *appGroup
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrefersRightToLeft: false
+            PrimaryLanguage: en-US
+            # iOS 26 requires Full Access even to open the container app from a
+            # keyboard, and the App Group read needs it too (docs/02 §6).
+            RequestsOpenAccess: true
+    entitlements:
+      path: apps/iOSKeyboard/VocalKeyboard.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - *appGroup
+    dependencies:
+      - package: DictationCore
+        products:
+          - CoreModels
+          - BridgeKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vocal.ios.keyboard
+        TARGETED_DEVICE_FAMILY: "1"
+
+  # Share-sheet intake (docs/02 FR-i2.3). Copies bytes into the App Group and
+  # exits; transcription happens in the app.
+  VocalShareExt:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: apps/iOSShareExt/Sources
+    info:
+      path: apps/iOSShareExt/Info.plist
+      properties:
+        CFBundleDisplayName: Save to Vocal
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
+        VocalAppGroupIdentifier: *appGroup
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            # Only appear in share sheets that actually carry audio, rather
+            # than in every share sheet on the phone.
+            NSExtensionActivationRule: "SUBQUERY(extensionItems, $extensionItem, SUBQUERY($extensionItem.attachments, $attachment, ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO \"public.audio\").@count >= 1).@count >= 1"
+    entitlements:
+      path: apps/iOSShareExt/VocalShareExt.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - *appGroup
+    dependencies:
+      - package: DictationCore
+        products:
+          - CoreModels
+          - BridgeKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vocal.ios.share
+        TARGETED_DEVICE_FAMILY: "1"
+
+  # Live Activity / Dynamic Island renderer (docs/02 FR-i1.3).
+  VocalWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: apps/iOSWidgets/Sources
+      - path: apps/iOSShared/Sources
+    info:
+      path: apps/iOSWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Vocal
+        CFBundleShortVersionString: "1.1.0"
+        CFBundleVersion: "2"
+        VocalAppGroupIdentifier: *appGroup
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: apps/iOSWidgets/VocalWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - *appGroup
+    dependencies:
+      - package: DictationCore
+        products:
+          - CoreModels
+          - BridgeKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vocal.ios.widgets
         TARGETED_DEVICE_FAMILY: "1"
 
   VocalMac:

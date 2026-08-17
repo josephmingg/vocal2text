@@ -59,9 +59,29 @@ jobs:
       - name: Test
         run: swift test
 
-  # The VocalIOS app target: unsigned simulator compile.
+  # The keyboard runs inside other people's apps. Its "no network calls"
+  # promise is only worth making if it is checkable, so check it: the target
+  # must not reference any networking API, and its only package dependencies
+  # (project.yml) are CoreModels + BridgeKit.
+  keyboard-offline-guard:
+    name: Keyboard — offline guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No networking symbols in the keyboard or the bridge
+        run: |
+          pattern='URLSession|URLRequest|import Network|import FoundationNetworking|CFNetwork|NWConnection|NSURLConnection|Socket'
+          if grep -rnE "$pattern" apps/iOSKeyboard Sources/BridgeKit; then
+            echo "::error::networking reference found in an offline-only target"
+            exit 1
+          fi
+          echo "clean: no networking references"
+
+  # The VocalIOS app target plus its three embedded extensions: unsigned
+  # simulator compile. Building the app scheme builds the keyboard, share, and
+  # widget extensions too, because they are embedded dependencies.
   ios-app:
-    name: iOS — VocalIOS app build
+    name: iOS — VocalIOS app + extensions build
     runs-on: macos-15
     needs: macos-full
     steps:
@@ -77,12 +97,18 @@ jobs:
           set +e
           xcodebuild -project Vocal.xcodeproj -scheme VocalIOS -configuration Debug \
             -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-ios \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build > build-ios.log 2>&1
           status=$?
           set -e
           grep -E "error:" build-ios.log | head -80 || true
           tail -5 build-ios.log
           exit $status
+      - name: Show the embedded extensions
+        run: |
+          app=$(find build-ios/Build/Products -name 'VocalIOS.app' -maxdepth 3 | head -1)
+          echo "app bundle: $app"
+          ls -1 "$app/PlugIns"
 
   # The VocalMac app target: XcodeGen project + unsigned xcodebuild compile.
   macos-app:
