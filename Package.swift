@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "ModelStore", targets: ["ModelStore"]),
         .library(name: "ASRKit", targets: ["ASRKit"]),
         .library(name: "SessionKit", targets: ["SessionKit"]),
+        .library(name: "BridgeKit", targets: ["BridgeKit"]),
         .library(name: "AudioPipeline", targets: ["AudioPipeline"]),
         .library(name: "PersistenceKit", targets: ["PersistenceKit"]),
         .library(name: "ASREngineWhisperKit", targets: ["ASREngineWhisperKit"]),
@@ -43,6 +44,11 @@ let package = Package(
             name: "SessionKit",
             dependencies: ["CoreModels", "TextPipeline", "CleanupKit", "ProfileKit", "ASRKit"]
         ),
+        // The App Group contract between the iOS app and its extensions
+        // (docs/02 §3.1). Deliberately depends on CoreModels only: the
+        // keyboard extension links it under a ~48–80 MB jetsam ceiling, so it
+        // must never pull in GRDB, WhisperKit, or AVFoundation.
+        .target(name: "BridgeKit", dependencies: ["CoreModels"]),
 
         // ── Apple-only targets (sources compile to stubs elsewhere) ────
         .target(name: "AudioPipeline", dependencies: ["CoreModels", "ASRKit"]),
@@ -78,6 +84,7 @@ let package = Package(
         .testTarget(name: "ModelStoreTests", dependencies: ["ModelStore"]),
         .testTarget(name: "ASRKitTests", dependencies: ["ASRKit"]),
         .testTarget(name: "SessionKitTests", dependencies: ["SessionKit", "ASRKit"]),
+        .testTarget(name: "BridgeKitTests", dependencies: ["BridgeKit"]),
         .testTarget(name: "PersistenceKitTests", dependencies: ["PersistenceKit"]),
     ],
     swiftLanguageModes: [.v6]
