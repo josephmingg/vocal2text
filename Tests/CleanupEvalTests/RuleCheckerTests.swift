@@ -144,8 +144,12 @@ import Testing
 }
 
 @Test func wordCountTreatsMixedScriptsAdditively() {
-    // Code-switching cases lean on this: 2 Han + 2 Latin.
-    #expect(RuleChecker.wordCount("打开 GitHub 的 repo") == 4)
+    // Code-switching cases lean on this. Han counts per character and Latin per
+    // run, so 打(1) 开(2) GitHub(3) 的(4) repo(5).
+    #expect(RuleChecker.wordCount("打开 GitHub 的 repo") == 5)
+    // Han runs are not collapsed the way a Latin run is.
+    #expect(RuleChecker.wordCount("打开") == 2)
+    #expect(RuleChecker.wordCount("GitHub") == 1)
 }
 
 // MARK: - Edit distance
