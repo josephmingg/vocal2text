@@ -346,8 +346,7 @@ final class AppState: ObservableObject {
 
     // MARK: - Cancelled-take recovery (FR-1.6, docs/11 G9)
 
-    /// Rescans for a recoverable take. The scan lists and stats a directory, so
-    /// it runs off the main actor even though it is small.
+    /// Rescans for a recoverable take.
     func refreshRecoverableTake() {
         // A take in flight owns the newest sidecar; offering it back mid-press
         // would hand the user the recording they are still making.
@@ -355,13 +354,24 @@ final class AppState: ObservableObject {
             recoverableTake = nil
             return
         }
-        Task.detached(priority: .utility) { [weak self] in
-            let candidate = RecoveryStore.latestRecoverable()
-            await MainActor.run {
-                guard let self, self.isIdle else { return }
-                self.recoverableTake = candidate
-            }
+        // This Task inherits main-actor isolation, so `self` never crosses an
+        // isolation boundary — only the scan's `Sendable` result does. Doing
+        // the reverse (a detached task reaching back to the main actor) is
+        // what Swift 6 rejects as "sending 'self' risks causing data races".
+        Task { [weak self] in
+            let candidate = await Self.scanForRecoverableTake()
+            guard let self, self.isIdle else { return }
+            self.recoverableTake = candidate
         }
+    }
+
+    /// Looks for the newest recoverable sidecar off the main actor: the scan
+    /// lists and stats a directory, which is small but is still file I/O, and
+    /// it runs while the menu is opening.
+    private nonisolated static func scanForRecoverableTake() async -> RecoveryStore.Candidate? {
+        await Task.detached(priority: .utility) {
+            RecoveryStore.latestRecoverable()
+        }.value
     }
 
     /// Runs the newest cancelled take back through the full pipeline, exactly
