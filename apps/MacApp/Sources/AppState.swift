@@ -45,6 +45,25 @@ final class AppState: ObservableObject {
     /// the sheet.
     weak var hotkeyMonitor: HotkeyMonitor?
 
+    /// Bumped on every accepted hotkey down-edge, so a "press it now" tester can
+    /// confirm the key works without knowing anything about the event tap.
+    @Published private(set) var hotkeyPressCount = 0
+    /// While a tester is on screen, hotkey edges only light it up. Pressing your
+    /// key to prove it works must not leave a stray recording behind.
+    private(set) var isHotkeyTestModeActive = false
+
+    func noteHotkeyPress() {
+        hotkeyPressCount &+= 1
+    }
+
+    func beginHotkeyTest() {
+        isHotkeyTestModeActive = true
+    }
+
+    func endHotkeyTest() {
+        isHotkeyTestModeActive = false
+    }
+
     /// Retained so onboarding's "Warm up now" can trigger the guided model
     /// download/load explicitly (FR-2.4).
     private let engine: WhisperKitEngine
