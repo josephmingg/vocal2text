@@ -27,6 +27,9 @@ struct HUDState: Equatable {
     var profileName: String
     var languageLabel: String
     var isRemoteCleanup: Bool
+    /// Live microphone levels, oldest first, one per captured chunk
+    /// (~12×/second). Empty outside a take (FR-4.1).
+    var levels: [Float] = []
 }
 
 /// The macOS composition root: builds every engine seam once, owns the one
@@ -229,8 +232,27 @@ final class AppState: ObservableObject {
                     relay.noteLowDisk()
                 }
             }
+            // Live waveform (FR-4.1): the HUD showed a synthesized ripple, which
+            // looked identical whether the microphone was hearing the user or
+            // nothing at all.
+            await microphone.setLevelHandler { level in
+                Task { @MainActor in
+                    relay.noteLevel(level)
+                }
+            }
         }
         startPhaseMirror()
+    }
+
+    /// Appends one captured microphone level, keeping the most recent
+    /// `WaveformView.barCount` so the waveform scrolls.
+    func appendLevel(_ level: Float) {
+        var levels = hudState.levels
+        levels.append(level)
+        if levels.count > WaveformView.barCount {
+            levels.removeFirst(levels.count - WaveformView.barCount)
+        }
+        hudState.levels = levels
     }
 
     /// The FR-1.3 mid-take low-disk guard fired: end the take normally and
@@ -251,6 +273,7 @@ final class AppState: ObservableObject {
 
     func startDictation() {
         hudState.partialText = ""
+        hudState.levels = []
         hudState.languageLabel = Self.languageLabel(for: settings.languageMode)
         hudState.isRemoteCleanup = cleanupLeavesDevice && settings.cleanupMasterSwitch
         // First-run honesty (FR-2.4): if the routed model isn't resident yet,
@@ -337,6 +360,7 @@ final class AppState: ObservableObject {
             pendingLowDiskNotice = false
             hudState.mode = .hidden
             hudState.partialText = ""
+            hudState.levels = []
         case .idle:
             // The take is over: any first-run hint still in flight is stale
             // (docs/11 G16).
@@ -356,6 +380,7 @@ final class AppState: ObservableObject {
                 hudState.mode = .hidden
             }
             hudState.partialText = ""
+            hudState.levels = []
         }
     }
 
@@ -491,6 +516,10 @@ private final class ResolutionRelay {
 
     func noteLowDisk() {
         appState?.lowDiskGuardTripped()
+    }
+
+    func noteLevel(_ level: Float) {
+        appState?.appendLevel(level)
     }
 }
 

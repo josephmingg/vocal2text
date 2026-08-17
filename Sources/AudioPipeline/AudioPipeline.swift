@@ -50,6 +50,34 @@ public enum RecoveryFileReaper {
     }
 }
 
+/// Converts captured audio into the 0…1 levels the HUD waveform draws
+/// (FR-4.1). Pure and tested on every platform; the capture actor feeds it.
+public enum AudioLevelMeter {
+    /// Quietest level the meter shows. Speech in Float PCM sits around -30 to
+    /// -12 dBFS, so a -60 dB floor keeps a soft voice clearly visible while
+    /// room tone stays near the baseline.
+    public static let floorDecibels: Float = -60
+
+    /// Normalized display level for one chunk of 16 kHz mono Float samples.
+    ///
+    /// RMS on a decibel scale rather than raw amplitude: linear amplitude puts
+    /// ordinary speech in the bottom tenth of the bar, which reads as "the mic
+    /// is dead" — the exact question the waveform exists to answer.
+    public static func level(for samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sumOfSquares: Float = 0
+        for sample in samples {
+            sumOfSquares += sample * sample
+        }
+        let rms = (sumOfSquares / Float(samples.count)).squareRoot()
+        guard rms > 0, rms.isFinite else { return 0 }
+        let decibels = 20 * log10(rms)
+        guard decibels.isFinite else { return 0 }
+        let normalized = (decibels - floorDecibels) / -floorDecibels
+        return min(max(normalized, 0), 1)
+    }
+}
+
 /// FR-1.3 low-disk guard (docs/11 G4): a recording must not fill the disk.
 /// A take is refused at start, or finished early mid-take, when the volume
 /// holding the recovery sidecars drops below `minimumFreeBytes`. The decision
@@ -151,12 +179,19 @@ public actor MicrophoneCapture {
     private var lowDiskHandler: (@Sendable () -> Void)?
     private var ingestsSinceDiskCheck = 0
     private var lowDiskTripped = false
+    /// Per-chunk microphone level for the HUD waveform (FR-4.1), ~12×/second.
+    private var levelHandler: (@Sendable (Float) -> Void)?
 
     public init() {}
 
     /// Installs the low-disk callback (see `lowDiskHandler`).
     public func setLowDiskHandler(_ handler: @escaping @Sendable () -> Void) {
         lowDiskHandler = handler
+    }
+
+    /// Installs the live-level callback (see `levelHandler`).
+    public func setLevelHandler(_ handler: @escaping @Sendable (Float) -> Void) {
+        levelHandler = handler
     }
 
     /// Begin capturing. The returned session's `chunks` yields converted audio
@@ -322,6 +357,7 @@ public actor MicrophoneCapture {
         let converted = Array(UnsafeBufferPointer(start: outChannels[0], count: Int(outBuffer.frameLength)))
         accumulated.append(contentsOf: converted)
         chunkContinuation?.yield(PCMChunk(samples: converted))
+        levelHandler?(AudioLevelMeter.level(for: converted))
         let data = converted.withUnsafeBufferPointer { Data(buffer: $0) }
         try? recoveryHandle?.write(contentsOf: data)
 
