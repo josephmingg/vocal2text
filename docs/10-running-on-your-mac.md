@@ -118,7 +118,7 @@ migrates to the matching preset on first launch, with nothing to do.
 | Full package incl. GRDB persistence + WhisperKit adapter | Compiles + tests on CI's macOS runner |
 | VocalMac app target | Compiles unsigned on CI's macOS runner |
 | Hotkey capture, paste insertion, mic quality, real latency, Apple-engine/FM adapters | **Cannot be verified in any cloud** — first run on your Mac is milestone M0's spike checklist (docs/06). File issues for anything that misbehaves; each spike has a fallback documented in docs/03/04 |
-| Burmese (မြန်မာ) **recognition accuracy** | **Poor only when unpinned.** Pinning မြန်မာ (menu bar, or a per-profile language pin in Settings → Profiles — docs/11 G17) routes to the dedicated Burmese engine (docs/11 G13, ~10.8% CER); auto-detect still falls to Whisper at 80–100% WER, not a bug to file. Formatting options (digits, spoken punctuation) are per profile in the same pane |
+| Burmese (မြန်မာ) **recognition accuracy** | **Verified on hardware (2026-08-17), with two rules.** Pinning မြန်မာ (menu bar, or a per-profile language pin in Settings → Profiles — docs/11 G17) routes to the dedicated Burmese engine (docs/11 G13); auto-detect still falls to Whisper at 80–100% WER, not a bug to file. **Use the built-in mic for Burmese**: a Bluetooth/AirPods mic drops to the narrowband call profile and the engine emits wrong-script garbage. Built-in-mic accuracy trails the clean-speech benchmark (~10.8% CER) — names miss most; add dictionary entries for them. Formatting options (digits, spoken punctuation) are per profile in the same pane |
 
 ## Known v1 seams (deliberate, documented)
 
