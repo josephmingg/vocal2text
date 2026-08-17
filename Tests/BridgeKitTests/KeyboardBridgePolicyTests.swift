@@ -113,6 +113,35 @@ struct KeyboardBridgePolicyTests {
         #expect(action(armedStatus(phase: .idle)) == .startRecording)
     }
 
+    @Test("A take that outlives its window can still be stopped from the keyboard")
+    func expiredSessionStillOffersStop() {
+        let id = UUID()
+        // The window closed while the user was still talking.
+        let afterExpiry = epoch.addingTimeInterval(400)
+        let status = BridgeStatus(
+            updatedAt: afterExpiry,
+            session: .armed(window: .fiveMinutes, profileName: "Chat", now: epoch),
+            phase: .recording,
+            activeRequestID: id
+        )
+        #expect(action(status, at: afterExpiry) == .stopRecording(requestID: id))
+    }
+
+    @Test("An expired session with no take of ours still bounces to the app")
+    func expiredSessionWithoutOurTakeBounces() {
+        let afterExpiry = epoch.addingTimeInterval(400)
+        let status = BridgeStatus(
+            updatedAt: afterExpiry,
+            session: .armed(window: .fiveMinutes, profileName: "Chat", now: epoch),
+            phase: .recording,
+            activeRequestID: nil
+        )
+        guard case .openApp = action(status, at: afterExpiry) else {
+            Issue.record("expected .openApp for a foreign take on an expired session")
+            return
+        }
+    }
+
     @Test("Recording for us stops that exact request")
     func recordingStopsOurRequest() {
         let id = UUID()

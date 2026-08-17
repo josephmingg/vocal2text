@@ -59,6 +59,16 @@ public enum KeyboardBridgePolicy {
         guard let status, isFresh(status, at: now) else {
             return .openApp(VocalURL.arm(window: .default, profileName: nil).url)
         }
+
+        // A take already running stays finishable even if its window closed
+        // underneath it. Checked before the armed test on purpose: a long take
+        // can outlive the session it began in, and offering "Open Vocal"
+        // instead of "Stop" would strand a live microphone with no way to end
+        // it from here. The app accepts a stop regardless of expiry.
+        if status.phase == .recording, let requestID = status.activeRequestID {
+            return .stopRecording(requestID: requestID)
+        }
+
         guard let session = status.session, session.isArmed(at: now) else {
             // Re-arm on the terms the user last chose. The app expires a
             // session rather than forgetting it, so a 60-minute "Email"
