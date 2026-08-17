@@ -36,41 +36,45 @@ struct SettingsView: View {
 
 // MARK: - General
 
+/// Rows of the push-to-talk dropdown: every binding, plus the recorder entry
+/// point (docs/13 §2).
+private enum HotkeyPickerSelection: Hashable {
+    case spec(HotkeySpec)
+    case record
+}
+
 @MainActor
 private struct GeneralPane: View {
     @ObservedObject var settings: SettingsStore
     @State private var launchAtLogin = false
     @State private var loginItemError: String?
     @State private var globeActionConfigured = false
+    @State private var isRecordingHotkey = false
 
     var body: some View {
         Form {
-            Section("Hotkey") {
-                Picker("Dictation hotkey", selection: $settings.hotkeyChoice) {
-                    Text("Fn / Globe (hold)").tag(SettingsStore.HotkeyChoice.fnKey)
-                    Text("Right Command (hold)").tag(SettingsStore.HotkeyChoice.rightCommand)
-                    Text("Right Option (hold)").tag(SettingsStore.HotkeyChoice.rightOption)
-                }
-                if settings.hotkeyChoice == .fnKey && globeActionConfigured {
-                    // docs/03 §3.1: the Globe system action fires at the IOHID
-                    // layer and cannot be suppressed; the user must set
-                    // "Press 🌐 key to: Do Nothing" themselves.
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(
-                            """
-                            The 🌐 key currently triggers a system action (emoji \
-                            picker or input switching) that Vocal cannot suppress. \
-                            In System Settings → Keyboard, set “Press 🌐 key to” \
-                            to “Do Nothing”.
-                            """
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        Button("Open Keyboard Settings") {
-                            FnKeySetup.openKeyboardSettings()
+            Section("Push-to-talk key") {
+                Picker("Hold to talk", selection: hotkeySelection) {
+                    ForEach(HotkeySpec.presetGroups, id: \.title) { group in
+                        Section(group.title) {
+                            ForEach(group.specs, id: \.self) { spec in
+                                Text(spec.label).tag(HotkeyPickerSelection.spec(spec))
+                            }
                         }
                     }
+                    if !settings.hotkeySpec.isPreset {
+                        // The recorded binding needs its own row, or the picker
+                        // would have no tag matching the current selection.
+                        Section("Custom") {
+                            Text(settings.hotkeySpec.label)
+                                .tag(HotkeyPickerSelection.spec(settings.hotkeySpec))
+                        }
+                    }
+                    Section {
+                        Text("Custom…").tag(HotkeyPickerSelection.record)
+                    }
                 }
+                hotkeyNotes
             }
             Section {
                 Toggle("Launch at login", isOn: launchAtLoginBinding)
@@ -87,6 +91,54 @@ private struct GeneralPane: View {
         .onAppear {
             launchAtLogin = SMAppService.mainApp.status == .enabled
             globeActionConfigured = FnKeySetup.globeKeyActionIsConfigured()
+        }
+        .sheet(isPresented: $isRecordingHotkey) {
+            HotkeyRecorderSheet { spec in
+                settings.hotkeySpec = spec
+                // A custom binding may re-introduce the Globe caveat, or drop it.
+                globeActionConfigured = FnKeySetup.globeKeyActionIsConfigured()
+            }
+        }
+    }
+
+    /// "Custom…" is an action, not a value: reading always reports the stored
+    /// binding, so picking it opens the recorder and the menu snaps back.
+    private var hotkeySelection: Binding<HotkeyPickerSelection> {
+        Binding(
+            get: { .spec(settings.hotkeySpec) },
+            set: { selection in
+                switch selection {
+                case .spec(let spec): settings.hotkeySpec = spec
+                case .record: isRecordingHotkey = true
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var hotkeyNotes: some View {
+        if settings.hotkeySpec.usesFnKey && globeActionConfigured {
+            // docs/03 §3.1: the Globe system action fires at the IOHID layer and
+            // cannot be suppressed; the user must set "Press 🌐 key to: Do
+            // Nothing" themselves.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(
+                    """
+                    The 🌐 key currently triggers a system action (emoji \
+                    picker or input switching) that Vocal cannot suppress. \
+                    In System Settings → Keyboard, set “Press 🌐 key to” \
+                    to “Do Nothing”.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Button("Open Keyboard Settings") {
+                    FnKeySetup.openKeyboardSettings()
+                }
+            }
+        }
+        ForEach(settings.hotkeySpec.advisories, id: \.self) { advisory in
+            HotkeyAdvisoryLabel(advisory: advisory)
         }
     }
 

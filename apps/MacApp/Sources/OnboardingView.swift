@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import AVFoundation
 import Combine
+import CoreModels
 import SwiftUI
 
 /// First-run onboarding, pragmatic v1 subset of FR-11.1:
@@ -63,7 +64,7 @@ struct OnboardingView: View {
         var built: [Step] = [.welcome, .microphone, .accessibility]
         // Fn coexistence page only when the chosen hotkey is Fn AND the Globe
         // key still has a system action bound (docs/03 §3.1).
-        if appState.settings.hotkeyChoice == .fnKey && FnKeySetup.globeKeyActionIsConfigured() {
+        if appState.settings.hotkeySpec.usesFnKey && FnKeySetup.globeKeyActionIsConfigured() {
             built.append(.fnSetup)
         }
         built.append(.modelDownload)

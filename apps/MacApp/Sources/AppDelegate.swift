@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreModels
 import Foundation
 
 /// AppKit-side lifecycle owner: builds the composition root, wires the global
@@ -7,9 +8,9 @@ import Foundation
 /// sleep/wake (docs/03 §3.4).
 ///
 /// Cross-agent surfaces referenced here:
-/// - `HotkeyMonitor(choice:)` with assignable `onPressBegan` / `onPressEnded`
+/// - `HotkeyMonitor(spec:)` with assignable `onPressBegan` / `onPressEnded`
 ///   / `onCancel` / `onLockToggle: () -> Void` callbacks plus `start()`,
-///   `rearm()` (re-create the tap after wake), and `updateChoice(_:)`.
+///   `rearm()` (re-create the tap after wake), and `updateSpec(_:)`.
 /// - `HUDPanelController(appState:)` — owns the NSPanel HUD.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -38,7 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let monitor = HotkeyMonitor(choice: appState.settings.hotkeyChoice)
+        let monitor = HotkeyMonitor(spec: appState.settings.hotkeySpec)
         monitor.onPressBegan = { [weak self] in
             guard let self else { return }
             // During a locked take the recording is already running; the
@@ -78,12 +79,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkeyMonitor = monitor
 
-        // Hotkey choice changes take effect immediately, not at relaunch.
-        appState.settings.$hotkeyChoice
+        // Hotkey changes take effect immediately, not at relaunch: `updateSpec`
+        // re-arms the tap itself when one is running.
+        appState.settings.$hotkeySpec
             .dropFirst()
-            .sink { [weak self] choice in
-                self?.hotkeyMonitor?.updateChoice(choice)
-                self?.hotkeyMonitor?.rearm()
+            .sink { [weak self] spec in
+                self?.hotkeyMonitor?.updateSpec(spec)
             }
             .store(in: &settingsSinks)
 
