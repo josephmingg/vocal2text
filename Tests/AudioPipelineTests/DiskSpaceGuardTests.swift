@@ -147,7 +147,10 @@ private func writeSidecar(
     let newest = writeSidecar(in: directory, samples: oneSecond, modified: now.addingTimeInterval(-60))
 
     let candidate = try #require(RecoveryStore.latestRecoverable(in: directory, now: now))
-    #expect(candidate.url == newest)
+    // Compared by filename, not by URL: on macOS the temporary directory is a
+    // symlink (/var → /private/var) and `contentsOfDirectory` hands back the
+    // resolved form, so two URLs naming the same file are not `==`.
+    #expect(candidate.url.lastPathComponent == newest.lastPathComponent)
     #expect(abs(candidate.durationSeconds - 1.0) < 0.01)
 }
 

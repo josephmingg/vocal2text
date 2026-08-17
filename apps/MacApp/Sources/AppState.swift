@@ -376,8 +376,12 @@ final class AppState: ObservableObject {
         // Clear the offer immediately: the scan is asynchronous, and a second
         // click before it finishes would run the same audio twice.
         recoverableTake = nil
+        // Start handing focus back now, while the samples are read and the
+        // model warms — see `yieldFocusToPreviousApp`.
+        NSApp.deactivate()
         let url = candidate.url
         enqueueControl { session in
+            await AppState.yieldFocusToPreviousApp()
             guard let samples = RecoveryStore.samples(at: url), !samples.isEmpty else {
                 // Unreadable or empty: nothing to recover and nothing to keep.
                 RecoveryStore.discard(at: url)
@@ -392,6 +396,31 @@ final class AppState: ObservableObject {
         Task { [weak self] in
             await pending?.value
             self?.refreshRecoverableTake()
+        }
+    }
+
+    /// Hands focus back to the app the user was working in, and waits for the
+    /// handoff to actually land.
+    ///
+    /// Every other path into the pipeline starts from a hotkey, and the HUD
+    /// panel is non-activating, so the target app never loses focus. Recovery
+    /// is the exception: it starts from a menu-bar click, which makes Vocal
+    /// frontmost — and delivery pastes into whatever is frontmost. Without
+    /// this, a recovered take would be pasted into Vocal itself, which is to
+    /// say nowhere.
+    ///
+    /// `deactivate()` is called at click time, so this usually returns on the
+    /// first check; the wait only covers a slow handoff. Bounded at ~600 ms
+    /// because it sits in the control chain — a hotkey press arriving now
+    /// queues behind it, and a wrong paste target is a smaller harm than a
+    /// dictation that takes a visible moment to start.
+    private static func yieldFocusToPreviousApp() async {
+        let ownBundleID = Bundle.main.bundleIdentifier
+        for _ in 0..<12 {
+            if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != ownBundleID {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(50))
         }
     }
 
