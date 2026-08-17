@@ -194,8 +194,9 @@ struct OpenAICompatibleProviderRequestTests {
         #expect(body.model == "qwen2.5:7b-instruct")
         #expect(body.temperature == 0.2)
         #expect(body.stream == false)
-        // 29 chars → 2× char cap, floored at 64 (ZH-safe budget).
-        #expect(body.maxTokens == 64)
+        // 29 chars → 4× char cap, floored at 1024 (room for a reasoning model
+        // to think before it answers).
+        #expect(body.maxTokens == 1024)
         #expect(body.messages.count == 2)
         #expect(body.messages.first?.role == "system")
         #expect(body.messages.first?.content.contains("Claude") == true)
@@ -207,9 +208,14 @@ struct OpenAICompatibleProviderRequestTests {
         )
     }
 
-    @Test func maxTokensHeuristicIsTwiceCharsWithFloor() {
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 300) == 600)
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 3) == 64)
+    @Test func maxTokensLeavesRoomForAReasoningModelToThink() {
+        // A reasoning model spends the budget before emitting anything: qwen3:8b
+        // needed 231 completion tokens for a 48-character dictation, and the
+        // previous 2×-chars/64-floor budget gave it 96 — so `content` came back
+        // empty and cleanup silently did nothing on every take.
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 48) >= 231)
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 300) == 1200)
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 3) == 1024)
     }
 
     @Test func prewarmBodyRequestsSingleToken() throws {

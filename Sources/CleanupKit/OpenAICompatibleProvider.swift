@@ -176,7 +176,18 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         // max_tokens is a cap, not a target; overshoot is free on local
         // endpoints. Chinese tokenizes near 1–2 tokens per character, so a
         // chars/3 estimate silently truncated ZH output mid-sentence.
-        max(64, 2 * count)
+        //
+        // Reasoning models (qwen3, deepseek-r1) spend the budget *thinking*
+        // before emitting any answer, and Ollama returns that thinking in a
+        // separate `reasoning` field — so a budget that runs out mid-thought
+        // yields an empty `content`, the validator rejects it, and the app
+        // silently delivers the stage-2 text on every single dictation
+        // (FR-7.3). Measured: a 48-character dictation cost qwen3:8b 231
+        // completion tokens, where the old max(64, 2 * count) allowed 96.
+        // The floor is what makes reasoning models usable at all; the cap
+        // still exists only to bound a runaway generation, and the validator's
+        // ratio ceiling is the real guard against a model that rambles.
+        max(1024, 4 * count)
     }
 
     nonisolated func makeURLRequest(
