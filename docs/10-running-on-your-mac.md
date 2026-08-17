@@ -48,7 +48,7 @@ Then: focus any text field anywhere, **hold Fn, speak, release**. Text lands at 
 
 - Double-tap the hotkey = hands-free lock (auto-stops at 15 min); tap to finish.
 - Esc while holding = cancel.
-- Menu-bar icon → language pin (Auto/EN/中文), profile pin, History, Settings.
+- Menu-bar icon → language pin (Auto/EN/中文/မြန်မာ), profile pin, History, Settings.
 - AI cleanup is **off** until you flip the master switch in Settings → Cleanup (then pick
   Ollama/a custom endpoint; Apple Foundation Models arrives on the macOS 26 SDK build).
 
@@ -60,6 +60,7 @@ Then: focus any text field anywhere, **hold Fn, speak, release**. Text lands at 
 | Full package incl. GRDB persistence + WhisperKit adapter | Compiles + tests on CI's macOS runner |
 | VocalMac app target | Compiles unsigned on CI's macOS runner |
 | Hotkey capture, paste insertion, mic quality, real latency, Apple-engine/FM adapters | **Cannot be verified in any cloud** — first run on your Mac is milestone M0's spike checklist (docs/06). File issues for anything that misbehaves; each spike has a fallback documented in docs/03/04 |
+| Burmese (မြန်မာ) **recognition accuracy** | **Known poor, not a bug to file.** The text layer is complete and unit-tested, but transcription still runs on Whisper, which manages 80–100% WER on Burmese. A Burmese-capable engine is docs/11 G13 |
 
 ## Known v1 seams (deliberate, documented)
 
@@ -70,4 +71,5 @@ Then: focus any text field anywhere, **hold Fn, speak, release**. Text lands at 
   setting is wired for when capture persistence lands.
 - Profiles live in memory (built-ins) until first saved to the database; the pin picker
   re-lists them per launch.
-- iOS app: next build phase (docs/02 is the spec).
+- iOS app: main-app dictation with auto-copy delivery ships; the keyboard extension
+  (docs/02 mode D2) is the remaining piece.
