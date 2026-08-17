@@ -6,10 +6,12 @@ CI jobs green on `main`. Evidence: CI runs 32004944289 (all targets) and 3201135
 (macOS 14 target). Field findings already fixed: first-run model-download visibility,
 `make generate` signing reset, Sonoma support, quarantine-stripping share flow.
 
-**Landed since, and not yet run on hardware:** the customizable push-to-talk hotkey
-(A7 below, CI run 32038326693). It is on `main` and green, but CI compiles the Mac app
-without executing it, so the verification debt is real rather than ceremonial — one of
-its changes alters what keystrokes other applications receive.
+**Landed since, and not yet run on hardware:** the customizable push-to-talk hotkey (A7)
+and the Mac profile editor (A6). Both are on `main` and CI-green, but CI compiles the Mac
+app without executing it, so the verification debt is real rather than ceremonial — the
+hotkey change alters what keystrokes other applications receive, and the profile editor is
+the first pane that writes to the database from the UI. **The next `make install` should
+start with the A6 and A7 checklists, before any new feature work.**
 
 **How to resume in a new session:** point Claude at this repo and this file. Working
 branch convention: `claude/offline-voice-text-app-oy19q9` (restart it from `main`).
@@ -24,8 +26,24 @@ Read `docs/11-known-gaps.md` alongside — G-numbers below refer to it.
 | A3 | **Audio retention + cancel recovery** (G9) | Encode takes to Opus/AAC in `MicrophoneCapture.finish`, honor the retention setting, add History playback + the 24 h cancelled-take Recover flow |
 | A4 | **Insertion edge-case sweep** | Collect real paste failures from daily use; grow the per-app strategy table; expose overrides in Advanced settings |
 | A5 | **Benchmark evidence (M0 debt)** | Run the docs/06 M0 spike checklist on the owner's Mac; commit `docs/benchmarks/M0-results.md` (latency p50/p95, WER on the fixture sets) |
-| A6 | **Profile editing UI + persistence** | Profiles are in-memory built-ins today; add CRUD in Settings, seed the database once, make the pin durable |
+| A6 | ~~**Profile editing UI + persistence**~~ | **Shipped on the Mac (#13, G17), unverified on hardware.** Settings → Profiles is a master–detail editor: name/icon, per-profile cleanup opt-in + prompt, language pin (incl. မြန်မာ → Burmese engine), Myanmar digits, spoken punctuation, ZH formatting, app/website routes, priority, default handling. `ProfileBootstrap.loadOrSeed` seeds the built-ins once and is Linux-tested; edits apply at the next press with no relaunch. **Left over:** iOS still has no editor (its seeded set is read-only), and `providerOverride` has no UI — pointless until G3/G15's provider-selecting factory exists. Verification checklist below |
 | A7 | **Hotkey customization: hardware pass** | **Code complete, five CI jobs green, nothing executed.** PRs #6 and #11 shipped the preset dropdown, the custom recorder, the extracted decision core, the onboarding key step and the live key tester. CI compiles the Mac app but never runs it, so every runtime claim below is unproven. Closes when each row of the checklist has a result |
+
+### A6 checklist — the profile editor on hardware
+
+`ProfileBootstrap` is unit-tested; `ProfilesPane` (~450 lines of new SwiftUI) is not, and
+nothing here has been executed. Lower risk than A7 — no event tap, nothing that changes
+what other apps receive — but it is the first pane that writes to the database from the UI.
+
+| # | Check | Why this one |
+|---|---|---|
+| 1 | Fresh install: the built-in profiles appear once, and relaunching does not duplicate them | `loadOrSeed` is seed-once; a re-seed bug only shows on the second launch |
+| 2 | **Existing** install (a profile database that predates #13) upgrades without losing or duplicating anything | The seeding path behaves differently against a non-empty store, and only an old profile can exercise it |
+| 3 | Edit a profile, then dictate **without relaunching** — the change applies | Profiles are read from the live store at every press; the whole no-relaunch claim rests on that |
+| 4 | The menu-bar pin picker reflects an edit or a new profile immediately | Pin UUIDs must stay aligned with the resolver's (FR-8.3); a stale copy makes pinning a silent no-op |
+| 5 | Pin a profile to မြန်မာ, dictate — it routes to the Burmese engine | Per-profile language pins are the intended route to Burmese now that auto mode stays on Whisper (G13) |
+| 6 | Delete the default profile, or demote it — routing still resolves | Exactly one profile owns the default route; the editor now lets you touch it |
+| 7 | Every other Settings pane still lays out correctly | The window grew to 680×560 for the master–detail pane, which changes every sibling pane — including the hotkey control from A7 |
 
 ### A7 checklist — what "verified" means for the hotkey
 
