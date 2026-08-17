@@ -59,6 +59,31 @@ jobs:
       - name: Test
         run: swift test
 
+  # The VocalIOS app target: unsigned simulator compile.
+  ios-app:
+    name: iOS — VocalIOS app build
+    runs-on: macos-15
+    needs: macos-full
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Build app (unsigned, simulator)
+        run: |
+          set +e
+          xcodebuild -project Vocal.xcodeproj -scheme VocalIOS -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build > build-ios.log 2>&1
+          status=$?
+          set -e
+          grep -E "error:" build-ios.log | head -80 || true
+          tail -5 build-ios.log
+          exit $status
+
   # The VocalMac app target: XcodeGen project + unsigned xcodebuild compile.
   macos-app:
     name: macOS — VocalMac app build

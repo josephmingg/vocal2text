@@ -18,6 +18,41 @@ packages:
     path: .
 
 targets:
+  VocalIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: apps/iOSApp/Sources
+    info:
+      path: apps/iOSApp/Info.plist
+      properties:
+        CFBundleDisplayName: Vocal
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation button."
+        UIBackgroundModes: [audio]
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    dependencies:
+      - package: DictationCore
+        products:
+          - CoreModels
+          - TextPipeline
+          - CleanupKit
+          - ProfileKit
+          - ModelStore
+          - ASRKit
+          - SessionKit
+          - AudioPipeline
+          - PersistenceKit
+          - ASREngineWhisperKit
+          - ASREngineAppleSpeech
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vocal.ios
+        TARGETED_DEVICE_FAMILY: "1"
+
   VocalMac:
     type: application
     platform: macOS
