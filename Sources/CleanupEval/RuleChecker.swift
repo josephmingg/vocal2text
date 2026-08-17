@@ -30,9 +30,10 @@ public enum RuleChecker {
     public static func check(
         _ rule: EvalRule, output: String, input: String, protectedTerms: [String]
     ) -> RuleOutcome {
+        let cased = rule.caseSensitive ?? false
         switch rule.kind {
         case .mustContain:
-            let missing = (rule.values ?? []).filter { !contains(output, $0) }
+            let missing = (rule.values ?? []).filter { !contains(output, $0, caseSensitive: cased) }
             return RuleOutcome(
                 label: rule.label,
                 passed: missing.isEmpty,
@@ -40,7 +41,7 @@ public enum RuleChecker {
             )
 
         case .mustNotContain:
-            let present = (rule.values ?? []).filter { contains(output, $0) }
+            let present = (rule.values ?? []).filter { contains(output, $0, caseSensitive: cased) }
             return RuleOutcome(
                 label: rule.label,
                 passed: present.isEmpty,
@@ -71,26 +72,28 @@ public enum RuleChecker {
         }
     }
 
-    /// Case-insensitive containment, with word boundaries where the script has
-    /// them.
+    /// Containment, with word boundaries where the script has them.
     ///
     /// A plain substring test would make `mustNotContain: ["um"]` fire on
     /// "album" and "number", quietly failing cases the model got right. Han and
-    /// Myanmar have no word boundaries, so those fall back to substring — which
-    /// is what 「不对」 needs anyway.
-    static func contains(_ haystack: String, _ needle: String) -> Bool {
+    /// Myanmar have no word boundaries, so those needles fall back to substring
+    /// — which is what 「不对」 needs anyway.
+    ///
+    /// Width-insensitive matching is deliberately *not* used: it makes ASCII
+    /// "," match full-width "，", which is precisely the distinction the
+    /// ZH punctuation cases exist to measure.
+    static func contains(_ haystack: String, _ needle: String, caseSensitive: Bool = false) -> Bool
+    {
         guard !needle.isEmpty else { return true }
+        let options: String.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
 
         let isWordLike = needle.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
         guard isWordLike else {
-            return haystack.range(of: needle, options: [.caseInsensitive, .widthInsensitive])
-                != nil
+            return haystack.range(of: needle, options: options) != nil
         }
 
         var searchRange = haystack.startIndex..<haystack.endIndex
-        while let found = haystack.range(
-            of: needle, options: [.caseInsensitive], range: searchRange
-        ) {
+        while let found = haystack.range(of: needle, options: options, range: searchRange) {
             let leadingOK = found.lowerBound == haystack.startIndex
                 || !isWordCharacter(haystack[haystack.index(before: found.lowerBound)])
             let trailingOK = found.upperBound == haystack.endIndex
@@ -104,8 +107,21 @@ public enum RuleChecker {
         return false
     }
 
+    /// Whether this character continues a *Latin* word.
+    ///
+    /// Han and Myanmar characters are letters as far as Swift is concerned, but
+    /// they do not extend a Latin token: in 「我们先review一下」 the word `review`
+    /// is bounded by 先 and 一. Counting those as word characters made every
+    /// code-switching case unmatchable — the terms were right there in the
+    /// output and the eval reported them missing.
     static func isWordCharacter(_ character: Character) -> Bool {
-        character.isLetter || character.isNumber || character == "'" || character == "’"
+        guard character.isLetter || character.isNumber || character == "'" || character == "’"
+        else {
+            return false
+        }
+        return !character.unicodeScalars.contains {
+            Unicode.isHanScalar($0) || Unicode.isMyanmarScalar($0)
+        }
     }
 
     /// Han text has no spaces, so counting space-separated tokens would score

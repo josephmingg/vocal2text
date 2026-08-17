@@ -107,18 +107,27 @@ public struct EvalRule: Codable, Sendable, Hashable {
     public var kind: Kind
     public var values: [String]?
     public var limit: Int?
+    /// Match exactly as written. Needed for capitalisation cases — a
+    /// case-insensitive rule cannot tell `vocal2text` from `Vocal2Text`, and
+    /// silently "fails" the correct output.
+    public var caseSensitive: Bool?
 
-    public init(kind: Kind, values: [String]? = nil, limit: Int? = nil) {
+    public init(
+        kind: Kind, values: [String]? = nil, limit: Int? = nil, caseSensitive: Bool? = nil
+    ) {
         self.kind = kind
         self.values = values
         self.limit = limit
+        self.caseSensitive = caseSensitive
     }
 
     /// Human-readable form, used in the report.
     public var label: String {
+        let cased = (caseSensitive ?? false) ? ", cased" : ""
         switch kind {
-        case .mustContain: return "mustContain(\((values ?? []).joined(separator: ", ")))"
-        case .mustNotContain: return "mustNotContain(\((values ?? []).joined(separator: ", ")))"
+        case .mustContain: return "mustContain(\((values ?? []).joined(separator: ", "))\(cased))"
+        case .mustNotContain:
+            return "mustNotContain(\((values ?? []).joined(separator: ", "))\(cased))"
         case .preservesTerms: return "preservesTerms"
         case .maxWords: return "maxWords(\(limit.map(String.init) ?? "?"))"
         }

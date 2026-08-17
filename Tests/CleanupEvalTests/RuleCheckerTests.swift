@@ -78,6 +78,81 @@ import Testing
     #expect(RuleChecker.check(rule, output: "周六。", input: "", protectedTerms: []).passed)
 }
 
+// MARK: - Regressions from the first live run (2026-08-17, qwen2.5:3b-instruct)
+
+@Test func latinTermsEmbeddedInHanAreFound() {
+    // The first eval run scored 5 code-switching cases as failures whose terms
+    // were plainly present: Han is `isLetter`, so 先/一 read as word characters
+    // and `review` looked mid-word.
+    let rule = EvalRule(kind: .mustContain, values: ["review", "PR", "merge"])
+    #expect(
+        RuleChecker.check(
+            rule, output: "我们先review一下这个PR再merge。", input: "", protectedTerms: []
+        ).passed
+    )
+    #expect(
+        RuleChecker.check(
+            EvalRule(kind: .mustContain, values: ["issue"]),
+            output: "打开GitHub看一下那个issue", input: "", protectedTerms: []
+        ).passed
+    )
+    #expect(
+        RuleChecker.check(
+            EvalRule(kind: .mustContain, values: ["test", "deploy"]),
+            output: "先跑一下test，pass了再deploy", input: "", protectedTerms: []
+        ).passed
+    )
+    // The boundary rule must still hold inside Latin text.
+    #expect(
+        !RuleChecker.check(
+            EvalRule(kind: .mustContain, values: ["um"]),
+            output: "album number", input: "", protectedTerms: []
+        ).passed
+    )
+}
+
+@Test func fullWidthPunctuationIsNotTheSameAsAscii() {
+    // Width-insensitive matching made the correct output 「，」 match the ASCII
+    // "," the case forbids — the eval failed the one thing it was measuring.
+    let rule = EvalRule(kind: .mustNotContain, values: [","])
+    #expect(
+        RuleChecker.check(
+            rule, output: "今天的会议取消了，下周再说。", input: "", protectedTerms: []
+        ).passed
+    )
+    #expect(
+        !RuleChecker.check(
+            rule, output: "今天的会议取消了,下周再说", input: "", protectedTerms: []
+        ).passed
+    )
+}
+
+@Test func caseSensitiveRulesCanTestCapitalisation() {
+    // Correct output is lowercase `vocal2text`; a case-insensitive rule found
+    // the forbidden `Vocal2Text` inside it and failed a good answer.
+    let cased = EvalRule(
+        kind: .mustNotContain, values: ["Vocal2Text"], caseSensitive: true
+    )
+    #expect(
+        RuleChecker.check(
+            cased, output: "the error is in vocal2text not in the SDK", input: "",
+            protectedTerms: []
+        ).passed
+    )
+    #expect(
+        !RuleChecker.check(
+            cased, output: "the error is in Vocal2Text", input: "", protectedTerms: []
+        ).passed
+    )
+    // Default stays case-insensitive.
+    #expect(
+        !RuleChecker.check(
+            EvalRule(kind: .mustNotContain, values: ["Vocal2Text"]),
+            output: "the error is in vocal2text", input: "", protectedTerms: []
+        ).passed
+    )
+}
+
 @Test func emptyRuleValuesPassRatherThanCrash() {
     #expect(
         RuleChecker.check(

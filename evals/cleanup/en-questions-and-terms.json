@@ -119,7 +119,11 @@
     "protectedTerms": ["vocal2text"],
     "rules": [
       { "kind": "preservesTerms", "values": ["vocal2text"] },
-      { "kind": "mustNotContain", "values": ["vocal 2 text", "Vocal2Text"] }
+      {
+        "kind": "mustNotContain",
+        "values": ["vocal 2 text", "Vocal2Text"],
+        "caseSensitive": true
+      }
     ],
     "note": "Digits inside an identifier invite spacing and capitalisation edits."
   },
