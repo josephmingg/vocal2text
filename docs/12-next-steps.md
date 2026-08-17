@@ -23,12 +23,17 @@ Read `docs/11-known-gaps.md` alongside — G-numbers below refer to it.
 
 ## Phase B — finish the iPhone
 
-| # | Goal | Notes |
+| # | Goal | Status |
 |---|---|---|
-| B1 | **Run VocalIOS on the owner's iPhone** | Same Xcode project, VocalIOS scheme, sign + run; verify Action-Button intent, first model download on device |
-| B2 | **Keyboard extension (D2b)** | The big one: dictate directly inside WeChat/Messages. Design ready in docs/02 §3.1 — capture-session pattern, App Group + Darwin notifications, keyboard = insert-only surface |
-| B3 | **Share-extension import + Live Activity** | Voice-note import via share sheet; recording state in Dynamic Island |
-| B4 | **iOS background audio session polish** | Session auto-expiry (5/15/60 min), lock-screen continued capture per FR-i1.3 |
+| B1 | **Run VocalIOS on the owner's iPhone** | **Open — owner-only.** Cannot be done from CI: it needs the phone, Xcode signing, and a paid account for App Groups. Checklist and the measurements to record: `docs/13-running-on-your-iphone.md` |
+| B2 | **Keyboard extension (D2b)** | **Code complete, compiles in CI, unverified on device.** `Sources/BridgeKit` holds the whole App Group contract (Linux-tested); `apps/iOSKeyboard` is the insert-only surface; `CaptureSessionCoordinator` is the app-side host. Closes when AC-i3 has screen recordings |
+| B3 | **Share-extension import + Live Activity** | **Code complete, compiles in CI, unverified on device.** `apps/iOSShareExt` + `ImportProcessor` + `AudioFileDecoder`; `apps/iOSWidgets` renders the Dynamic Island. Closes when AC-i5 and AC-i6 have recordings |
+| B4 | **iOS background audio session polish** | **Partly done.** Auto-expiry 5/15/60 and `AudioSessionManager`/`CaptureResidency` are in. Still open: the G15 latency spike and the NFR-i3 battery number |
+
+**Where Phase B actually stands:** everything Phase B asked for is written and
+builds, and the logic behind it is tested on Linux — but no line of it has run
+on an iPhone. Treat B2/B3 as "ready for the device pass", not as shipped.
+`docs/11-known-gaps.md` G10 and G12–G16 track exactly what is unproven.
 
 ## Phase C — deeper features (pick by appetite)
 
