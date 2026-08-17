@@ -55,6 +55,52 @@ import Testing
     #expect(Set(HotkeySpec.presets).count == HotkeySpec.presets.count)
 }
 
+@Test func presetsBindTheExactKeyCodesAndFlags() {
+    // Literal values, deliberately not derived from the tables under test —
+    // otherwise a wrong kVK_* or CGEventFlags constant passes every check.
+    let expected: [String: (UInt16, UInt64)] = [
+        "🌐 Fn": (63, 0x0080_0000),
+        "Right ⌘": (54, 0x0010_0000),
+        "Left ⌘": (55, 0x0010_0000),
+        "Right ⌥": (61, 0x0008_0000),
+        "Left ⌥": (58, 0x0008_0000),
+        "Right ⌃": (62, 0x0004_0000),
+        "Left ⌃": (59, 0x0004_0000),
+        "Right ⇧": (60, 0x0002_0000),
+        "Left ⇧": (56, 0x0002_0000),
+    ]
+    for spec in HotkeySpec.presets {
+        guard case .modifierOnly(let keyCode, let flagMask) = spec.kind else { continue }
+        let pair = expected[spec.label]
+        #expect(pair?.0 == keyCode, "\(spec.label) keyCode")
+        #expect(pair?.1 == flagMask, "\(spec.label) flagMask")
+    }
+    let functionKeys: [String: UInt16] = ["F13": 105, "F14": 107, "F15": 113]
+    for spec in HotkeySpec.presets {
+        guard case .key(let keyCode, let requiredFlags) = spec.kind else { continue }
+        #expect(functionKeys[spec.label] == keyCode, "\(spec.label) keyCode")
+        #expect(requiredFlags == 0, "\(spec.label) requiredFlags")
+    }
+}
+
+@Test func deviceFlagMasksDistinguishLeftFromRight() {
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.leftShift) == 0x0000_0002)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.rightShift) == 0x0000_0004)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.leftCommand) == 0x0000_0008)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.rightCommand) == 0x0000_0010)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.leftOption) == 0x0000_0020)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.rightOption) == 0x0000_0040)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.leftControl) == 0x0000_0001)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.rightControl) == 0x0000_2000)
+    // Only one Fn key, so there is no side to tell apart.
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.function) == 0)
+    #expect(HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.space) == 0)
+    // Never overlaps the bits a binding may require.
+    for keyCode in HotkeyKeyCode.modifierKeyCodes {
+        #expect(HotkeyKeyCode.deviceFlagMask(for: keyCode) & HotkeyFlagMask.significant == 0)
+    }
+}
+
 @Test func everyModifierPresetCarriesItsFlagMask() {
     // A zero mask would produce a binding whose down edge never fires.
     for spec in HotkeySpec.presets {
@@ -201,6 +247,32 @@ import Testing
         HotkeySpec(kind: .key(keyCode: 124, requiredFlags: HotkeyFlagMask.command)).advisories
             .contains(.navigationKeyShadowed) == false
     )
+}
+
+@Test func typingHandModifiersAreFlagged() {
+    // Left-hand modifiers and both Shifts are held constantly while typing, so
+    // they arm on ordinary keystrokes.
+    for keyCode in HotkeyKeyCode.typingHandModifierKeyCodes {
+        let mask = HotkeyKeyCode.modifierFlagMask(for: keyCode) ?? 0
+        let spec = HotkeySpec(kind: .modifierOnly(keyCode: keyCode, flagMask: mask))
+        #expect(spec.advisories.contains(.typingHandModifier), "\(spec.label)")
+    }
+    #expect(!HotkeySpec.rightCommand.advisories.contains(.typingHandModifier))
+    #expect(!HotkeySpec.rightOption.advisories.contains(.typingHandModifier))
+    #expect(!HotkeySpec.fnGlobe.advisories.contains(.typingHandModifier))
+}
+
+@Test func theWholeF1ToF12RowIsFlaggedAsSystemKeys() {
+    // On a stock Mac these are brightness/media keys and never reach the app.
+    for keyCode in HotkeyKeyCode.fnLatchingKeyCodes.subtracting(HotkeyKeyCode.arrowKeyCodes) {
+        let spec = HotkeySpec(kind: .key(keyCode: keyCode, requiredFlags: 0))
+        #expect(spec.advisories.contains(.systemFunctionKey), "\(spec.label)")
+    }
+    // F13–F15 have no media function, so they are clean.
+    for keyCode in [HotkeyKeyCode.f13, HotkeyKeyCode.f14, HotkeyKeyCode.f15] {
+        let spec = HotkeySpec(kind: .key(keyCode: keyCode, requiredFlags: 0))
+        #expect(!spec.advisories.contains(.systemFunctionKey), "\(spec.label)")
+    }
 }
 
 @Test func conflictAdvisoriesAreWarnings() {

@@ -212,6 +212,8 @@ public enum HotkeyAdvisory: Sendable, Hashable {
     case appShortcutConflict
     case systemFunctionKey
     case navigationKeyShadowed
+    /// A modifier the user also holds constantly while typing.
+    case typingHandModifier
 
     public enum Severity: Sendable, Hashable {
         case info
@@ -229,8 +231,9 @@ public enum HotkeyAdvisory: Sendable, Hashable {
         switch self {
         case .secureInput:
             return """
-                Key combinations stop working while a password field is focused \
-                (macOS secure input). Single modifier keys keep working.
+                Anything other than a single modifier key stops working while a \
+                password field is focused (macOS secure input). Fn and the \
+                ⌘/⌥/⌃/⇧ keys keep working there.
                 """
         case .fnDoubleTapDictation:
             return """
@@ -244,9 +247,18 @@ public enum HotkeyAdvisory: Sendable, Hashable {
         case .appShortcutConflict:
             return "⌥Space is used as a shortcut by some apps."
         case .systemFunctionKey:
-            return "F11 and F12 are bound to system actions on many keyboards."
+            return """
+                On most Macs F1–F12 are brightness and media keys, and only \
+                reach apps when “Use F1, F2, etc. as standard function keys” is \
+                on in System Settings → Keyboard. F13–F15 always work.
+                """
         case .navigationKeyShadowed:
             return "Holding this key to talk means it no longer moves the cursor."
+        case .typingHandModifier:
+            return """
+                You also hold this key for ordinary shortcuts and capitals, so \
+                Vocal arms on every press. A right-hand ⌘, ⌥ or ⌃ is steadier.
+                """
         }
     }
 }
@@ -282,6 +294,10 @@ extension HotkeySpec {
         if usesFnKey {
             notes.append(.fnDoubleTapDictation)
         }
+        if case .modifierOnly(let keyCode, _) = kind,
+            HotkeyKeyCode.typingHandModifierKeyCodes.contains(keyCode) {
+            notes.append(.typingHandModifier)
+        }
         if case .key(let keyCode, let requiredFlags) = kind {
             let modifiers = requiredFlags & HotkeyFlagMask.significant
             if keyCode == HotkeyKeyCode.space {
@@ -292,7 +308,8 @@ extension HotkeySpec {
                 default: break
                 }
             }
-            if keyCode == HotkeyKeyCode.f11 || keyCode == HotkeyKeyCode.f12 {
+            if HotkeyKeyCode.fnLatchingKeyCodes.subtracting(HotkeyKeyCode.arrowKeyCodes)
+                .contains(keyCode) {
                 notes.append(.systemFunctionKey)
             }
             if modifiers == 0, HotkeyKeyCode.arrowKeyCodes.contains(keyCode) {

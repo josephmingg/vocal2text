@@ -78,13 +78,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scheduleArmRetry()
         }
         hotkeyMonitor = monitor
+        appState.hotkeyMonitor = monitor
 
         // Hotkey changes take effect immediately, not at relaunch: `updateSpec`
         // re-arms the tap itself when one is running.
         appState.settings.$hotkeySpec
             .dropFirst()
             .sink { [weak self] spec in
-                self?.hotkeyMonitor?.updateSpec(spec)
+                guard let self, let monitor = self.hotkeyMonitor else { return }
+                monitor.updateSpec(spec)
+                // Re-arming can fail if Accessibility was revoked since launch;
+                // without this the new key would be silently dead forever.
+                if !monitor.isArmed {
+                    self.scheduleArmRetry()
+                }
             }
             .store(in: &settingsSinks)
 
@@ -129,6 +136,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Re-create the tap after wake/unlock, and keep retrying if it could not
+    /// be re-created — a wake that lands before the window server is ready must
+    /// not cost the user their hotkey until the next relaunch.
+    private func rearmOrRetry() {
+        guard let monitor = hotkeyMonitor else { return }
+        if !monitor.rearm() {
+            scheduleArmRetry()
+        }
+    }
+
     private func scheduleArmRetry() {
         armRetryTimer?.invalidate()
         let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -167,7 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.hotkeyMonitor?.rearm()
+                    self?.rearmOrRetry()
                 }
             }
         )
@@ -179,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.hotkeyMonitor?.rearm()
+                    self?.rearmOrRetry()
                 }
             }
         )

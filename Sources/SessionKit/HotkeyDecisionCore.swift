@@ -29,6 +29,25 @@ public struct HotkeyDecisionCore: Sendable {
         case cancelled
     }
 
+    /// What the monitor does with one event: act on it, swallow it, or both.
+    public struct Outcome: Sendable, Hashable {
+        public var decision: Decision?
+        /// True when the event is the binding's own key press or release and
+        /// must not reach the rest of the system — otherwise ⌥Space would type
+        /// a non-breaking space into the document you are dictating into.
+        ///
+        /// Only keyed bindings consume. A modifier-only binding must pass
+        /// through: the Globe action fires below the tap and cannot be
+        /// suppressed anyway (docs/03 §3.1), and chord-abort depends on seeing
+        /// the keyDown that follows.
+        public var consumesEvent: Bool
+
+        public init(decision: Decision? = nil, consumesEvent: Bool = false) {
+            self.decision = decision
+            self.consumesEvent = consumesEvent
+        }
+    }
+
     public enum EventKind: Sendable, Hashable {
         case keyDown
         case keyUp
@@ -96,6 +115,15 @@ public struct HotkeyDecisionCore: Sendable {
 
     public private(set) var isPressed = false
     private var pressStartTime: TimeInterval = 0
+    /// The device-specific bit observed on the current press's down edge, or 0
+    /// when the hardware did not report one. Self-calibrating on purpose: a
+    /// keyboard that reports the bits gets left/right release detection, and one
+    /// that does not falls back to the shared-bit behaviour rather than losing
+    /// the binding entirely.
+    private var pressDeviceFlagMask: UInt64 = 0
+    /// True while a keyed binding's `keyDown` has been swallowed, so its
+    /// matching `keyUp` is swallowed too and no app sees a half chord.
+    private var isConsumingKey = false
     /// Down-edge time of the last short tap; a second down-edge within
     /// `timings.doubleTap` of it upgrades the pair to a lock toggle (FR-1.3).
     private var lastShortTapDownTime: TimeInterval?
@@ -109,12 +137,13 @@ public struct HotkeyDecisionCore: Sendable {
 
     // MARK: - Event intake
 
-    public mutating func handle(_ event: Event) -> Decision? {
+    public mutating func handle(_ event: Event) -> Outcome {
         switch event.kind {
         case .tapDisabled:
-            return handleTapDisabled()
+            isConsumingKey = false
+            return Outcome(decision: handleTapDisabled())
         case .flagsChanged:
-            return handleFlagsChanged(event)
+            return Outcome(decision: handleFlagsChanged(event))
         case .keyDown:
             return handleKeyDown(event)
         case .keyUp:
@@ -134,50 +163,78 @@ public struct HotkeyDecisionCore: Sendable {
         switch spec.kind {
         case .modifierOnly(let keyCode, let flagMask):
             guard matchesModifierOnly(event, keyCode: keyCode) else { return nil }
-            return event.flags & flagMask != 0
-                ? downEdge(at: event.timestamp)
-                : upEdge(at: event.timestamp)
-        case .key(_, let requiredFlags):
+            if isPressed {
+                // Still held? Left and right share one flag bit, so while the
+                // twin key is down the shared bit stays set through our key's
+                // release — check the device-specific bit when the hardware
+                // reported one on the down edge, or the recording never stops.
+                let heldMask = pressDeviceFlagMask != 0 ? pressDeviceFlagMask : flagMask
+                guard event.flags & heldMask != heldMask else { return nil }
+                return upEdge(at: event.timestamp)
+            }
+            guard event.flags & flagMask == flagMask else {
+                // A stray up edge: no press to end, but the debounce clock is
+                // still advanced, exactly as the pre-refactor monitor did.
+                return upEdge(at: event.timestamp)
+            }
+            let deviceMask = HotkeyKeyCode.deviceFlagMask(for: keyCode)
+            let decision = downEdge(at: event.timestamp)
+            if decision != nil {
+                pressDeviceFlagMask = event.flags & deviceMask != 0 ? deviceMask : 0
+            }
+            return decision
+        case .key(let keyCode, let requiredFlags):
             // Releasing one of the chord's modifiers before the key itself ends
             // the press — it is a release, not a cancel (docs/13 §4).
             guard isPressed, requiredFlags != 0 else { return nil }
-            let held = event.flags & HotkeyFlagMask.significant
+            // Normalized the same way the binding was recorded, so the two
+            // sides of the comparison always agree.
+            let held = HotkeyFlagMask.normalized(event.flags, forKeyCode: keyCode)
             guard held & requiredFlags != requiredFlags else { return nil }
             return upEdge(at: event.timestamp)
         }
     }
 
-    private mutating func handleKeyDown(_ event: Event) -> Decision? {
+    private mutating func handleKeyDown(_ event: Event) -> Outcome {
         if case .key(let keyCode, let requiredFlags) = spec.kind,
             event.keyCode == keyCode,
-            !event.isRepeat,
             HotkeyFlagMask.normalized(event.flags, forKeyCode: keyCode) == requiredFlags {
-            return downEdge(at: event.timestamp)
+            // The binding's own press — swallow it, including the autorepeats
+            // that arrive while the user holds it to talk.
+            isConsumingKey = true
+            let decision = event.isRepeat ? nil : downEdge(at: event.timestamp)
+            return Outcome(decision: decision, consumesEvent: true)
         }
-        guard isPressed else { return nil }
+        guard isPressed else { return Outcome() }
         if event.keyCode == HotkeyKeyCode.escape {
-            // Escape cancels an active press at any time (docs/03 §3.1).
-            return abortActivePress()
+            // Escape cancels an active press at any time (docs/03 §3.1), and
+            // passes through so it keeps doing its normal job as well.
+            return Outcome(decision: abortActivePress())
         }
         guard case .modifierOnly = spec.kind else {
             // A keyed binding is itself a chord; other keys pressed during it
             // are the user typing, not aborting (docs/13 §4).
-            return nil
+            return Outcome()
         }
         if event.timestamp - pressStartTime < timings.chordAbort {
             // Chord (e.g. Fn+arrow, right-⌘+C): the user wanted a shortcut, not
             // dictation → abort-before-start (docs/03 §3.1). The event itself
-            // passes through untouched — we never swallow.
-            return abortActivePress()
+            // passes through untouched — a modifier binding never swallows.
+            return Outcome(decision: abortActivePress())
         }
-        return nil
+        return Outcome()
     }
 
-    private mutating func handleKeyUp(_ event: Event) -> Decision? {
+    private mutating func handleKeyUp(_ event: Event) -> Outcome {
         guard case .key(let keyCode, _) = spec.kind, event.keyCode == keyCode else {
-            return nil
+            return Outcome()
         }
-        return upEdge(at: event.timestamp)
+        // Swallow the release of a press whose keyDown was swallowed, so no app
+        // ever sees half of the chord.
+        let consumes = isConsumingKey
+        isConsumingKey = false
+        guard isPressed else { return Outcome(consumesEvent: consumes) }
+        return Outcome(decision: upEdge(at: event.timestamp), consumesEvent: consumes)
     }
 
     private mutating func handleTapDisabled() -> Decision? {

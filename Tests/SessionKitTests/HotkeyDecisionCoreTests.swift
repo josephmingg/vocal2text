@@ -35,6 +35,15 @@ private struct Driver {
         flags: UInt64 = 0,
         isRepeat: Bool = false
     ) -> HotkeyDecisionCore.Decision? {
+        outcome(kind, keyCode: keyCode, flags: flags, isRepeat: isRepeat).decision
+    }
+
+    mutating func outcome(
+        _ kind: HotkeyDecisionCore.EventKind,
+        keyCode: UInt16 = 0,
+        flags: UInt64 = 0,
+        isRepeat: Bool = false
+    ) -> HotkeyDecisionCore.Outcome {
         core.handle(
             HotkeyDecisionCore.Event(
                 kind: kind,
@@ -76,9 +85,10 @@ private struct Driver {
     }
 }
 
-/// Bits a real CGEvent carries alongside the modifiers: the non-coalesced bit
-/// and the device-dependent left/right bits. Matching must ignore them.
-private let deviceNoise: UInt64 = 0x100 | 0x20
+/// The non-coalesced bit a real CGEvent carries alongside the modifiers.
+/// Matching must ignore it. (Device-dependent left/right bits are *not* noise —
+/// see `releasingTheBoundModifierEndsThePressWhileItsTwinIsHeld`.)
+private let deviceNoise: UInt64 = 0x100
 
 private let cKey: UInt16 = 8
 private let aKey: UInt16 = 0
@@ -193,6 +203,17 @@ private let aKey: UInt16 = 0
     for keyCode in HotkeyKeyCode.fnLatchingKeyCodes.sorted() {
         #expect(driver.send(.flagsChanged, keyCode: keyCode, flags: HotkeyFlagMask.function) == nil)
     }
+    #expect(!driver.isPressed)
+}
+
+@Test func theFnLatchFilterRejectsEvenAMatchingKeyCode() {
+    // Pins the filter itself rather than the keycode comparison next to it: a
+    // spec bound to an arrow keycode must still be rejected on its own events.
+    let boundToAnArrow = HotkeySpec(
+        kind: .modifierOnly(keyCode: 126 /* ↑ */, flagMask: HotkeyFlagMask.function)
+    )
+    var driver = Driver(spec: boundToAnArrow)
+    #expect(driver.send(.flagsChanged, keyCode: 126, flags: HotkeyFlagMask.function) == nil)
     #expect(!driver.isPressed)
 }
 
@@ -405,6 +426,164 @@ private let f13 = HotkeySpec(kind: .key(keyCode: HotkeyKeyCode.f13, requiredFlag
         ) == nil
     )
     #expect(!driver.isPressed)
+}
+
+// MARK: - Left/right modifiers that share a flag bit
+
+@Test func releasingTheBoundModifierEndsThePressWhileItsTwinIsHeld() {
+    // The shared shift bit stays set while Right ⇧ is down, so without the
+    // device-specific bit the release of Left ⇧ reads as another press and the
+    // recording never stops.
+    let leftShift = HotkeySpec(
+        kind: .modifierOnly(keyCode: HotkeyKeyCode.leftShift, flagMask: HotkeyFlagMask.shift)
+    )
+    let leftBit = HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.leftShift)
+    let rightBit = HotkeyKeyCode.deviceFlagMask(for: HotkeyKeyCode.rightShift)
+    var driver = Driver(spec: leftShift)
+
+    #expect(
+        driver.send(
+            .flagsChanged,
+            keyCode: HotkeyKeyCode.leftShift,
+            flags: HotkeyFlagMask.shift | leftBit
+        ) == .pressBegan
+    )
+    driver.advance(0.1)
+    // Right ⇧ joins: not our keycode, ignored.
+    #expect(
+        driver.send(
+            .flagsChanged,
+            keyCode: HotkeyKeyCode.rightShift,
+            flags: HotkeyFlagMask.shift | leftBit | rightBit
+        ) == nil
+    )
+    driver.advance(0.6)
+    // Left ⇧ released — shared bit still set because Right ⇧ is still held.
+    #expect(
+        driver.send(
+            .flagsChanged,
+            keyCode: HotkeyKeyCode.leftShift,
+            flags: HotkeyFlagMask.shift | rightBit
+        ) == .pressEnded
+    )
+    #expect(!driver.isPressed)
+}
+
+@Test func hardwareWithoutDeviceBitsStillReleasesOnTheSharedBit() {
+    // Self-calibration: a down edge with no device bit falls back to the shared
+    // flag, exactly as the pre-refactor monitor behaved.
+    let rightCommand = HotkeySpec.rightCommand
+    var driver = Driver(spec: rightCommand)
+    #expect(
+        driver.send(
+            .flagsChanged,
+            keyCode: HotkeyKeyCode.rightCommand,
+            flags: HotkeyFlagMask.command
+        ) == .pressBegan
+    )
+    driver.advance(0.6)
+    #expect(
+        driver.send(.flagsChanged, keyCode: HotkeyKeyCode.rightCommand, flags: 0) == .pressEnded
+    )
+}
+
+@Test func aMultiBitModifierMaskNeedsEveryBit() {
+    // `contains`-equivalence: an all-of test, not an any-of test.
+    let odd = HotkeySpec(
+        kind: .modifierOnly(
+            keyCode: HotkeyKeyCode.rightControl,
+            flagMask: HotkeyFlagMask.control | HotkeyFlagMask.shift
+        )
+    )
+    var driver = Driver(spec: odd)
+    #expect(
+        driver.send(
+            .flagsChanged,
+            keyCode: HotkeyKeyCode.rightControl,
+            flags: HotkeyFlagMask.control
+        ) == nil
+    )
+    #expect(
+        driver.send(
+            .flagsChanged,
+            keyCode: HotkeyKeyCode.rightControl,
+            flags: HotkeyFlagMask.control | HotkeyFlagMask.shift
+        ) == .pressBegan
+    )
+}
+
+// MARK: - Consumption
+
+@Test func keyedBindingsSwallowTheirOwnPressAndRelease() {
+    // Otherwise holding ⌥Space to talk also types a non-breaking space.
+    var driver = Driver(spec: optionSpace)
+    let down = driver.outcome(
+        .keyDown, keyCode: HotkeyKeyCode.space, flags: HotkeyFlagMask.option
+    )
+    #expect(down.decision == .pressBegan)
+    #expect(down.consumesEvent)
+
+    driver.advance(0.1)
+    let repeated = driver.outcome(
+        .keyDown, keyCode: HotkeyKeyCode.space, flags: HotkeyFlagMask.option, isRepeat: true
+    )
+    #expect(repeated.decision == nil)
+    #expect(repeated.consumesEvent, "autorepeat would type a run of characters")
+
+    driver.advance(0.5)
+    let up = driver.outcome(.keyUp, keyCode: HotkeyKeyCode.space)
+    #expect(up.decision == .pressEnded)
+    #expect(up.consumesEvent)
+}
+
+@Test func nonMatchingEventsAreNeverSwallowed() {
+    var driver = Driver(spec: optionSpace)
+    // Plain Space must keep typing a space.
+    #expect(!driver.outcome(.keyDown, keyCode: HotkeyKeyCode.space).consumesEvent)
+    // Wrong modifier set: that is the user's own ⌃⌥Space shortcut.
+    #expect(
+        !driver.outcome(
+            .keyDown,
+            keyCode: HotkeyKeyCode.space,
+            flags: HotkeyFlagMask.option | HotkeyFlagMask.control
+        ).consumesEvent
+    )
+    _ = driver.outcome(.keyDown, keyCode: HotkeyKeyCode.space, flags: HotkeyFlagMask.option)
+    driver.advance(0.1)
+    // Typing during a take still reaches the app.
+    #expect(!driver.outcome(.keyDown, keyCode: aKey, flags: HotkeyFlagMask.option).consumesEvent)
+    // Escape keeps doing its normal job as well as cancelling.
+    #expect(!driver.outcome(.keyDown, keyCode: HotkeyKeyCode.escape).consumesEvent)
+}
+
+@Test func modifierOnlyBindingsNeverSwallowAnything() {
+    // The Globe action fires below the tap, and chord-abort needs passthrough.
+    var driver = Driver(spec: .fnGlobe)
+    #expect(
+        !driver.outcome(
+            .flagsChanged,
+            keyCode: HotkeyKeyCode.function,
+            flags: HotkeyFlagMask.function
+        ).consumesEvent
+    )
+    driver.advance(0.6)
+    #expect(
+        !driver.outcome(.flagsChanged, keyCode: HotkeyKeyCode.function, flags: 0).consumesEvent
+    )
+}
+
+@Test func aStrayKeyUpDoesNotAdvanceTheDebounceClock() {
+    // Typing plain Space must not swallow a genuine ⌥Space release that lands
+    // within the debounce window of it.
+    var driver = Driver(spec: optionSpace)
+    #expect(driver.send(.keyUp, keyCode: HotkeyKeyCode.space) == nil)
+    driver.advance(0.01)
+    #expect(
+        driver.send(.keyDown, keyCode: HotkeyKeyCode.space, flags: HotkeyFlagMask.option)
+            == .pressBegan
+    )
+    driver.advance(0.6)
+    #expect(driver.send(.keyUp, keyCode: HotkeyKeyCode.space) == .pressEnded)
 }
 
 // MARK: - Every preset drives the same press vocabulary

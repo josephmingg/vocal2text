@@ -27,6 +27,8 @@ public enum HotkeyKeyCode {
 
     public static let escape: UInt16 = 53
     public static let space: UInt16 = 49
+    public static let returnKey: UInt16 = 36
+    public static let keypadEnter: UInt16 = 76
     public static let f11: UInt16 = 103
     public static let f12: UInt16 = 111
     public static let f13: UInt16 = 105
@@ -58,6 +60,27 @@ public enum HotkeyKeyCode {
         }
     }
 
+    /// The device-specific bit a modifier key raises *in addition to* the shared
+    /// one (IOKit's `NX_DEVICE*KEYMASK`), or 0 when there is no side to
+    /// distinguish (Fn) or the code is not a modifier.
+    ///
+    /// This is what tells Left ⇧ apart from Right ⇧ mid-press: the shared shift
+    /// bit stays set while either key is down, so a release edge is invisible
+    /// without it (docs/03 §3.1 left-vs-right caveat).
+    public static func deviceFlagMask(for keyCode: UInt16) -> UInt64 {
+        switch keyCode {
+        case leftControl: return 0x0000_0001
+        case leftShift: return 0x0000_0002
+        case rightShift: return 0x0000_0004
+        case leftCommand: return 0x0000_0008
+        case rightCommand: return 0x0000_0010
+        case leftOption: return 0x0000_0020
+        case rightOption: return 0x0000_0040
+        case rightControl: return 0x0000_2000
+        default: return 0
+        }
+    }
+
     public static let arrowKeyCodes: Set<UInt16> = [123, 124, 125, 126]
 
     /// Arrow and F1–F12 keycodes. macOS latches `.maskSecondaryFn` onto their
@@ -84,6 +107,13 @@ public enum HotkeyKeyCode {
             121,  // Page Down
             114,  // Help
         ])
+
+    /// Modifiers a touch typist holds constantly — the left-hand cluster, and
+    /// both Shifts for capitals. Bindable, but they arm on ordinary typing, so
+    /// the UI says so (docs/13 §2).
+    public static let typingHandModifierKeyCodes: Set<UInt16> = [
+        leftCommand, leftOption, leftControl, leftShift, rightShift,
+    ]
 
     public static func isModifier(_ keyCode: UInt16) -> Bool {
         modifierKeyCodes.contains(keyCode)

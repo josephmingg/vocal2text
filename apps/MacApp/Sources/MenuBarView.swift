@@ -95,6 +95,11 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(statusText)
                     .font(.headline)
+                // The hotkey is customizable, so this is the one place that
+                // always answers "which key do I hold again?".
+                Text("Hold \(settings.hotkeySpec.label) to talk")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if !appState.hudState.profileName.isEmpty {
                     Text("Profile: \(appState.hudState.profileName)")
                         .font(.caption)

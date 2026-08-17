@@ -38,6 +38,9 @@ final class HotkeyMonitor {
 
     private var spec: HotkeySpec
     private var machine: HotkeyTapMachine?
+    /// Whether `suspend()` interrupted a live tap, so `resume()` knows whether
+    /// to bring it back.
+    private var wasArmedBeforeSuspend = false
     /// Bumped on every start/stop so in-flight main-queue hops from a
     /// stopped tap are dropped instead of firing stale callbacks.
     private var generation = 0
@@ -45,6 +48,10 @@ final class HotkeyMonitor {
     init(spec: HotkeySpec) {
         self.spec = spec
     }
+
+    /// Whether the tap is live. False means the hotkey does nothing — the UI
+    /// uses this to say so instead of leaving the user guessing.
+    var isArmed: Bool { machine != nil }
 
     /// Creates and starts the event tap. Returns false when the Accessibility
     /// permission is missing or tap creation fails (either way: onboarding).
@@ -82,9 +89,26 @@ final class HotkeyMonitor {
     }
 
     /// Tear down and recreate the tap — call on wake/unlock (docs/03 §3.4:
-    /// re-arm the tap on wake).
-    func rearm() {
+    /// re-arm the tap on wake). Returns false when the tap could not be
+    /// recreated, so the caller can fall back to retrying.
+    @discardableResult
+    func rearm() -> Bool {
         stop()
+        return start()
+    }
+
+    /// Stops listening while the app itself needs the raw keyboard — recording
+    /// a new binding, where holding the current hotkey would otherwise start a
+    /// real dictation behind the recorder sheet. `resume()` restores exactly
+    /// the previous state, armed or not.
+    func suspend() {
+        wasArmedBeforeSuspend = machine != nil
+        stop()
+    }
+
+    func resume() {
+        guard wasArmedBeforeSuspend else { return }
+        wasArmedBeforeSuspend = false
         _ = start()
     }
 
@@ -115,14 +139,19 @@ final class HotkeyMonitor {
 
 /// C callback for the event tap — runs on the tap thread. It must not capture
 /// context; the machine arrives via `userInfo` (Unmanaged, docs/03 §3.1).
-/// v1 never consumes events: the event is always returned unmodified.
+///
+/// Returning nil swallows the event. That happens only for a keyed binding's own
+/// press and release: otherwise holding ⌥Space to talk would also type a
+/// non-breaking space into the document. Modifier-only bindings are never
+/// swallowed — the Globe action fires below the tap regardless, and chord-abort
+/// needs to see the keyDown that follows.
 private let hotkeyTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
     guard let userInfo else {
         return Unmanaged.passUnretained(event)
     }
     let machine = Unmanaged<HotkeyTapMachine>.fromOpaque(userInfo).takeUnretainedValue()
-    machine.handle(type: type, event: event)
-    return Unmanaged.passUnretained(event)
+    let consumed = machine.handle(type: type, event: event)
+    return consumed ? nil : Unmanaged.passUnretained(event)
 }
 
 /// CGEventTap plumbing around a `HotkeyDecisionCore`. Single-use: one
@@ -233,12 +262,16 @@ private final class HotkeyTapMachine: @unchecked Sendable {
 
     // MARK: Event handling (tap thread, called from the C callback)
 
-    func handle(type: CGEventType, event: CGEvent) {
-        guard let coreEvent = makeCoreEvent(type: type, event: event),
-            let decision = core.handle(coreEvent) else {
-            return
+    /// Returns true when the event must be swallowed instead of forwarded.
+    func handle(type: CGEventType, event: CGEvent) -> Bool {
+        guard let coreEvent = makeCoreEvent(type: type, event: event) else {
+            return false
         }
-        sink(decision)
+        let outcome = core.handle(coreEvent)
+        if let decision = outcome.decision {
+            sink(decision)
+        }
+        return outcome.consumesEvent
     }
 
     /// Translates a CGEvent into the core's value type, and performs the one

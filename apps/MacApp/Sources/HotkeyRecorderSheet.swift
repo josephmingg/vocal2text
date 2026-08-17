@@ -12,13 +12,18 @@ import SwiftUI
 @MainActor
 struct HotkeyRecorderSheet: View {
 
+    /// The live push-to-talk tap, suspended for as long as the sheet is up.
+    /// Without this, holding the current hotkey to see it captured would also
+    /// start a real dictation behind the sheet.
+    private let hotkeyMonitor: HotkeyMonitor?
     /// Called with the recorded binding when the user commits it.
     private let onUse: (HotkeySpec) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var recorder = HotkeyRecorder()
 
-    init(onUse: @escaping (HotkeySpec) -> Void) {
+    init(hotkeyMonitor: HotkeyMonitor?, onUse: @escaping (HotkeySpec) -> Void) {
+        self.hotkeyMonitor = hotkeyMonitor
         self.onUse = onUse
     }
 
@@ -46,31 +51,43 @@ struct HotkeyRecorderSheet: View {
                 HotkeyAdvisoryLabel(advisory: advisory)
             }
 
+            Text("Press ⏎ to use it, or esc to close without changing your key.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("Use") {
-                    if let candidate = recorder.candidate {
-                        onUse(candidate)
-                    }
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(recorder.candidate == nil)
+                Button("Use") { commit() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(recorder.candidate == nil)
             }
         }
         .padding(20)
         .frame(width: 400)
+        .background(WindowReader { recorder.hostWindow = $0 })
         .onAppear {
-            // Escape is reserved for cancelling a take, so it can never be
-            // recorded; inside the sheet it closes instead (docs/13 §2). The
-            // monitor swallows key events, so `.cancelAction` alone would not
-            // fire while recording is live.
+            // The recorder swallows key events, so the Cancel and Use buttons'
+            // keyboard shortcuts never fire on their own — Escape and Return
+            // are routed back out of the capture logic instead (docs/13 §2:
+            // Escape is reserved, so it can never be recorded).
             recorder.onEscape = { dismiss() }
+            recorder.onCommit = { commit() }
+            hotkeyMonitor?.suspend()
             recorder.start()
         }
-        .onDisappear { recorder.stop() }
+        .onDisappear {
+            recorder.stop()
+            hotkeyMonitor?.resume()
+        }
+    }
+
+    private func commit() {
+        if let candidate = recorder.candidate {
+            onUse(candidate)
+        }
+        dismiss()
     }
 
     private var keycap: some View {
@@ -83,6 +100,22 @@ struct HotkeyRecorderSheet: View {
         }
         .frame(height: 56)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// Hands back the `NSWindow` hosting this view, so the recorder can tell its own
+/// sheet's key events from those of Vocal's other windows.
+private struct WindowReader: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { onResolve(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { onResolve(nsView.window) }
     }
 }
 
@@ -122,6 +155,9 @@ private struct RecordedKeyEvent: Sendable {
     var keyCode: UInt16
     var flags: UInt64
     var isRepeat: Bool
+    /// Whether any modifier at all was held — Return with a modifier is a
+    /// recordable chord, bare Return is the confirm gesture.
+    var hasModifiers: Bool
 
     /// Fails for any event type outside the monitor's mask.
     init?(_ event: NSEvent) {
@@ -132,6 +168,7 @@ private struct RecordedKeyEvent: Sendable {
         }
         keyCode = event.keyCode
         flags = UInt64(event.modifierFlags.rawValue)
+        hasModifiers = flags & HotkeyFlagMask.significant != 0
         // `isARepeat` is only defined for key events.
         isRepeat = event.type == .keyDown && event.isARepeat
     }
@@ -156,6 +193,12 @@ final class HotkeyRecorder: ObservableObject {
 
     /// Invoked when the user presses Escape — the sheet's cancel gesture.
     var onEscape: (() -> Void)?
+    /// Invoked when the user presses Return on a valid capture — the sheet's
+    /// default action, which cannot fire on its own while capture swallows keys.
+    var onCommit: (() -> Void)?
+    /// The sheet's own window. Key events belonging to Vocal's other windows
+    /// (History, Settings behind the sheet) are left alone.
+    var hostWindow: NSWindow?
 
     /// Set while exactly one modifier is held; releasing that same modifier
     /// commits it as a modifier-only binding.
@@ -171,10 +214,18 @@ final class HotkeyRecorder: ObservableObject {
     }
 
     func start() {
+        // A re-opened sheet starts blank: a candidate left over from a session
+        // the user cancelled must never be one click from being committed.
+        candidate = nil
+        errorMessage = nil
+        liveFlags = 0
+        pendingModifier = nil
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) {
             [weak self] event in
             guard let recorded = RecordedKeyEvent(event) else { return event }
+            let isOurs = MainActor.assumeIsolated { self?.owns(event.window) ?? false }
+            guard isOurs else { return event }
             // Only Sendable values cross to the main actor — NSEvent is not
             // Sendable, so it stays on this side of the hop.
             let swallow = MainActor.assumeIsolated { self?.consume(recorded) ?? false }
@@ -187,6 +238,15 @@ final class HotkeyRecorder: ObservableObject {
             NSEvent.removeMonitor(monitor)
         }
         monitor = nil
+        onEscape = nil
+        onCommit = nil
+    }
+
+    /// Until the host window resolves, claim everything — a recorder that
+    /// captures nothing is a worse failure than one that is briefly greedy.
+    private func owns(_ window: NSWindow?) -> Bool {
+        guard let hostWindow else { return true }
+        return window == nil || window === hostWindow
     }
 
     /// Returns true when the event must not travel on. Key presses are
@@ -224,12 +284,27 @@ final class HotkeyRecorder: ObservableObject {
         }
     }
 
+    /// True when the key press was handled as a sheet gesture rather than as
+    /// something to record.
+    private func handleSheetGesture(_ event: RecordedKeyEvent) -> Bool {
+        if event.keyCode == HotkeyKeyCode.escape {
+            onEscape?()
+            return true
+        }
+        // Bare Return confirms, the way the blue default button implies. With a
+        // modifier held it is an ordinary chord and gets recorded.
+        if !event.hasModifiers,
+            event.keyCode == HotkeyKeyCode.returnKey || event.keyCode == HotkeyKeyCode.keypadEnter,
+            candidate != nil {
+            onCommit?()
+            return true
+        }
+        return false
+    }
+
     private func handleKeyDown(_ event: RecordedKeyEvent) {
         guard !event.isRepeat else { return }
-        guard event.keyCode != HotkeyKeyCode.escape else {
-            onEscape?()
-            return
-        }
+        guard !handleSheetGesture(event) else { return }
         pendingModifier = nil
         let requiredFlags = HotkeyFlagMask.normalized(event.flags, forKeyCode: event.keyCode)
         liveFlags = requiredFlags
@@ -245,8 +320,9 @@ final class HotkeyRecorder: ObservableObject {
         errorMessage = nil
     }
 
+    /// Explains the refusal but keeps whatever was already captured — a bad
+    /// press should cost the user an explanation, not their good capture.
     private func refuse(_ error: HotkeyValidationError) {
-        candidate = nil
         errorMessage = error.message
     }
 }

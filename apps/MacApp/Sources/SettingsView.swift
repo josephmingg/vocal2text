@@ -19,7 +19,7 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            GeneralPane(settings: settings)
+            GeneralPane(settings: settings, hotkeyMonitor: appState.hotkeyMonitor)
                 .tabItem { Label("General", systemImage: "gearshape") }
             CleanupPane(settings: settings)
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
@@ -38,15 +38,22 @@ struct SettingsView: View {
 
 /// Rows of the push-to-talk dropdown: every binding, plus the recorder entry
 /// point (docs/13 §2).
+///
+/// Tagged by `kind`, not by the whole spec: `isPreset` matches on kind alone, so
+/// tagging by a value that also carries the stored label would leave the picker
+/// with no matching row — and a blank selection — the day a keycap name is
+/// reworded.
 private enum HotkeyPickerSelection: Hashable {
-    case spec(HotkeySpec)
+    case binding(HotkeySpec.Kind)
     case record
 }
 
 @MainActor
 private struct GeneralPane: View {
     @ObservedObject var settings: SettingsStore
+    let hotkeyMonitor: HotkeyMonitor?
     @State private var launchAtLogin = false
+    @State private var hotkeyIsArmed = true
     @State private var loginItemError: String?
     @State private var globeActionConfigured = false
     @State private var isRecordingHotkey = false
@@ -58,20 +65,20 @@ private struct GeneralPane: View {
                     ForEach(HotkeySpec.presetGroups, id: \.title) { group in
                         Section(group.title) {
                             ForEach(group.specs, id: \.self) { spec in
-                                Text(spec.label).tag(HotkeyPickerSelection.spec(spec))
+                                Text(spec.label).tag(HotkeyPickerSelection.binding(spec.kind))
                             }
                         }
                     }
                     if !settings.hotkeySpec.isPreset {
                         // The recorded binding needs its own row, or the picker
                         // would have no tag matching the current selection.
-                        Section("Custom") {
+                        Section("Your shortcut") {
                             Text(settings.hotkeySpec.label)
-                                .tag(HotkeyPickerSelection.spec(settings.hotkeySpec))
+                                .tag(HotkeyPickerSelection.binding(settings.hotkeySpec.kind))
                         }
                     }
                     Section {
-                        Text("Custom…").tag(HotkeyPickerSelection.record)
+                        Text("Record New Shortcut…").tag(HotkeyPickerSelection.record)
                     }
                 }
                 hotkeyNotes
@@ -91,9 +98,10 @@ private struct GeneralPane: View {
         .onAppear {
             launchAtLogin = SMAppService.mainApp.status == .enabled
             globeActionConfigured = FnKeySetup.globeKeyActionIsConfigured()
+            hotkeyIsArmed = hotkeyMonitor?.isArmed ?? true
         }
         .sheet(isPresented: $isRecordingHotkey) {
-            HotkeyRecorderSheet { spec in
+            HotkeyRecorderSheet(hotkeyMonitor: hotkeyMonitor) { spec in
                 settings.hotkeySpec = spec
                 // A custom binding may re-introduce the Globe caveat, or drop it.
                 globeActionConfigured = FnKeySetup.globeKeyActionIsConfigured()
@@ -105,10 +113,10 @@ private struct GeneralPane: View {
     /// binding, so picking it opens the recorder and the menu snaps back.
     private var hotkeySelection: Binding<HotkeyPickerSelection> {
         Binding(
-            get: { .spec(settings.hotkeySpec) },
+            get: { .binding(settings.hotkeySpec.kind) },
             set: { selection in
                 switch selection {
-                case .spec(let spec): settings.hotkeySpec = spec
+                case .binding(let kind): settings.hotkeySpec = HotkeySpec(kind: kind)
                 case .record: isRecordingHotkey = true
                 }
             }
@@ -117,6 +125,25 @@ private struct GeneralPane: View {
 
     @ViewBuilder
     private var hotkeyNotes: some View {
+        if !hotkeyIsArmed {
+            // The single most likely support question: the key does nothing.
+            // Answer it here instead of leaving the user to guess.
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    "Hotkey inactive — Vocal needs Accessibility access to listen for it.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.red)
+                Button("Request Accessibility Access") {
+                    // Same prompt onboarding uses; the header's option key is a
+                    // mutable global Swift 6 rejects, so the literal is used.
+                    _ = AXIsProcessTrustedWithOptions(
+                        ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+                    )
+                }
+            }
+        }
         if settings.hotkeySpec.usesFnKey && globeActionConfigured {
             // docs/03 §3.1: the Globe system action fires at the IOHID layer and
             // cannot be suppressed; the user must set "Press 🌐 key to: Do

@@ -137,7 +137,11 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         from defaults: UserDefaults
     ) -> (spec: HotkeySpec, needsPersisting: Bool) {
         if let data = defaults.data(forKey: Keys.hotkeySpec),
-            let spec = try? JSONDecoder().decode(HotkeySpec.self, from: data) {
+            let spec = try? JSONDecoder().decode(HotkeySpec.self, from: data),
+            // The recorder cannot produce an unbindable spec, but a hand-edited
+            // defaults value or a rollback from a future format can — and an
+            // Escape or Caps Lock binding would break cancelling and never fire.
+            HotkeySpec.validationError(for: spec.kind) == nil {
             return (spec: spec, needsPersisting: false)
         }
         if let legacy = defaults.string(forKey: Keys.legacyHotkeyChoice),
