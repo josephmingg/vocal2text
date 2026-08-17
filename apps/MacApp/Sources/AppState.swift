@@ -235,13 +235,22 @@ final class AppState: ObservableObject {
         case .inserted:
             break
         case .copiedToClipboard:
-            hudState.mode = .notice("Copied — press ⌘V to paste")
-            scheduleErrorDismiss()
+            showNotice("Copied — press ⌘V to paste")
         case .blockedSecureField(let culprit):
             let suffix = culprit.map { " (\($0))" } ?? ""
-            hudState.mode = .notice("Secure field\(suffix) — nothing inserted or saved")
-            scheduleErrorDismiss()
+            showNotice("Secure field\(suffix) — nothing inserted or saved")
         }
+    }
+
+    /// Shows a transient HUD notice that dismisses itself.
+    ///
+    /// Notices must always be posted through here: `handle(phase:)` leaves an
+    /// existing notice alone on the way back to `.idle` precisely because a
+    /// dismiss timer is expected to be running for it. A notice assigned
+    /// straight to `hudState.mode` therefore sticks on screen indefinitely.
+    func showNotice(_ message: String) {
+        hudState.mode = .notice(message)
+        scheduleErrorDismiss()
     }
 
     private func scheduleErrorDismiss() {

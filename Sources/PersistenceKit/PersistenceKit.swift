@@ -154,6 +154,8 @@ public final class DatabaseStore: Sendable {
         }
     }
 
+    /// Fetching one row surfaces the decode failure — the caller asked for
+    /// exactly this record and deserves to know it is unreadable.
     public func transcript(id: UUID) throws -> TranscriptRecord? {
         try dbQueue.read { db -> TranscriptRecord? in
             let row = try Row.fetchOne(
@@ -171,7 +173,7 @@ public final class DatabaseStore: Sendable {
                 db,
                 sql: "SELECT \(Self.transcriptColumns) FROM transcript ORDER BY createdAt DESC"
             )
-            return try rows.map(Self.record(from:))
+            return Self.decodedRecords(from: rows)
         }
     }
 
@@ -192,19 +194,17 @@ public final class DatabaseStore: Sendable {
             var seen = Set<UUID>()
             var results: [TranscriptRecord] = []
 
-            func collect(_ rows: [Row]) throws {
-                for row in rows {
-                    let record = try Self.record(from: row)
-                    if seen.insert(record.id).inserted {
-                        results.append(record)
-                    }
+            func collect(_ rows: [Row]) {
+                for record in Self.decodedRecords(from: rows)
+                where seen.insert(record.id).inserted {
+                    results.append(record)
                 }
             }
 
             // Quote as one FTS5 phrase so user text is never parsed as query syntax.
             let phrase = "\"" + trimmed.replacingOccurrences(of: "\"", with: "\"\"") + "\""
 
-            try collect(try Row.fetchAll(
+            collect(try Row.fetchAll(
                 db,
                 sql: """
                     SELECT \(Self.transcriptColumns) FROM transcript
@@ -217,7 +217,7 @@ public final class DatabaseStore: Sendable {
 
             // FTS5's trigram tokenizer needs at least three characters to match.
             if trimmed.count >= 3 {
-                try collect(try Row.fetchAll(
+                collect(try Row.fetchAll(
                     db,
                     sql: """
                         SELECT \(Self.transcriptColumns) FROM transcript
@@ -237,7 +237,7 @@ public final class DatabaseStore: Sendable {
                     .replacingOccurrences(of: "%", with: "\\%")
                     .replacingOccurrences(of: "_", with: "\\_")
                 let pattern = "%" + escaped + "%"
-                try collect(try Row.fetchAll(
+                collect(try Row.fetchAll(
                     db,
                     sql: """
                         SELECT \(Self.transcriptColumns) FROM transcript
@@ -344,6 +344,26 @@ public final class DatabaseStore: Sendable {
             return try JSONDecoder().decode(type, from: data)
         } catch {
             throw DatabaseStoreError.invalidJSON(column: column)
+        }
+    }
+
+    /// Decodes a list result, dropping rows that will not decode instead of
+    /// failing the whole query.
+    ///
+    /// A row can be unreadable because a newer build wrote an enum case this
+    /// one does not know (a `language` from a later version, say) or because
+    /// a JSON column got mangled. Either way, one bad row must not make the
+    /// user's entire history disappear — everything else in the table is
+    /// still perfectly good.
+    private static func decodedRecords(from rows: [Row]) -> [TranscriptRecord] {
+        rows.compactMap { row in
+            do {
+                return try record(from: row)
+            } catch {
+                let id: String? = row["id"]
+                print("Vocal: skipping unreadable history row \(id ?? "<unknown>"): \(error)")
+                return nil
+            }
         }
     }
 

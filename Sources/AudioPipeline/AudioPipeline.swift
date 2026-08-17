@@ -1,6 +1,55 @@
 import ASRKit
 import Foundation
 
+/// Hygiene for the crash-recovery sidecars `MicrophoneCapture` writes while
+/// recording (FR-11.3). Pure Foundation and outside the AVFoundation guard, so
+/// it compiles — and is tested — on every platform.
+public enum RecoveryFileReaper {
+    public static let recoveryFilePrefix = "vocal-capture-"
+
+    /// How long a cancelled take's raw audio stays recoverable (FR-1.6).
+    public static let recoveryRetention: TimeInterval = 24 * 60 * 60
+
+    /// Deletes recovery sidecars older than the FR-1.6 window.
+    ///
+    /// `cancelCapture` deliberately keeps its file so a cancelled take stays
+    /// recoverable, and a crash mid-take leaves one behind too. Without this
+    /// sweep those files are never removed by anything: each is an
+    /// unencrypted recording of the user's voice accumulating in the temp
+    /// directory for the lifetime of the install. Running it at capture start
+    /// keeps the guarantee ("recoverable for 24 h") while bounding the
+    /// residue to that same window.
+    public static func reapExpiredRecoveryFiles(
+        in directory: URL = FileManager.default.temporaryDirectory,
+        now: Date = Date()
+    ) {
+        let fileManager = FileManager.default
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return }
+
+        for entry in entries where entry.lastPathComponent.hasPrefix(recoveryFilePrefix)
+            && entry.pathExtension == "pcmf32"
+        {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            // An unreadable timestamp is treated as expired: the file is
+            // orphaned raw audio either way.
+            guard let modified else {
+                try? fileManager.removeItem(at: entry)
+                continue
+            }
+            if now.timeIntervalSince(modified) > recoveryRetention {
+                try? fileManager.removeItem(at: entry)
+            }
+        }
+    }
+}
+
 #if canImport(AVFoundation)
 import AVFoundation
 
@@ -92,10 +141,19 @@ public actor MicrophoneCapture {
             throw CaptureError.formatUnavailable
         }
 
+        RecoveryFileReaper.reapExpiredRecoveryFiles()
+
         let recoveryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vocal-capture-\(UUID().uuidString).pcmf32")
+            .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32")
         _ = FileManager.default.createFile(atPath: recoveryURL.path, contents: Data())
-        let handle = try FileHandle(forWritingTo: recoveryURL)
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forWritingTo: recoveryURL)
+        } catch {
+            // Do not leave the just-created empty file behind.
+            try? FileManager.default.removeItem(at: recoveryURL)
+            throw error
+        }
 
         let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: [Float].self)
         let (chunkStream, chunkContinuation) = AsyncStream.makeStream(of: PCMChunk.self)

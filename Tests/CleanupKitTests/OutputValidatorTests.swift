@@ -83,6 +83,20 @@ struct OutputValidatorTests {
         #expect(result == .rejected(rule: "meta-text"))
     }
 
+    /// The meta-text rule looks for a preamble the *model* added. When the
+    /// speaker themselves opened with one of those words, rejecting the output
+    /// would make cleanup permanently useless for that phrasing.
+    @Test(arguments: [
+        ("Sure, sounds good.", "sure sounds good"),
+        ("Here's the summary.", "here's the summary"),
+        ("好的，我明天过去。", "好的我明天过去"),
+    ])
+    func markerAlreadyPresentInTheInputIsTheSpeakersOwnWord(output: String, input: String) {
+        let language: Language = input.containsHanCharacters ? .chinese : .english
+        let result = OutputValidator.validate(output: output, input: input, language: language)
+        #expect(result == .accepted(cleaned: output))
+    }
+
     @Test func markdownFenceAtStartIsRejected() {
         let result = OutputValidator.validate(
             output: "```\nmeet on Saturday\n```",

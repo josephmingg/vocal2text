@@ -28,7 +28,35 @@ private struct ExplodingProvider: CleanupProvider {
     }
 }
 
+/// A provider that never answers — stands in for an in-process model (Apple
+/// Foundation Models) that stalls and has no `URLRequest` timeout to save it.
+private struct HangingProvider: CleanupProvider {
+    let id: CleanupProviderID = .appleFoundationModels
+    let leavesDevice = false
+
+    func isAvailable() async -> Bool { true }
+    func prewarm() async {}
+    func cleanup(_ request: CleanupRequest, timeout: Duration) async throws -> CleanupResponse {
+        // Deliberately ignores `timeout`, exactly as the real
+        // FoundationModelsProvider must (its API exposes no deadline).
+        try await Task.sleep(for: .seconds(600))
+        return CleanupResponse(text: "never arrives", modelName: "hang")
+    }
+}
+
 struct CleanupPipelineTests {
+
+    /// FR-7.3: a provider that never returns must not park the dictation in
+    /// `.cleaning` — the pipeline enforces the budget itself and falls back so
+    /// the stage-2 text still gets delivered.
+    @Test func providerThatIgnoresItsTimeoutStillFallsBack() async {
+        let pipeline = CleanupPipeline(provider: HangingProvider())
+        let outcome = await pipeline.run(
+            CleanupRequest(text: "meet on saturday", language: .english),
+            timeout: .milliseconds(50)
+        )
+        #expect(outcome == .fellBack(reason: "timed-out"))
+    }
 
     @Test func successPathDeliversCleanedTextAndModel() async {
         let provider = MockProvider(

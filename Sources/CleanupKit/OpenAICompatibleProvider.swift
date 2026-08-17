@@ -30,14 +30,53 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         promptAssembler: PromptAssembler = PromptAssembler()
     ) {
         let host = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)?.host ?? ""
-        let isLoopback = host == "localhost" || host == "127.0.0.1"
-        self.baseURL = baseURL
+        let isLoopback = Self.isLoopbackHost(host)
+        self.baseURL = Self.normalizedRoot(baseURL)
         self.apiKey = apiKey
         self.model = model
         self.temperature = temperature
         self.id = id ?? .openAICompatible(name: host.isEmpty ? "custom" : host)
         self.leavesDevice = leavesDevice ?? !isLoopback
         self.assembler = promptAssembler
+    }
+
+    // MARK: - Base-URL normalization
+
+    /// Trims the server root to what `endpointURL` expects.
+    ///
+    /// The documented base URL for several servers — Ollama's OpenAI-compatible
+    /// surface among them — already *includes* `/v1`, and that is what users
+    /// paste into the settings field. Appending our own `v1` to it produced
+    /// `/v1/v1/chat/completions`, a 404 that looks exactly like "the server is
+    /// down": cleanup silently fell back on every dictation. Accept both
+    /// spellings by reducing either to the bare root. Trailing slashes go too,
+    /// since they otherwise yield an empty path component.
+    static func normalizedRoot(_ url: URL) -> URL {
+        var components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
+        if components.last?.lowercased() == "v1" {
+            components.removeLast()
+        }
+        guard
+            var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        else { return url }
+        parts.path = components.isEmpty ? "" : "/" + components.joined(separator: "/")
+        return parts.url ?? url
+    }
+
+    /// Loopback detection for the privacy badge (FR-7.4). Covers IPv6 and the
+    /// whole 127.0.0.0/8 block, not just the two spellings people usually type.
+    static func isLoopbackHost(_ host: String) -> Bool {
+        let lowered = host.lowercased()
+        if lowered == "localhost" || lowered.hasSuffix(".localhost") { return true }
+        if lowered == "::1" || lowered == "[::1]" { return true }
+        // 127.0.0.0/8 — any address in the block is loopback.
+        let octets = lowered.split(separator: ".", omittingEmptySubsequences: false)
+        if octets.count == 4, octets[0] == "127",
+            octets.allSatisfy({ UInt8($0) != nil })
+        {
+            return true
+        }
+        return false
     }
 
     // MARK: - CleanupProvider

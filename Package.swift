@@ -78,7 +78,16 @@ let package = Package(
         .testTarget(name: "ModelStoreTests", dependencies: ["ModelStore"]),
         .testTarget(name: "ASRKitTests", dependencies: ["ASRKit"]),
         .testTarget(name: "SessionKitTests", dependencies: ["SessionKit", "ASRKit"]),
-        .testTarget(name: "PersistenceKitTests", dependencies: ["PersistenceKit"]),
+        .testTarget(
+            name: "PersistenceKitTests",
+            dependencies: [
+                "PersistenceKit",
+                // Direct GRDB access lets a test forge a row this build cannot
+                // decode, proving list queries survive it.
+                .product(name: "GRDB", package: "GRDB.swift", condition: .when(platforms: [.macOS, .iOS])),
+            ]
+        ),
+        .testTarget(name: "AudioPipelineTests", dependencies: ["AudioPipeline"]),
     ],
     swiftLanguageModes: [.v6]
 )

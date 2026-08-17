@@ -4,6 +4,7 @@ import PersistenceKit
 import Testing
 
 #if canImport(GRDB)
+import GRDB
 
 private func makeStore() throws -> (store: DatabaseStore, path: String) {
     let path = FileManager.default.temporaryDirectory
@@ -236,6 +237,38 @@ private func makeRecord(
 
     try store.deleteProfile(id: profile.id)
     #expect(try store.profiles().isEmpty)
+}
+
+/// A row written by a newer build (an unrecognized `language`) or a mangled
+/// JSON column must cost the user that one row, not the whole history list.
+@Test func unreadableRowIsSkippedRatherThanFailingTheWholeList() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let good = makeRecord(rawText: "readable", createdAt: Date(timeIntervalSince1970: 1_000))
+    let fromTheFuture = makeRecord(
+        rawText: "written by a later version", createdAt: Date(timeIntervalSince1970: 2_000)
+    )
+    try store.save(good)
+    try store.save(fromTheFuture)
+
+    // Rewrite one row's language to a value this build does not know.
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "UPDATE transcript SET language = ? WHERE id = ?",
+            arguments: ["xx", fromTheFuture.id.uuidString]
+        )
+    }
+
+    let all = try store.allTranscripts()
+    #expect(all.map(\.id) == [good.id])
+
+    // Search follows the same rule.
+    let found = try store.search("readable")
+    #expect(found.map(\.id) == [good.id])
+
+    // Asking for that row by id still reports the problem.
+    #expect(throws: (any Error).self) { try store.transcript(id: fromTheFuture.id) }
 }
 
 #else

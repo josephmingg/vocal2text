@@ -33,8 +33,15 @@ public enum OutputValidator {
             return .rejected(rule: "meta-text")
         }
 
+        // A marker is only evidence of a preamble when the model *introduced*
+        // it. "Sure, sounds good." and 「好的，我明天过去。」 are ordinary things
+        // to dictate, and rejecting them made cleanup permanently useless for
+        // anyone who opens a sentence that way — so a marker the input already
+        // starts with is the speaker's own word, not the model talking.
         let lowered = cleaned.lowercased()
-        if metaMarkers.contains(where: { lowered.hasPrefix($0) }) {
+        let loweredInput = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let marker = metaMarkers.first(where: { lowered.hasPrefix($0) }),
+            !loweredInput.hasPrefix(marker) {
             return .rejected(rule: "meta-text")
         }
 

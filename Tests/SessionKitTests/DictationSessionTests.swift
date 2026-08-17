@@ -358,6 +358,73 @@ struct DictationSessionTests {
         #expect(terms == ["Claude Code"])
     }
 
+    /// Regression: profile resolution must never gate the microphone. On macOS
+    /// it shells out to osascript for the frontmost browser's tab URL (up to
+    /// 1.5 s), and every millisecond before capture opens is speech the user
+    /// already spoke. Here resolution refuses to finish until capture is live,
+    /// so the pre-fix serial order (resolve → start) cannot pass.
+    @Test func captureStartsWithoutWaitingForProfileResolution() async throws {
+        let gate = CaptureGate()
+        let captureLog = CaptureLog()
+        let audio = ScriptedAudioCapturing(
+            chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+            log: captureLog,
+            onStart: { await gate.open() }
+        )
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: audio,
+                engine: FakeTranscriptionEngine(
+                    result: TranscriptionResult(text: "hello there", detectedLanguage: .english)
+                ),
+                deliverer: deliverer,
+                store: store,
+                config: StaticConfig(),
+                profileResolution: {
+                    // Bounded so a regression fails the assertion instead of
+                    // hanging the suite forever.
+                    let sawCaptureStart = await withTaskGroup(of: Bool.self) { group in
+                        group.addTask {
+                            await gate.waitForOpen()
+                            return true
+                        }
+                        group.addTask {
+                            try? await Task.sleep(for: .seconds(5))
+                            return false
+                        }
+                        let first = await group.next() ?? false
+                        group.cancelAll()
+                        return first
+                    }
+                    return (
+                        Profile(name: sawCaptureStart ? "Concurrent" : "Serialized"),
+                        .app,
+                        "com.example.pressapp"
+                    )
+                },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        await session.pressEnded()
+
+        // "Serialized" would mean the press awaited resolution before opening
+        // the mic — the leading-speech-loss bug.
+        let records = await store.records
+        let record = try #require(records.first)
+        #expect(record.profileName == "Concurrent")
+
+        // The resolution is still the pinned press-time one (FR-3.6).
+        let contexts = await deliverer.contexts
+        #expect(contexts.first?.pressTimeAppBundleID == "com.example.pressapp")
+        #expect(record.routeKind == .app)
+        let finishCount = await captureLog.finishCount
+        #expect(finishCount == 1)
+    }
+
     @Test func secureFieldBlockPersistsNothing() async {
         let harness = makeHarness(
             deliveryOutcome: .blockedSecureField(culpritApp: "com.example.password")
