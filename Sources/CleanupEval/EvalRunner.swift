@@ -135,7 +135,16 @@ public struct EvalSummary: Sendable {
         total = results.count
         passedCases = results.filter(\.passed).count
         rulesChecked = results.reduce(0) { $0 + $1.ruleOutcomes.count }
-        rulesPassed = results.reduce(0) { $0 + $1.ruleOutcomes.filter(\.passed).count }
+        // Rules only count as passed on output the user would actually receive.
+        // A rejected or errored case delivered nothing, and `mustNotContain`
+        // passes vacuously against nothing — the qwen3:8b run scored 64% with
+        // zero usable outputs, because every "must not contain" rule held
+        // against an empty string. A model that produces nothing must score
+        // nothing.
+        rulesPassed = results.reduce(0) { partial, result in
+            guard result.error == nil, result.validatorRule == nil else { return partial }
+            return partial + result.ruleOutcomes.filter(\.passed).count
+        }
         validatorRejections = results.filter { $0.validatorRule != nil }.count
         errors = results.filter { $0.error != nil }.count
 

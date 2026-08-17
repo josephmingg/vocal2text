@@ -284,6 +284,19 @@ private func result(
     #expect(!result(id: "c", rules: [], error: "timedOut").passed)
 }
 
+@Test func anUndeliverableCaseScoresNothingEvenWhenItsRulesHeld() {
+    // The qwen3:8b run: every case rejected as empty, yet the harness reported
+    // 64% because `mustNotContain` holds vacuously against an empty string. A
+    // model that produces nothing must score nothing.
+    let rejected = result(id: "a", rules: [true, true, true], validatorRule: "empty")
+    let errored = result(id: "b", rules: [true, true], error: "timedOut")
+    let summary = EvalSummary(results: [rejected, errored])
+    #expect(summary.rulesChecked == 5)
+    #expect(summary.rulesPassed == 0)
+    #expect(summary.hardRulePassRate == 0)
+    #expect(!summary.meetsAcceptanceCriterion)
+}
+
 @Test func hardRulePassRateCountsRulesNotCases() {
     // AC-4 is written against rule checks, so a case with many rules weighs
     // more than one with a single rule.
