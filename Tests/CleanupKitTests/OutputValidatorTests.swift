@@ -247,3 +247,57 @@ struct BurmeseOutputValidatorTests {
         #expect(result == .rejected(rule: "ratio"))
     }
 }
+
+// MARK: - Self-correction collapses (found by the 2026-08-17 cleanup eval)
+
+@Test func aLongSelfCorrectionMayCollapsePastTheNormalFloor() {
+    // The eval's en-corr-007: 61 chars in, 17 out — 0.28 of the input, so the
+    // flat 0.4 floor rejected every correct answer and the app silently
+    // delivered the uncleaned text instead (FR-7.3).
+    let input = "call her on Tuesday scratch that she's away call her Thursday"
+    #expect(
+        OutputValidator.validate(output: "call her Thursday", input: input, language: .english)
+            == .accepted(cleaned: "call her Thursday")
+    )
+}
+
+@Test func truncationIsStillRejectedWhenACueIsPresent() {
+    // The floor moves to the content after the cue, it does not disappear:
+    // "she's away call her Thursday" is 28 chars, so a two-character answer is
+    // still well under 0.4 of it.
+    let input = "call her on Tuesday scratch that she's away call her Thursday"
+    #expect(
+        OutputValidator.validate(output: "ok", input: input, language: .english)
+            == .rejected(rule: "ratio")
+    )
+}
+
+@Test func aCueDoesNotLicenseExpansion() {
+    // The ceiling stays measured against the whole input.
+    let input = "call her on Tuesday scratch that she's away call her Thursday"
+    let padded = String(repeating: "call her on Thursday please. ", count: 8)
+    #expect(
+        OutputValidator.validate(output: padded, input: input, language: .english)
+            == .rejected(rule: "ratio")
+    )
+}
+
+@Test func inputsWithoutACueKeepTheFlatFloor() {
+    let input = String(repeating: "the quarterly numbers came in higher than we planned ", count: 2)
+    #expect(
+        OutputValidator.validate(output: "numbers up", input: input, language: .english)
+            == .rejected(rule: "ratio")
+    )
+}
+
+@Test func everyValidatorCueAppearsInTheShippedPrompt() {
+    // Two lists, one meaning: the prompt tells the model what a cue is, the
+    // validator uses the same set to know a collapse was expected. Drift here
+    // would silently re-break the case above.
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english)
+    ).lowercased()
+    for cue in SelfCorrectionCues.all {
+        #expect(prompt.contains(cue.lowercased()), "prompt is missing cue: \(cue)")
+    }
+}

@@ -67,7 +67,20 @@ public enum OutputValidator {
         // most at risk of a model mangling it.
         let longInputThreshold = language.isUnspacedScript ? 20 : 60
         if inputCount > longInputThreshold {
-            if ratio < 0.4 || ratio > 2.5 {
+            // The lower bound catches truncation, but a self-correction
+            // legitimately discards everything before the cue — "call her on
+            // Tuesday scratch that she's away call her Thursday" → "call her
+            // Thursday" is 0.30 of the input, and no correct answer to that
+            // dictation could clear 0.4. Measure the floor against the content
+            // *after* the last cue instead, which keeps the truncation guard
+            // (a two-word answer still fails) while letting the abandoned half
+            // go. The ceiling stays against the whole input: nothing about a
+            // correction licenses expansion.
+            let floorBasis = SelfCorrectionCues.contentAfterLastCue(in: input).map(\.count)
+                ?? inputCount
+            let floorRatio =
+                floorBasis > 0 ? Double(cleaned.count) / Double(floorBasis) : Double.infinity
+            if floorRatio < 0.4 || ratio > 2.5 {
                 return .rejected(rule: "ratio")
             }
         } else if ratio > 4.0 {
