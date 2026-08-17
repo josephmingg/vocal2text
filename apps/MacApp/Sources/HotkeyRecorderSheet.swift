@@ -12,6 +12,9 @@ import SwiftUI
 @MainActor
 struct HotkeyRecorderSheet: View {
 
+    /// What is bound right now, shown so the sheet does not open on a blank
+    /// slate with no reminder of what it is about to replace.
+    private let currentBinding: HotkeySpec
     /// The live push-to-talk tap, suspended for as long as the sheet is up.
     /// Without this, holding the current hotkey to see it captured would also
     /// start a real dictation behind the sheet.
@@ -22,7 +25,12 @@ struct HotkeyRecorderSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var recorder = HotkeyRecorder()
 
-    init(hotkeyMonitor: HotkeyMonitor?, onUse: @escaping (HotkeySpec) -> Void) {
+    init(
+        currentBinding: HotkeySpec,
+        hotkeyMonitor: HotkeyMonitor?,
+        onUse: @escaping (HotkeySpec) -> Void
+    ) {
+        self.currentBinding = currentBinding
         self.hotkeyMonitor = hotkeyMonitor
         self.onUse = onUse
     }
@@ -41,6 +49,11 @@ struct HotkeyRecorderSheet: View {
             .foregroundStyle(.secondary)
 
             keycap
+
+            Text("Currently: \(currentBinding.label)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
 
             if let errorMessage = recorder.errorMessage {
                 Label(errorMessage, systemImage: "xmark.octagon")
@@ -270,7 +283,12 @@ final class HotkeyRecorder: ObservableObject {
         guard let mask = HotkeyKeyCode.modifierFlagMask(for: event.keyCode) else {
             pendingModifier = nil
             if event.keyCode == HotkeyKeyCode.capsLock {
-                refuse(.capsLockUnsupported)
+                // The latch happens below the event tap and cannot be undone
+                // from here, so at least say so — otherwise the user is left
+                // with a refusal and an inexplicably lit keyboard.
+                let turnedOn = event.flags & HotkeyFlagMask.capsLock != 0
+                errorMessage = HotkeyValidationError.capsLockUnsupported.message
+                    + (turnedOn ? " Caps Lock is now on — press it again to turn it off." : "")
             }
             return
         }

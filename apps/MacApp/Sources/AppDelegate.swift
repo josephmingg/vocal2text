@@ -42,6 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let monitor = HotkeyMonitor(spec: appState.settings.hotkeySpec)
         monitor.onPressBegan = { [weak self] in
             guard let self else { return }
+            self.appState.noteHotkeyPress()
+            guard !self.appState.isHotkeyTestModeActive else { return }
             // During a locked take the recording is already running; the
             // ending tap's down-edge must not re-arm (its up-edge stops it).
             if !self.isLockModeActive {
@@ -49,13 +51,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         monitor.onPressEnded = { [weak self] in
-            guard let self else { return }
+            guard let self, !self.appState.isHotkeyTestModeActive else { return }
             let wasLocked = self.isLockModeActive
             self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: wasLocked)
         }
         monitor.onCancel = { [weak self] in
-            guard let self else { return }
+            guard let self, !self.appState.isHotkeyTestModeActive else { return }
             if self.isLockModeActive {
                 // Escape/chord during a hands-free take discards it (FR-1.6);
                 // finishing-and-transcribing is the tap path (onPressEnded).
@@ -64,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.appState.cancelDictation()
         }
         monitor.onLockToggle = { [weak self] in
-            guard let self else { return }
+            guard let self, !self.appState.isHotkeyTestModeActive else { return }
             if self.isLockModeActive {
                 self.endLockMode(stopping: true)
             } else {

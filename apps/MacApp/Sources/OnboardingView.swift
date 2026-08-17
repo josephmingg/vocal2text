@@ -15,6 +15,7 @@ struct OnboardingView: View {
         case welcome
         case microphone
         case accessibility
+        case hotkey
         case fnSetup
         case modelDownload
         case done
@@ -22,6 +23,9 @@ struct OnboardingView: View {
 
     private let appState: AppState
     private let onFinish: @MainActor () -> Void
+    /// Observed so choosing a key on the hotkey page re-runs `buildSteps` —
+    /// which is what adds or drops the Globe page that follows it.
+    @ObservedObject private var settings: SettingsStore
 
     @State private var steps: [Step] = []
     @State private var stepIndex = 0
@@ -29,6 +33,7 @@ struct OnboardingView: View {
     init(appState: AppState, onFinish: @escaping @MainActor () -> Void) {
         self.appState = appState
         self.onFinish = onFinish
+        _settings = ObservedObject(wrappedValue: appState.settings)
     }
 
     var body: some View {
@@ -50,6 +55,7 @@ struct OnboardingView: View {
         .padding(24)
         .frame(width: 520, height: 440)
         .onAppear { buildSteps() }
+        .onChange(of: settings.hotkeySpec) { _, _ in buildSteps() }
     }
 
     // MARK: - Flow
@@ -59,9 +65,12 @@ struct OnboardingView: View {
         return steps[stepIndex]
     }
 
+    /// Rebuilt whenever the key changes: picking Fn on the hotkey page has to be
+    /// able to add the Globe page that follows it, and picking anything else has
+    /// to drop it again. Only steps *after* the current one ever change, so the
+    /// index stays valid.
     private func buildSteps() {
-        guard steps.isEmpty else { return }
-        var built: [Step] = [.welcome, .microphone, .accessibility]
+        var built: [Step] = [.welcome, .microphone, .accessibility, .hotkey]
         // Fn coexistence page only when the chosen hotkey is Fn AND the Globe
         // key still has a system action bound (docs/03 §3.1).
         if appState.settings.hotkeySpec.usesFnKey && FnKeySetup.globeKeyActionIsConfigured() {
@@ -70,6 +79,7 @@ struct OnboardingView: View {
         built.append(.modelDownload)
         built.append(.done)
         steps = built
+        stepIndex = min(stepIndex, built.count - 1)
     }
 
     @ViewBuilder
@@ -78,6 +88,7 @@ struct OnboardingView: View {
         case .welcome: WelcomeStep()
         case .microphone: MicrophoneStep()
         case .accessibility: AccessibilityStep()
+        case .hotkey: HotkeyStep(appState: appState)
         case .fnSetup: FnSetupStep()
         case .modelDownload: ModelDownloadStep(appState: appState)
         case .done: DoneStep(hotkeyLabel: appState.settings.hotkeySpec.label)
@@ -210,6 +221,32 @@ private struct AccessibilityStep: View {
         let promptKey = "AXTrustedCheckOptionPrompt"
         let options = [promptKey: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
+    }
+}
+
+/// Pick the push-to-talk key, and prove it works before leaving setup — the
+/// step that used to be missing entirely, so a new user finished onboarding
+/// without ever being told which key to hold (docs/13 §2).
+@MainActor
+private struct HotkeyStep: View {
+    let appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Your Dictation Key")
+                .font(.title2)
+                .bold()
+            Text(
+                """
+                Hold this key to talk, release to insert. Double-tap it for \
+                hands-free; Escape while recording cancels.
+                """
+            )
+            HotkeyPickerView(appState: appState)
+            Text("You can change it later in Settings → General.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 

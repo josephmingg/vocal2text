@@ -37,11 +37,14 @@ Onboarding walks the permissions in order:
 2. **Accessibility** — System Settings toggle (the app detects the grant live). This one
    permission covers both the hotkey listener and text insertion; Input Monitoring is never
    requested.
-3. **Fn key setup** (only if your push-to-talk key uses Fn / 🌐): set System Settings →
+3. **Your dictation key** — pick it from the same dropdown Settings uses, then hit
+   **Test Your Key** and press it: Vocal confirms it saw the key without recording
+   anything. If nothing registers, the page says what usually causes that.
+4. **Fn key setup** (only if your push-to-talk key uses Fn / 🌐): set System Settings →
    Keyboard → "Press 🌐 key to" = **Do Nothing**, via the provided button. Also disable the
    "press Fn twice for Dictation" shortcut if enabled. Prefer skipping this? Pick
-   **Right ⌘** in settings — same behavior, no system setting needed.
-4. **Warm up** — downloads Whisper large-v3-turbo (~626 MB, one time, from Hugging Face)
+   **Right ⌘** on the previous page — same behavior, no system setting needed.
+5. **Warm up** — downloads Whisper large-v3-turbo (~626 MB, one time, from Hugging Face)
    and loads it. Skippable; the first dictation triggers it otherwise.
 
 Then: focus any text field anywhere, **hold your push-to-talk key (Fn by default), speak,
@@ -55,7 +58,10 @@ release**. Text lands at the cursor.
 
 ## Choosing your push-to-talk key
 
-Settings → General → **Push-to-talk key**. Changes apply immediately — no relaunch.
+Settings → General → **Push-to-talk key**, the same control onboarding shows. Changes apply
+immediately — no relaunch. **Test Your Key** confirms the key reaches Vocal without starting
+a recording, and the row turns red if the hotkey is inactive because Accessibility was
+revoked.
 
 | Group | Options |
 |---|---|
@@ -71,7 +77,10 @@ cancel.
 together with the modifiers you want to hold. It refuses combinations that would break
 ordinary use, and says why: a bare letter, digit, punctuation, Space, Tab, Return or
 Delete (you would no longer be able to type it), Escape (reserved for cancelling a take),
-and Caps Lock (it toggles instead of reporting hold and release).
+and Caps Lock (it toggles instead of reporting hold and release — and since that toggle
+happens below Vocal's event tap, the recorder also reminds you to press it again to turn it
+back off). The sheet shows your current key throughout, so you always know what you are
+replacing, and ⏎ commits while esc closes without changing anything.
 
 Two caveats the picker surfaces for you:
 
