@@ -126,6 +126,11 @@ public struct BridgeStatus: Codable, Sendable, Hashable {
     /// Voice notes waiting in the share-sheet import queue, surfaced so the
     /// keyboard can hint that the app has work pending.
     public var pendingImportCount: Int
+    /// FR-i2.2: insert the transcript straight at the cursor instead of
+    /// showing the ✓/✗ preview row. The app owns this setting and publishes
+    /// it, so the keyboard needs no settings store of its own. Defaults to
+    /// off — typing unreviewed text into someone's chat is the costly mistake.
+    public var autoInsert: Bool
 
     public init(
         updatedAt: Date,
@@ -133,7 +138,8 @@ public struct BridgeStatus: Codable, Sendable, Hashable {
         phase: Phase = .idle,
         activeRequestID: UUID? = nil,
         availableProfileNames: [String] = [],
-        pendingImportCount: Int = 0
+        pendingImportCount: Int = 0,
+        autoInsert: Bool = false
     ) {
         self.updatedAt = updatedAt
         self.session = session
@@ -141,6 +147,7 @@ public struct BridgeStatus: Codable, Sendable, Hashable {
         self.activeRequestID = activeRequestID
         self.availableProfileNames = availableProfileNames
         self.pendingImportCount = pendingImportCount
+        self.autoInsert = autoInsert
     }
 
     /// A status the keyboard can act on: armed, and the app is not already

@@ -345,7 +345,8 @@ public actor DictationSession {
         let context = DeliveryContext(
             pressTimeAppBundleID: active.pressTimeBundleID,
             isLockMode: isLockMode,
-            formatting: formatting
+            formatting: formatting,
+            language: language
         )
         let deliveryStart = clock.now
         let delivery = await deps.deliverer.deliver(formatted, context: context)

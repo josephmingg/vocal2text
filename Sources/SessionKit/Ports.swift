@@ -44,11 +44,21 @@ public struct DeliveryContext: Sendable, Hashable {
     /// Recording mode — lock mode falls back to clipboard on focus change (FR-3.6).
     public var isLockMode: Bool
     public var formatting: FormattingOptions
+    /// Language the take resolved to. A delivery port that cannot see this
+    /// cannot label or route by it — the iOS keyboard bridge reports it back
+    /// to the extension, and language-aware insertion rules need it.
+    public var language: Language
 
-    public init(pressTimeAppBundleID: String?, isLockMode: Bool, formatting: FormattingOptions) {
+    public init(
+        pressTimeAppBundleID: String?,
+        isLockMode: Bool,
+        formatting: FormattingOptions,
+        language: Language = .english
+    ) {
         self.pressTimeAppBundleID = pressTimeAppBundleID
         self.isLockMode = isLockMode
         self.formatting = formatting
+        self.language = language
     }
 }
 

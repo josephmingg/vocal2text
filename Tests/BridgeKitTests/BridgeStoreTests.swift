@@ -177,7 +177,7 @@ struct BridgeStoreTests {
                 profileName: "Default"
             )
         )
-        let failed = try #require(store.readReply())
+        let failed = try #require(try store.readReply())
         #expect(failed.insertableText == nil)
         #expect(failed.outcome == .failed(reason: "model not installed"))
 
