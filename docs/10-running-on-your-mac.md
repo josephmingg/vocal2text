@@ -18,6 +18,21 @@ open Vocal.xcodeproj
 > and re-pick your team (30 seconds), or the build fails with a signing error.
 > You only need `make generate` when `project.yml` changed — a plain `git pull`
 > of source-code changes needs no regeneration.
+> A build log that says `Signing Identity: "Sign to Run Locally"` means the
+> Team was NOT set — the app builds ad-hoc-signed and Accessibility will not
+> stick across rebuilds (docs/03 §3.4).
+
+> **Build fails at the final `CodeSign VocalMac.app` step** with *"code object
+> is not signed at all — In subcomponent: onnxruntime.framework"*, alongside a
+> *"Couldn't resolve framework symlink … Versions/Current"* warning: SwiftPM
+> sometimes mangles the symlinks inside the onnxruntime binary xcframework
+> while extracting the artifact, and the broken framework then fails the
+> app-wide signing pass. `make mac` and `make install` repair this
+> automatically (and `install` retries once, since the first-ever build is the
+> one that extracts the artifact). Building straight from Xcode? Run
+> `sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts`
+> against your DerivedData's `SourcePackages/artifacts` path and rebuild. CI
+> never sees this failure — its builds run with `CODE_SIGNING_ALLOWED=NO`.
 
 In Xcode:
 
