@@ -125,7 +125,7 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift", condition: .when(platforms: [.macOS, .iOS])),
             ]
         ),
-        .testTarget(name: "AudioPipelineTests", dependencies: ["AudioPipeline"]),
+        .testTarget(name: "AudioPipelineTests", dependencies: ["AudioPipeline", "ASRKit"]),
         .testTarget(
             name: "ASREngineSherpaOnnxTests",
             dependencies: ["ASREngineSherpaOnnx", "ASRKit", "ModelStore"]
