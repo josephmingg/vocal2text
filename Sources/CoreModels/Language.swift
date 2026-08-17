@@ -78,10 +78,13 @@ public enum BurmeseSupportNote: Sendable {
         script-aware formatting, and the custom dictionary. A digit-set \
         preference and spoken punctuation exist in the engine but have no \
         settings UI yet, and the spoken-command vocabulary still needs \
-        native-speaker validation, so both are dormant. Recognition runs on \
-        Whisper, which transcribes Burmese poorly — expect frequent errors \
-        until a Burmese-capable model ships. AI cleanup stays off for Burmese: \
-        small local models corrupt it more often than they help.
+        native-speaker validation, so both are dormant. Recognition: on the \
+        Mac, pinning မြန်မာ runs a dedicated Burmese model (Meta's \
+        Omnilingual ASR — about 1 character in 9 wrong in our benchmark; the \
+        first Burmese dictation downloads ~790 MB). Auto-detect, and iPhone \
+        for now, still fall to Whisper, which transcribes Burmese poorly. AI \
+        cleanup stays off for Burmese: small local models corrupt it more \
+        often than they help.
         """
 
     /// Short form for the HUD and engine availability reporting.

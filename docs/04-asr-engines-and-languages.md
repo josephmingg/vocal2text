@@ -55,7 +55,7 @@ quantized (~626 MB)**:
 
 | Engine | Why not v1 | Keep in mind |
 |---|---|---|
-| sherpa-onnx (Apache-2.0, Swift/SPM) | Extra runtime + model zoo for a need WhisperKit already covers in EN/ZH | The future backbone for: streaming zipformer zh-en **hotword biasing** (dictionary at decode time), SenseVoice zh, and any Burmese revival (see appendix). The `TranscriptionEngine` protocol must not preclude it. |
+| sherpa-onnx (Apache-2.0, Swift/SPM) | Extra runtime + model zoo for a need WhisperKit already covers in EN/ZH | **Adopted in v1.1 for Burmese** (`ASREngineSherpaOnnx`, appendix). Still the future backbone for: streaming zipformer zh-en **hotword biasing** (dictionary at decode time) and SenseVoice zh. |
 | Parakeet v3 / FluidAudio ASR | 25 European languages — **no Chinese** | FluidAudio's **Silero VAD v6 CoreML** is still used for VAD (docs/03) |
 | Qwen3-ASR (Apache-2.0) | Best open Mandarin WER but no mature Apple-native runtime; streaming needs vLLM | Optional future Mac batch backend for imports |
 | Voxtral Mini 4B Realtime | ~4.4 B params — too heavy for iPhone; Mac-only gain unclear | — |
@@ -149,11 +149,13 @@ evidence-backed or get revised.
 
 ---
 
-## Appendix A — Burmese (v1.1: text layer shipped, recognition pending)
+## Appendix A — Burmese (v1.1: text layer shipped; Mac recognition via pinned မြန်မာ)
 
 Owner decision 2026-08-16 deferred Burmese out of v1; v1.1 ships the half of it that can be
-done well today. The research below is why the split falls where it does — the text layer is
-tractable and complete, while recognition quality depends on a model that is not wired yet.
+done well today. The research below is why the split fell where it did. Since then the
+recognition half landed for the Mac: the FLEURS `my_mm` benchmark
+(docs/benchmarks/burmese-asr-2026-08-17.md) measured Omnilingual CTC at **10.78% CER (1B)**,
+and `SherpaOnnxEngine` now runs that model for pinned-မြန်မာ dictations (engine status below).
 
 ### What v1.1 ships
 
@@ -169,7 +171,7 @@ tractable and complete, while recognition quality depends on a model that is not
 | Zawgyi → Unicode *conversion* | Not shipped | docs/11 G14 |
 | Cleanup prompt + validator guards (no translation, no transliteration) | Done | `lang_my.txt`, `OutputValidator` |
 | Cleanup off by default for Burmese | Done; the per-profile opt-in exists in the session gate but needs the profile editor to be reachable (G17) | `Language.allowsCleanupByDefault` |
-| Burmese-capable ASR engine | **Not shipped** — Whisper is used and is poor | docs/11 G13 |
+| Burmese-capable ASR engine | **Mac: shipped** — pinned မြန်မာ routes to `SherpaOnnxEngine` (Omnilingual CTC 1B int8, 10.78% CER measured). Auto mode and iPhone still fall to Whisper | `ASREngineSherpaOnnx`, docs/11 G13 |
 
 The honest summary shown to users lives in one place, `BurmeseSupportNote`, so both apps say
 the same thing.
@@ -196,22 +198,40 @@ the same thing.
 - Architecture accommodated it well, though not at the "no pipeline changes" ideal §2
   hoped for: v1.1 added a new `Language` case, new stage-1/4 branches, validator rules,
   and catalog entries — additive surface in the shared pipeline, no architectural change.
-  The remaining work is the sherpa-onnx adapter behind `TranscriptionEngine`.
+  The sherpa-onnx adapter behind `TranscriptionEngine` has since landed (`SherpaOnnxEngine`;
+  engine status below) — the protocol absorbed it without change, which was the §1 bet.
 
 ### Engine status in v1.1
 
-`WhisperKitEngine.availability(for: .burmese)` returns `.readyWithCaveat` rather than
+The Mac app composes `LanguageRoutingEngine(primary: WhisperKitEngine, overrides:
+[.burmese: SherpaOnnxEngine(.omnilingual1B)])`. Routing happens **only on a pin**
+(menu-bar မြန်မာ, or a profile language override once the editor lands — G17): auto mode
+always stays on the primary engine, because "which language was that?" is answered *by
+decoding*, and by then the primary has already produced the take's text — re-decoding on
+another engine would double latency on a guess. Auto-detected Burmese still gets the
+Burmese text pipeline (stages 2–4), just from Whisper's transcription.
+
+`SherpaOnnxEngine` (target `ASREngineSherpaOnnx`) wraps the sherpa-onnx v1.13.5 SPM
+package — Apple-only binary xcframeworks, so the dependency is host-conditioned in
+Package.swift and the target compiles to a stub elsewhere, the same shape as the
+WhisperKit guard. First Burmese use downloads the release archive (~790 MB for 1B) via
+`ModelDownloader` (resumable) into the `ModelStore` layout
+(`<root>/sherpa-onnx/<catalog-id>/`) and extracts with system tar (macOS only — the iOS
+installer ships with the 300M decision). The sherpa Swift shim `fatalError`s when a
+recognizer cannot be created, so the adapter validates the model files exist and throws
+`.modelNotInstalled` before ever reaching that constructor.
+
+`WhisperKitEngine.availability(for: .burmese)` still returns `.readyWithCaveat` rather than
 `.ready`: Whisper accepts a `my` token and returns something, so blocking it outright would
 remove a path some users still want, but reporting it as ready would promise EN/ZH-grade
 accuracy the engine cannot deliver. `AppleSpeechEngine` returns `.unsupported` — there is no
-Burmese locale to select.
-
-`ModelCatalog` lists both Omnilingual CTC exports (`omni-asr-ctc-1b-int8` for Mac,
-`omni-asr-ctc-300m-int8` for iPhone). The catalog is data, so listing them costs nothing and
-`ModelStore` can already track their on-disk footprint; wiring the runtime is G13.
+Burmese locale to select. On the router, `availability(for: .burmese)` reports the sherpa
+engine's state instead: `.ready` once installed, `.needsDownload(bytes:)` before.
 
 ### Measuring it
 
-When the engine lands, measure **CER / syllable error rate, not WER** — the unspaced script
-makes WER misleading (49% WER vs 13% CER observed on the same output). Step one is a FLEURS
-`my_mm` benchmark day against the 300M and 1B exports.
+Measure **CER / syllable error rate, not WER** — the unspaced script makes WER misleading
+(49% WER vs 13% CER observed on the same output). Done for the model decision: the FLEURS
+`my_mm` run (250 utterances, docs/benchmarks/burmese-asr-2026-08-17.md) measured
+**1B int8: 10.78% CER / 22.4% syllable ER, RTF 0.51 CPU** and **300M: 15.19% CER / 31.9%,
+RTF 0.21** — hence Mac ships 1B, and the iPhone 300M call waits on on-device RTF (G13).

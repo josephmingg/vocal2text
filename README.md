@@ -21,9 +21,11 @@ Unicode NFC normalization, per-utterance script detection, and the custom dictio
 phrase mode. In the engine but dormant: a Myanmar/Western digit preference and spoken
 punctuation, both awaiting a profile editor (docs/11 G17) — and the spoken-command
 vocabulary additionally needs native-speaker validation before it can ship on (G18).
-Recognition still runs on Whisper, which transcribes Burmese at 80–100% WER — a
-Burmese-capable engine (Meta's Omnilingual ASR via sherpa-onnx) is catalogued but not yet
-wired (G13). AI cleanup is off for Burmese because small local models corrupt it.
+Recognition: on the Mac, pinning မြန်မာ routes to a dedicated Burmese engine — Meta's
+Omnilingual ASR via sherpa-onnx, measured at 10.78% CER on FLEURS `my_mm`
+(docs/benchmarks) — with a ~790 MB first-use download. Auto-detect and iPhone still fall
+to Whisper, which transcribes Burmese at 80–100% WER (G13). AI cleanup is off for Burmese
+because small local models corrupt it.
 See [`docs/04` Appendix A](docs/04-asr-engines-and-languages.md).
 
 ## Core loop
