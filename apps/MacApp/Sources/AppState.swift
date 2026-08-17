@@ -162,6 +162,19 @@ final class AppState: ObservableObject {
                     providerID: .ollama(model: model)
                 )
             },
+            // FR-5.1 (docs/11 G9): "Keep audio" in Settings → History & Privacy
+            // decides whether a delivered take leaves a recording behind, and
+            // the encode runs off the main actor so it never delays the HUD.
+            archiveAudio: { audio, transcriptID in
+                let retentionDays = await MainActor.run { settings.audioRetentionDays }
+                guard AudioRetentionPolicy.keepsAudio(retentionDays: retentionDays) else {
+                    return nil
+                }
+                guard let directory = AppState.audioDirectory() else { return nil }
+                return AudioArchive.write(
+                    audio.samples, forTranscript: transcriptID, in: directory
+                )
+            },
             prewarmCleanup: {
                 // Fired at press (docs/03 §2); skip the network touch entirely
                 // while the master switch is off.
@@ -241,6 +254,8 @@ final class AppState: ObservableObject {
                 }
             }
         }
+        // Enforce the retention window on the recordings already on disk.
+        Self.sweepRetainedAudio(retentionDays: settings.audioRetentionDays)
         startPhaseMirror()
     }
 
@@ -454,6 +469,33 @@ final class AppState: ObservableObject {
         guard case .ollama(let model)? = profile.providerOverride else { return globalModel }
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? globalModel : trimmed
+    }
+
+    /// Where retained take audio lives: `Application Support/Vocal/audio`,
+    /// beside the database that points at it (docs/11 G9).
+    nonisolated static func audioDirectory() -> URL? {
+        let fileManager = FileManager.default
+        guard
+            let appSupport = fileManager.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first
+        else { return nil }
+        return appSupport
+            .appendingPathComponent("Vocal", isDirectory: true)
+            .appendingPathComponent("audio", isDirectory: true)
+    }
+
+    /// Applies the retention window at launch. The setting is a promise about
+    /// what is on disk, not merely about what gets written — lowering it must
+    /// remove what the old window kept.
+    private static func sweepRetainedAudio(retentionDays: Int) {
+        guard let directory = audioDirectory() else { return }
+        Task.detached(priority: .utility) {
+            let removed = AudioArchive.sweep(directory: directory, retentionDays: retentionDays)
+            if removed > 0 {
+                print("Vocal: removed \(removed) expired audio recording(s)")
+            }
+        }
     }
 
     /// Ollama server root; its OpenAI-compatible surface lives under /v1

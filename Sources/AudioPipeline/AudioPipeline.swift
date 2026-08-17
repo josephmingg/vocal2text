@@ -78,6 +78,35 @@ public enum AudioLevelMeter {
     }
 }
 
+/// How long a take's audio is kept (FR-5.1, docs/11 G9). Encodes the meaning
+/// of Settings → History & Privacy → "Keep audio", which is stored as a day
+/// count with two sentinels. Pure, so the rules are tested rather than
+/// re-derived at each call site.
+public enum AudioRetentionPolicy {
+    /// "Never" — the take's audio is not written at all.
+    public static let never = 0
+    /// "Forever" — kept until the transcript is deleted.
+    public static let forever = -1
+
+    public static func keepsAudio(retentionDays: Int) -> Bool {
+        retentionDays != never
+    }
+
+    /// Whether a file recorded at `createdAt` has outlived the window.
+    /// "Forever" never expires; a nil date is treated as expired, since an
+    /// unreadable timestamp is indistinguishable from an orphan.
+    public static func isExpired(
+        createdAt: Date?,
+        retentionDays: Int,
+        now: Date = Date()
+    ) -> Bool {
+        guard retentionDays != forever else { return false }
+        guard retentionDays != never else { return true }
+        guard let createdAt else { return true }
+        return now.timeIntervalSince(createdAt) > Double(retentionDays) * 24 * 60 * 60
+    }
+}
+
 /// FR-1.3 low-disk guard (docs/11 G4): a recording must not fill the disk.
 /// A take is refused at start, or finished early mid-take, when the volume
 /// holding the recovery sidecars drops below `minimumFreeBytes`. The decision
@@ -151,6 +180,119 @@ public struct MicrophoneSession: Sendable {
         self.recoveryFileURL = recoveryFileURL
         self.finish = finish
         self.cancel = cancel
+    }
+}
+
+/// Stores and reaps the retained audio of delivered takes (FR-5.1, docs/11
+/// G9). One flat directory of `<transcript-uuid>.m4a`, so a transcript's
+/// recording is found by id alone and an orphaned file is obvious.
+public enum AudioArchive {
+    public static let fileExtension = "m4a"
+
+    public static func fileURL(forTranscript id: UUID, in directory: URL) -> URL {
+        directory.appendingPathComponent(id.uuidString).appendingPathExtension(fileExtension)
+    }
+
+    /// Encodes a finished take to AAC beside its transcript, returning the
+    /// path to record — nil when the audio could not be written, which must
+    /// never cost the user the transcript itself.
+    ///
+    /// AAC at 24 kbps mono: about 3 KB per second of speech, so even years of
+    /// daily dictation stay smaller than the speech model that produced it.
+    @discardableResult
+    public static func write(
+        _ samples: [Float],
+        forTranscript id: UUID,
+        in directory: URL
+    ) -> String? {
+        guard !samples.isEmpty else { return nil }
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true
+            )
+        } catch {
+            return nil
+        }
+        let url = fileURL(forTranscript: id, in: directory)
+        do {
+            let settings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: Double(PCMChunk.sampleRate),
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 24_000,
+            ]
+            let file = try AVAudioFile(forWriting: url, settings: settings)
+            // Written in the file's own processing format; AVAudioFile handles
+            // the float→AAC conversion on the way out.
+            guard
+                let buffer = AVAudioPCMBuffer(
+                    pcmFormat: file.processingFormat,
+                    frameCapacity: AVAudioFrameCount(samples.count)
+                ),
+                let channel = buffer.floatChannelData
+            else { return nil }
+            buffer.frameLength = AVAudioFrameCount(samples.count)
+            for index in samples.indices {
+                channel[0][index] = samples[index]
+            }
+            try file.write(from: buffer)
+            return url.path
+        } catch {
+            // A failed encode leaves no half-written file behind.
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+    }
+
+    /// Deletes one transcript's recording, if it has one.
+    public static func delete(forTranscript id: UUID, in directory: URL) {
+        try? FileManager.default.removeItem(at: fileURL(forTranscript: id, in: directory))
+    }
+
+    /// Deletes every recording — the audio half of "Delete All History".
+    public static func deleteAll(in directory: URL) {
+        guard
+            let entries = try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            )
+        else { return }
+        for entry in entries where entry.pathExtension == fileExtension {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
+    /// Applies the retention window, returning how many recordings were
+    /// removed. Run at launch: the setting is a promise about what is on disk,
+    /// not merely about what is written.
+    @discardableResult
+    public static func sweep(
+        directory: URL,
+        retentionDays: Int,
+        now: Date = Date()
+    ) -> Int {
+        let fileManager = FileManager.default
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+
+        var removed = 0
+        for entry in entries where entry.pathExtension == fileExtension {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            guard
+                AudioRetentionPolicy.isExpired(
+                    createdAt: modified, retentionDays: retentionDays, now: now
+                )
+            else { continue }
+            if (try? fileManager.removeItem(at: entry)) != nil {
+                removed += 1
+            }
+        }
+        return removed
     }
 }
 

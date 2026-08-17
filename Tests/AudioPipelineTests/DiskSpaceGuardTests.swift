@@ -63,3 +63,40 @@ import Testing
         #expect(level <= 1)
     }
 }
+
+// MARK: - Audio retention policy (FR-5.1, docs/11 G9)
+
+@Test func neverKeepsNothing() {
+    #expect(!AudioRetentionPolicy.keepsAudio(retentionDays: AudioRetentionPolicy.never))
+    // Anything already on disk under "Never" is expired by definition.
+    #expect(
+        AudioRetentionPolicy.isExpired(
+            createdAt: Date(), retentionDays: AudioRetentionPolicy.never
+        )
+    )
+}
+
+@Test func foreverNeverExpires() {
+    #expect(AudioRetentionPolicy.keepsAudio(retentionDays: AudioRetentionPolicy.forever))
+    let ancient = Date(timeIntervalSince1970: 0)
+    #expect(
+        !AudioRetentionPolicy.isExpired(
+            createdAt: ancient, retentionDays: AudioRetentionPolicy.forever
+        )
+    )
+}
+
+@Test func aWindowExpiresOnlyPastItsEnd() {
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let sixDaysAgo = now.addingTimeInterval(-6 * 24 * 60 * 60)
+    let eightDaysAgo = now.addingTimeInterval(-8 * 24 * 60 * 60)
+    #expect(!AudioRetentionPolicy.isExpired(createdAt: sixDaysAgo, retentionDays: 7, now: now))
+    #expect(AudioRetentionPolicy.isExpired(createdAt: eightDaysAgo, retentionDays: 7, now: now))
+}
+
+@Test func anUnreadableDateCountsAsExpired() {
+    // An undateable file is an orphan; keeping voice recordings that no
+    // retention window can ever reach would be the worse failure.
+    #expect(AudioRetentionPolicy.isExpired(createdAt: nil, retentionDays: 30))
+    #expect(!AudioRetentionPolicy.isExpired(createdAt: nil, retentionDays: AudioRetentionPolicy.forever))
+}

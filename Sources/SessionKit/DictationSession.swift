@@ -51,12 +51,23 @@ public actor DictationSession {
     /// take is recorded as `skipped(providerUnavailable)`.
     public typealias CleanupSelecting = @Sendable (Profile) async -> CleanupSelection?
 
+    /// Retains a delivered take's audio, returning the path history should
+    /// record — nil when audio is not being kept (the user's retention
+    /// setting) or the write failed (FR-5.1, docs/11 G9).
+    ///
+    /// Called only after delivery succeeds, so a blocked secure field or a
+    /// discarded take never leaves a recording behind, and a failure here can
+    /// never cost the user the transcript.
+    public typealias AudioArchiving = @Sendable (PCMChunk, UUID) async -> String?
+
     /// Everything a session needs, injected by the composition root.
     public struct Dependencies: Sendable {
         public var audio: any AudioCapturing
         public var engine: any TranscriptionEngine
         /// Stage-3 provider selection, resolved per take.
         public var selectCleanup: CleanupSelecting
+        /// Retains the take's audio after delivery; nil keeps nothing.
+        public var archiveAudio: AudioArchiving?
         /// Fired fire-and-forget at hotkey press so the model is hot at
         /// release (docs/03 §2). Wire to `CleanupProvider.prewarm`; defaults
         /// to a no-op.
@@ -83,6 +94,7 @@ public actor DictationSession {
             engine: any TranscriptionEngine,
             cleanup: CleanupPipeline? = nil,
             cleanupProviderID: CleanupProviderID = .openAICompatible(name: "unconfigured"),
+            archiveAudio: AudioArchiving? = nil,
             prewarmCleanup: @escaping @Sendable () async -> Void = {},
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
@@ -100,6 +112,7 @@ public actor DictationSession {
                 selectCleanup: { _ in
                     cleanup.map { CleanupSelection(pipeline: $0, providerID: cleanupProviderID) }
                 },
+                archiveAudio: archiveAudio,
                 prewarmCleanup: prewarmCleanup,
                 deliverer: deliverer,
                 store: store,
@@ -113,6 +126,7 @@ public actor DictationSession {
             audio: any AudioCapturing,
             engine: any TranscriptionEngine,
             selectCleanup: @escaping CleanupSelecting,
+            archiveAudio: AudioArchiving? = nil,
             prewarmCleanup: @escaping @Sendable () async -> Void = {},
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
@@ -127,6 +141,7 @@ public actor DictationSession {
             self.audio = audio
             self.engine = engine
             self.selectCleanup = selectCleanup
+            self.archiveAudio = archiveAudio
             self.prewarmCleanup = prewarmCleanup
             self.deliverer = deliverer
             self.store = store
@@ -439,7 +454,17 @@ public actor DictationSession {
             targetBundleID = appBundleID
         }
 
+        // FR-5.1 (docs/11 G9): retain the audio only for a take that actually
+        // landed, and only when the user's retention setting keeps any. The
+        // transcript id names the file, so the two are found together.
+        let transcriptID = UUID()
+        var audioPath: String?
+        if let archive = deps.archiveAudio {
+            audioPath = await archive(audio, transcriptID)
+        }
+
         let record = TranscriptRecord(
+            id: transcriptID,
             createdAt: deps.now(),
             source: .dictation,
             language: language,
@@ -450,6 +475,7 @@ public actor DictationSession {
             profileName: profile.name,
             routeKind: resolved.routeKind,
             cleanup: cleanupOutcome,
+            audioPath: audioPath,
             timings: TimingBreakdown(
                 captureSeconds: captureSeconds,
                 transcriptionSeconds: transcriptionSeconds,

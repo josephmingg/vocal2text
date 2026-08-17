@@ -1,4 +1,6 @@
+import AVFoundation
 import AppKit
+import AudioPipeline
 import CoreModels
 import PersistenceKit
 import SwiftUI
@@ -14,6 +16,8 @@ struct HistoryView: View {
     @State private var records: [TranscriptRecord] = []
     @State private var selectedID: UUID?
     @State private var errorText: String?
+    @State private var player: AVAudioPlayer?
+    @State private var isPlaying = false
 
     init(appState: AppState) {
         _appState = ObservedObject(wrappedValue: appState)
@@ -66,6 +70,11 @@ struct HistoryView: View {
         }
         .onAppear { reload(database: database) }
         .onChange(of: query) { _, _ in reload(database: database) }
+        .onChange(of: selectedID) { _, _ in
+            player?.stop()
+            player = nil
+            isPlaying = false
+        }
     }
 
     // MARK: - Rows
@@ -113,15 +122,76 @@ struct HistoryView: View {
     @ViewBuilder
     private var detail: some View {
         if let record = records.first(where: { $0.id == selectedID }) {
-            HStack(alignment: .top, spacing: 0) {
-                transcriptColumn(title: "Raw", text: record.rawText)
-                Divider()
-                transcriptColumn(title: "Delivered", text: record.deliveredText)
+            VStack(spacing: 0) {
+                if let audioURL = playableAudioURL(for: record) {
+                    audioRow(url: audioURL)
+                    Divider()
+                }
+                HStack(alignment: .top, spacing: 0) {
+                    transcriptColumn(title: "Raw", text: record.rawText)
+                    Divider()
+                    transcriptColumn(title: "Delivered", text: record.deliveredText)
+                }
             }
         } else {
             Text("Select a transcript")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// The take's recording, when it was kept and is still on disk. Checked
+    /// rather than trusted: the retention sweep can remove a file while the
+    /// row still points at it (docs/11 G9).
+    private func playableAudioURL(for record: TranscriptRecord) -> URL? {
+        guard let path = record.audioPath, !path.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: path)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private func audioRow(url: URL) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                play(url)
+            } label: {
+                Label(
+                    isPlaying ? "Stop" : "Play recording",
+                    systemImage: isPlaying ? "stop.fill" : "play.fill"
+                )
+            }
+            .controlSize(.small)
+            Text("What you actually said")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(8)
+    }
+
+    private func play(_ url: URL) {
+        if isPlaying {
+            player?.stop()
+            player = nil
+            isPlaying = false
+            return
+        }
+        do {
+            let newPlayer = try AVAudioPlayer(contentsOf: url)
+            newPlayer.play()
+            player = newPlayer
+            isPlaying = true
+            // No delegate plumbing for a few seconds of speech: the button
+            // returns to "Play" once the clip is over.
+            let duration = newPlayer.duration
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(duration))
+                if player === newPlayer {
+                    isPlaying = false
+                    player = nil
+                }
+            }
+        } catch {
+            errorText = "Could not play recording: \(error.localizedDescription)"
         }
     }
 
@@ -164,6 +234,11 @@ struct HistoryView: View {
     private func delete(_ record: TranscriptRecord, database: DatabaseStore) {
         do {
             try database.deleteTranscript(id: record.id)
+            // The recording is part of the transcript, not a separate thing to
+            // clean up later (docs/11 G9).
+            if let directory = AppState.audioDirectory() {
+                AudioArchive.delete(forTranscript: record.id, in: directory)
+            }
             if selectedID == record.id {
                 selectedID = nil
             }
