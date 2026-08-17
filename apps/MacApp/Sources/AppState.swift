@@ -198,11 +198,12 @@ final class AppState: ObservableObject {
         // FR-1.3 (docs/11 G4): when free disk drops below the guard floor
         // mid-take, finish the take through the normal stop path — the audio
         // captured so far is transcribed and delivered, and the user is told
-        // why the recording stopped.
-        Task { [weak self] in
+        // why the recording stopped. Routed through the relay because `self`
+        // cannot be captured by a concurrent closure from inside init.
+        Task {
             await microphone.setLowDiskHandler {
-                Task { @MainActor [weak self] in
-                    self?.lowDiskGuardTripped()
+                Task { @MainActor in
+                    relay.noteLowDisk()
                 }
             }
         }
@@ -211,7 +212,7 @@ final class AppState: ObservableObject {
 
     /// The FR-1.3 mid-take low-disk guard fired: end the take normally and
     /// queue the explanation for when the HUD returns to idle.
-    private func lowDiskGuardTripped() {
+    func lowDiskGuardTripped() {
         pendingLowDiskNotice = true
         stopDictation(isLockMode: false)
     }
@@ -450,6 +451,10 @@ private final class ResolutionRelay {
 
     func noteDelivery(_ outcome: DeliveryOutcome) {
         appState?.showDelivery(outcome: outcome)
+    }
+
+    func noteLowDisk() {
+        appState?.lowDiskGuardTripped()
     }
 }
 
