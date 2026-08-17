@@ -19,7 +19,10 @@ final class HUDPanelController {
     private let appState: AppState
     private let panel: NSPanel
     private var cancellables: Set<AnyCancellable> = []
-    private var screenObserver: NSObjectProtocol?
+    // nonisolated(unsafe): the token is written once on the main actor and
+    // read only in deinit (which Swift 6 treats as nonisolated); the observer
+    // must be removed there or its block leaks.
+    private nonisolated(unsafe) var screenObserver: NSObjectProtocol?
 
     /// Latest values delivered by the Combine sinks. `@Published` emits during
     /// `willSet`, so reading `appState.hudState` inside a sink would observe
