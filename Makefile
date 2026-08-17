@@ -28,14 +28,28 @@ generate-free:
 	@echo "✅ VocalFree.xcodeproj — open it, set your Team on VocalIOS + VocalWidgets, Run."
 
 # Build the macOS app from the command line after `make generate`.
+# repair-framework-symlinks: SwiftPM can mangle the symlinks inside binary
+# xcframework artifacts (onnxruntime), which fails the CodeSign step on a
+# real Mac (docs/10 troubleshooting). The repair is idempotent and free when
+# nothing is broken.
 mac: generate
+	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug build
 
 # Release-build VocalMac and install it to /Applications as Vocal.app.
 # Requires the signing Team to be selected once in Xcode (Signing & Capabilities).
+# The build retries once after a symlink repair: the very first build is the
+# one that extracts the artifacts, so a mangled framework only becomes
+# repairable after that build has already failed at CodeSign.
 install:
+	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
+	rm -rf build/Build/Products/Release/VocalMac.app
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Release \
-		-derivedDataPath build -allowProvisioningUpdates build
+		-derivedDataPath build -allowProvisioningUpdates build \
+	|| { sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts && \
+		rm -rf build/Build/Products/Release/VocalMac.app && \
+		xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Release \
+			-derivedDataPath build -allowProvisioningUpdates build; }
 	rm -rf /Applications/Vocal.app
 	ditto build/Build/Products/Release/VocalMac.app /Applications/Vocal.app
 	@echo "✅ Installed /Applications/Vocal.app — grant mic + Accessibility once for this copy."
