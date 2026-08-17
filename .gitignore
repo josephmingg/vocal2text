@@ -11,5 +11,8 @@ DerivedData/
 apps/**/Info.plist
 apps/**/*.entitlements
 
+# Python bytecode from the bench harness
+__pycache__/
+
 # Derived from project.yml by scripts/free-account-spec.py.
 project-free.yml
