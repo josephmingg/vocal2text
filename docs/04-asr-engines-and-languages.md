@@ -68,10 +68,11 @@ quantized (~626 MB)**:
 LanguageMode = .auto | .english | .chinese | .burmese   // menu-bar quick toggle + per-profile pin
 ```
 
-- **Auto**: resolved per utterance by `ASRKit.LanguageDetector`. Script in the decoded text
-  wins over the engine's reported tag — Myanmar or Han characters are proof, whereas
-  Whisper's language ID is a whole-clip guess made before decoding and is routinely wrong on
-  short utterances. The reported tag only settles Latin-script languages.
+- **Auto**: resolved per utterance by `ASRKit.LanguageDetector`. The engine's reported tag
+  is trusted unless the transcript's *dominant* script (a majority of its letters)
+  contradicts it — a mostly-Han or mostly-Myanmar transcript overrides a Latin tag, but a
+  few stray characters never do: one 中 in an English sentence, or a hallucinated Myanmar
+  scalar, must not reroute the whole take through another language's formatter.
   Wispr Flow's own docs list auto-detect as its top failure mode — so the manual pin is a
   first-class UI element, not buried in settings, and a pin outranks every other signal.
 - **Pinned**: passes the language token to Whisper (or selects the Apple-engine locale).

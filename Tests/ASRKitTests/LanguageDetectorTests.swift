@@ -4,11 +4,14 @@ import Testing
 @testable import ASRKit
 
 /// The rule that decides which language pipeline a dictation goes through.
-/// Getting it wrong sends Burmese text through the English formatter (which
-/// would capitalize and append a Latin period) or the reverse.
+/// Getting it wrong sends text through the wrong formatter, the wrong
+/// dictionary semantics, the wrong cleanup prompt, and the wrong validator
+/// thresholds — so both failure directions are pinned here: a wrong tag must
+/// not beat an overwhelmingly contradicting script, and a couple of stray
+/// characters must not beat a correct tag.
 struct LanguageDetectorTests {
 
-    private let burmese = "မင်္ဂလာပါ ဒီနေ့ ရာသီဥတု ကောင်းတယ်"
+    private let burmese = "ဒီနေ့ ရာသီဥတု ကောင်းတယ်"
     private let chinese = "今天天气很好"
     private let english = "the weather is good today"
 
@@ -23,12 +26,9 @@ struct LanguageDetectorTests {
         #expect(detected == language)
     }
 
-    // MARK: - Script is proof
+    // MARK: - The tag is trusted; a dominant script overrides it
 
-    @Test func myanmarScriptWinsOverAWrongReportedTag() {
-        // Whisper's language ID is a whole-clip guess made before decoding and
-        // is routinely wrong on short utterances — but it cannot invent
-        // Myanmar characters for an English sentence.
+    @Test func dominantMyanmarScriptOverridesAWrongTag() {
         #expect(
             LanguageDetector.detect(reportedTag: "en", text: burmese, mode: .auto) == .burmese
         )
@@ -37,9 +37,39 @@ struct LanguageDetectorTests {
         )
     }
 
-    @Test func hanScriptWinsOverAWrongReportedTag() {
+    @Test func dominantHanScriptOverridesAWrongTag() {
         #expect(
             LanguageDetector.detect(reportedTag: "en", text: chinese, mode: .auto) == .chinese
+        )
+        #expect(
+            LanguageDetector.detect(reportedTag: nil, text: chinese, mode: .auto) == .chinese
+        )
+    }
+
+    /// Regression pin (review round 2): script used to be a contains-any test
+    /// that outranked the tag, so one 中 in an English sentence rerouted the
+    /// whole take through the Chinese formatter, and one hallucinated Myanmar
+    /// scalar — Whisper produces those on Burmese audio — silently rerouted an
+    /// English take to Burmese, where cleanup is skipped entirely.
+    @Test func strayCharactersDoNotOverrideTheTag() {
+        #expect(
+            LanguageDetector.detect(
+                reportedTag: "en", text: "the character 中 means middle", mode: .auto
+            ) == .english
+        )
+        #expect(
+            LanguageDetector.detect(
+                reportedTag: "en", text: "we visited the မ region", mode: .auto
+            ) == .english
+        )
+    }
+
+    /// Even with no tag at all, a stray character is not evidence.
+    @Test func strayCharactersDoNotDecideWithoutATagEither() {
+        #expect(
+            LanguageDetector.detect(
+                reportedTag: nil, text: "I met 王 at the office yesterday", mode: .auto
+            ) == .english
         )
     }
 
@@ -70,12 +100,15 @@ struct LanguageDetectorTests {
         #expect(LanguageDetector.detect(reportedTag: nil, text: "", mode: .auto) == .english)
     }
 
-    // MARK: - Script probe
+    // MARK: - Dominance predicate
 
-    @Test func scriptLanguageReportsNilForSharedScripts() {
-        #expect(LanguageDetector.scriptLanguage(of: burmese) == .burmese)
-        #expect(LanguageDetector.scriptLanguage(of: chinese) == .chinese)
-        #expect(LanguageDetector.scriptLanguage(of: english) == nil)
-        #expect(LanguageDetector.scriptLanguage(of: "") == nil)
+    @Test func dominanceRequiresAMajorityOfLetters() {
+        #expect(LanguageDetector.dominantScriptLanguage(of: chinese) == .chinese)
+        #expect(LanguageDetector.dominantScriptLanguage(of: burmese) == .burmese)
+        #expect(LanguageDetector.dominantScriptLanguage(of: english) == nil)
+        #expect(LanguageDetector.dominantScriptLanguage(of: "I met 王 yesterday") == nil)
+        #expect(LanguageDetector.dominantScriptLanguage(of: "") == nil)
+        // Digits and punctuation are not letters and prove nothing.
+        #expect(LanguageDetector.dominantScriptLanguage(of: "၀၉၇၉၁၂၃၄၅၆") == nil)
     }
 }

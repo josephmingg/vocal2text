@@ -11,17 +11,20 @@ public enum LanguageDetector: Sendable {
 
     /// Resolves the language for one transcription result.
     ///
-    /// Precedence, strongest evidence first:
+    /// Precedence:
     ///
     /// 1. **A pin.** The user said which language they are speaking; nothing
-    ///    outranks that. Auto-detect is the top complaint about tools in this
-    ///    category, which is why the pin exists at all.
-    /// 2. **The script in the output.** Myanmar or Han characters are proof,
-    ///    not inference. Whisper's own language ID is a whole-clip guess made
-    ///    before decoding and is unreliable on short utterances — but it
-    ///    cannot produce Myanmar characters for an English sentence.
-    /// 3. **The engine's reported tag**, for languages that share the Latin
-    ///    script and so cannot be told apart from characters.
+    ///    outranks that.
+    /// 2. **The engine's reported tag**, unless the transcript's *dominant*
+    ///    script contradicts it. The tag is a whole-clip guess made before
+    ///    decoding and is unreliable on short utterances, so a transcript
+    ///    that is mostly Han or Myanmar overrides a Latin tag — but a few
+    ///    stray characters never do. One 中 in an English sentence, or a
+    ///    single hallucinated Myanmar scalar (Whisper produces those on
+    ///    Burmese audio), must not reroute the whole take through another
+    ///    language's formatter, dictionary semantics, and cleanup prompt.
+    /// 3. **The dominant script alone**, when the engine offered no usable
+    ///    tag.
     /// 4. **English**, the fallback.
     ///
     /// - Parameters:
@@ -36,22 +39,38 @@ public enum LanguageDetector: Sendable {
         mode: LanguageMode
     ) -> Language {
         if let pinned = mode.pinnedLanguage { return pinned }
-        if let fromScript = scriptLanguage(of: text) { return fromScript }
+        let dominant = dominantScriptLanguage(of: text)
         if let reportedTag, let reported = Language(rawValue: normalized(reportedTag)) {
+            if let dominant, dominant != reported { return dominant }
             return reported
         }
+        if let dominant { return dominant }
         return .english
     }
 
-    /// The language a string's script proves, or nil when the script is shared
-    /// (Latin) and therefore proves nothing.
+    /// The language whose script accounts for the majority of the letters in
+    /// `text`, or nil when none does.
     ///
-    /// Checked in order of how exclusive each script is. Burmese comes first:
-    /// Myanmar characters appear in no other language this app supports, while
-    /// Burmese text routinely embeds Latin words and digits.
-    public static func scriptLanguage(of text: String) -> Language? {
-        if text.containsMyanmarCharacters { return .burmese }
-        if text.containsHanCharacters { return .chinese }
+    /// Letters only — digits, punctuation, and whitespace say nothing about
+    /// language. Latin never wins here: a mostly-Latin transcript proves only
+    /// "some Latin-script language", which cannot pick between them; the
+    /// reported tag or the English fallback decides those.
+    public static func dominantScriptLanguage(of text: String) -> Language? {
+        var han = 0
+        var myanmar = 0
+        var letters = 0
+        for scalar in text.unicodeScalars {
+            guard scalar.properties.isAlphabetic else { continue }
+            letters += 1
+            if Unicode.isHanScalar(scalar) {
+                han += 1
+            } else if Unicode.isMyanmarScalar(scalar) {
+                myanmar += 1
+            }
+        }
+        guard letters > 0 else { return nil }
+        if han * 2 > letters { return .chinese }
+        if myanmar * 2 > letters { return .burmese }
         return nil
     }
 
