@@ -313,11 +313,13 @@ struct BurmeseOutputValidatorTests {
         for: CleanupRequest(text: "x", language: .english)
     )
     #expect(prompt.contains("A cue only counts when"))
-    #expect(prompt.lowercased().contains("counter-example"))
-    // The counter-example must exist in both scripts: 「对不起」 is the ZH
-    // twin and fails the same way.
-    #expect(prompt.contains("sorry I'm late"))
-    #expect(prompt.contains("对不起"))
+    // A negative example in each script, and each one uses a word from the cue
+    // list as ordinary content — the discrimination is the whole point, so a
+    // rule without a worked negative is not enough for a 3B model.
+    #expect(prompt.contains("Not a correction:"))
+    #expect(prompt.contains("sorry to bother you"))
+    #expect(prompt.contains("不是改正"))
+    #expect(prompt.contains("保留「不对」"))
 }
 
 /// The style slot reached the model but carried no authority: the core prompt
