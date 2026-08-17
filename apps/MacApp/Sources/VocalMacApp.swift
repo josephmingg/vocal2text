@@ -35,6 +35,7 @@ private struct MenuBarStatusIcon: View {
         case .listening: return "mic.fill"
         case .processing: return "waveform"
         case .error: return "mic.slash"
+        case .notice: return "info.circle"
         }
     }
 }

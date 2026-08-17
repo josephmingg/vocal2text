@@ -110,6 +110,7 @@ struct MenuBarView: View {
         case .listening: return "Listening…"
         case .processing: return "Processing…"
         case .error(let message): return message
+        case .notice(let message): return message
         }
     }
 
@@ -119,6 +120,7 @@ struct MenuBarView: View {
         case .listening: return "mic.fill"
         case .processing: return "waveform"
         case .error: return "mic.slash"
+        case .notice: return "info.circle"
         }
     }
 
