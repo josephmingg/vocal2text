@@ -36,12 +36,23 @@ public enum OutputValidator {
         // A marker is only evidence of a preamble when the model *introduced*
         // it. "Sure, sounds good." and 「好的，我明天过去。」 are ordinary things
         // to dictate, and rejecting them made cleanup permanently useless for
-        // anyone who opens a sentence that way — so a marker the input already
-        // starts with is the speaker's own word, not the model talking.
+        // anyone who opens a sentence that way. But the license is one word,
+        // not the whole output: skip the marker the input itself opens with on
+        // BOTH sides and re-apply the rule to what follows, so
+        // "Sure! Here is the cleaned text: …" is still caught when the
+        // dictation merely began with "sure".
         let lowered = cleaned.lowercased()
         let loweredInput = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if let marker = metaMarkers.first(where: { lowered.hasPrefix($0) }),
-            !loweredInput.hasPrefix(marker) {
+        var candidate = Substring(lowered)
+        if let shared = metaMarkers.first(where: {
+            loweredInput.hasPrefix($0) && lowered.hasPrefix($0)
+        }) {
+            candidate = lowered.dropFirst(shared.count)
+            while let first = candidate.first, first.isWhitespace || first.isPunctuation {
+                candidate = candidate.dropFirst()
+            }
+        }
+        if metaMarkers.contains(where: { candidate.hasPrefix($0) }) {
             return .rejected(rule: "meta-text")
         }
 
@@ -83,8 +94,13 @@ public enum OutputValidator {
             }
         }
         if !input.containsMyanmarCharacters, cleaned.containsMyanmarCharacters {
-            let myanmarCount = cleaned.unicodeScalars.filter(Unicode.isMyanmarScalar).count
-            if myanmarCount * 3 > cleaned.count {
+            // Scalars on BOTH sides of the ratio. Myanmar syllables span 2–4
+            // scalars per Character, so a scalar count over a grapheme count
+            // silently tightened "a third of its length" to roughly a ninth.
+            // (The Han rule above is safe with graphemes — Han is 1:1.)
+            let scalars = cleaned.unicodeScalars
+            let myanmarCount = scalars.filter(Unicode.isMyanmarScalar).count
+            if myanmarCount * 3 > scalars.count {
                 return .rejected(rule: "language-mismatch")
             }
         }

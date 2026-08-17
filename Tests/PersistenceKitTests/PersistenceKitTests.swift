@@ -302,6 +302,41 @@ private func makeRecord(
     #expect(remaining == 0)
 }
 
+/// One profile document a newer build wrote (or one mangled document) must
+/// not silently discard the user's whole profile set — the app treats a load
+/// failure as "fall back to built-ins".
+@Test func unreadableProfileRowIsSkippedNotFatal() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let good = Profile(name: "Email")
+    try store.save(good)
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "INSERT INTO profile (id, name, document) VALUES (?, ?, ?)",
+            arguments: [UUID().uuidString, "Broken", "not json"]
+        )
+    }
+    #expect(try store.profiles() == [good])
+}
+
+/// Same rule for the dictionary: one bad entry must not empty the whole
+/// dictionary (the session reads it on every single dictation).
+@Test func unreadableDictionaryRowIsSkippedNotFatal() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let good = DictionaryEntry(spoken: "cloud code", written: "Claude Code")
+    try store.save(good)
+    try DatabaseQueue(path: path).write { db in
+        try db.execute(
+            sql: "INSERT INTO dictionary_entry (id, document) VALUES (?, ?)",
+            arguments: [UUID().uuidString, "{broken"]
+        )
+    }
+    #expect(try store.dictionaryEntries() == [good])
+}
+
 #else
 
 @Test func persistenceIsUnsupportedWithoutGRDB() {

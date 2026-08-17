@@ -15,8 +15,11 @@ public enum ProtectedTermsVerifier {
         // O(terms × output × window) and this used to allocate a String for
         // every single window, on the delivery path, with the user waiting.
         let loweredOutput = lowercasedCharacters(outputCharacters[...])
-        // Case folding can change length (ß → ss, İ → i̇). When it does, the
-        // index-aligned fast path is invalid, so fold per window instead.
+        // Folding is not expected to change the Character count — the classic
+        // expanders are red herrings here (ß → SS is an UPPERCASE mapping;
+        // İ lowercases to i+combining-dot, which is still one grapheme) — but
+        // the equivalence is subtle enough that the aligned fast path stays
+        // guarded, with the per-window fold as the fallback.
         let isIndexAligned = loweredOutput.count == outputCharacters.count
         for term in protectedTerms {
             guard !term.isEmpty, input.contains(term) else { continue }

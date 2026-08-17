@@ -1,7 +1,8 @@
 import Foundation
 
-/// Languages the pipeline understands. Designed additive: a new language is a new
-/// case plus rule files — no pipeline changes (docs/04 §2).
+/// Languages the pipeline understands. Designed additive: a new language is a
+/// new case plus rule branches in the shared stages (docs/04 §2 records how
+/// additive that stayed in practice for Burmese).
 public enum Language: String, Codable, Sendable, CaseIterable, Hashable {
     case english = "en"
     case chinese = "zh"
@@ -73,13 +74,14 @@ public enum LanguageMode: Codable, Sendable, Hashable {
 public enum BurmeseSupportNote: Sendable {
     /// Long form for a settings pane.
     public static let text = """
-        Burmese (မြန်မာ) is new in 1.1. Text handling is complete: Unicode \
-        normalization, the custom dictionary, spoken punctuation \
-        (say "ပုဒ်မ" for ။ and "ပုဒ်ဖြတ်" for ၊), and a digit-set preference. \
-        Recognition, however, still runs on Whisper, which transcribes Burmese \
-        poorly — expect frequent errors until a Burmese-capable model ships. \
-        AI cleanup stays off for Burmese by default: small local models corrupt \
-        it more often than they help.
+        Burmese (မြန်မာ) is new in 1.1. In place today: Unicode normalization, \
+        script-aware formatting, and the custom dictionary. A digit-set \
+        preference and spoken punctuation exist in the engine but have no \
+        settings UI yet, and the spoken-command vocabulary still needs \
+        native-speaker validation, so both are dormant. Recognition runs on \
+        Whisper, which transcribes Burmese poorly — expect frequent errors \
+        until a Burmese-capable model ships. AI cleanup stays off for Burmese: \
+        small local models corrupt it more often than they help.
         """
 
     /// Short form for the HUD and engine availability reporting.

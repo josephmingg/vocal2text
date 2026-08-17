@@ -51,15 +51,23 @@ public actor OpenAICompatibleProvider: CleanupProvider {
     /// down": cleanup silently fell back on every dictation. Accept both
     /// spellings by reducing either to the bare root. Trailing slashes go too,
     /// since they otherwise yield an empty path component.
+    /// Works on the percent-ENCODED path throughout. `URL.pathComponents`
+    /// percent-decodes, and rebuilding from decoded segments re-splits any
+    /// segment containing an encoded slash — `/tenant%2Fteam/v1` would come
+    /// back as `/tenant/team`, a different resource than the user configured.
     static func normalizedRoot(_ url: URL) -> URL {
-        var components = url.pathComponents.filter { $0 != "/" && !$0.isEmpty }
-        if components.last?.lowercased() == "v1" {
-            components.removeLast()
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
         }
-        guard
-            var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        else { return url }
-        parts.path = components.isEmpty ? "" : "/" + components.joined(separator: "/")
+        var segments = parts.percentEncodedPath
+            .split(separator: "/")
+            .filter { !$0.isEmpty }
+        // "v1" contains no percent-encodable characters, so comparing the
+        // encoded segment directly is exact.
+        if segments.last?.lowercased() == "v1" {
+            segments.removeLast()
+        }
+        parts.percentEncodedPath = segments.isEmpty ? "" : "/" + segments.joined(separator: "/")
         return parts.url ?? url
     }
 

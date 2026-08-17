@@ -30,7 +30,7 @@ struct IOSSettingsView: View {
                             .font(.callout)
                             .foregroundStyle(warmState.hasPrefix("Ready") ? .green : .red)
                     }
-                    Text("Whisper large-v3-turbo (~600 MB), downloaded once, stored on device. English + 中文, fully offline.")
+                    Text("Whisper large-v3-turbo (~600 MB), downloaded once, stored on device. English + 中文 + မြန်မာ, fully offline.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(BurmeseSupportNote.text)

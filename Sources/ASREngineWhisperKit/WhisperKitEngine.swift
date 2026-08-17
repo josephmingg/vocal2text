@@ -28,16 +28,17 @@ public actor WhisperKitEngine: TranscriptionEngine {
     }
 
     public func availability(for language: Language) async -> EngineAvailability {
+        // Download state first: Burmese is served by the same ~600 MB model,
+        // so it must not skip the needs-download report on a fresh install.
+        if pipe == nil {
+            return .needsDownload(bytes: 626_000_000)
+        }
         // Whisper accepts a `my` token, but its Burmese output is unusable —
         // 80–100% WER with hallucination loops (docs/04 Appendix A). Say so
         // rather than let the UI imply EN/ZH-grade accuracy; the fix is a
         // Burmese-capable engine (ModelCatalog lists the candidates), not a
         // different Whisper variant.
-        if language == .burmese {
-            return .readyWithCaveat(Self.burmeseCaveat)
-        }
-        // Whisper covers the rest; readiness depends on model download.
-        return pipe == nil ? .needsDownload(bytes: 626_000_000) : .ready
+        return language == .burmese ? .readyWithCaveat(Self.burmeseCaveat) : .ready
     }
 
     static let burmeseCaveat = BurmeseSupportNote.shortCaveat

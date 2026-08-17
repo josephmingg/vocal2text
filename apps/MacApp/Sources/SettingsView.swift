@@ -341,6 +341,12 @@ private struct AboutPane: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
+            // The Burmese caveat both apps must state identically (docs/11 G13).
+            Text(BurmeseSupportNote.text)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 400)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

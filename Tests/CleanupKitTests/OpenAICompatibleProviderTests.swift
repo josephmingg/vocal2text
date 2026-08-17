@@ -47,6 +47,15 @@ struct OpenAICompatibleProviderTests {
         )
     }
 
+    /// `URL.pathComponents` percent-decodes; rebuilding from it would turn
+    /// tenant%2Fteam into tenant/team — a different resource than configured.
+    @Test func percentEncodedPathSegmentsSurvive() {
+        #expect(
+            provider("https://gw.example.com/tenant%2Fteam/v1").endpointURL.absoluteString
+                == "https://gw.example.com/tenant%2Fteam/v1/chat/completions"
+        )
+    }
+
     // MARK: - Privacy badge
 
     @Test(

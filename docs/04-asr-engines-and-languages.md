@@ -162,13 +162,13 @@ tractable and complete, while recognition quality depends on a model that is not
 | `Language.burmese` (`my`), pinning, per-utterance auto-detect | Done | `CoreModels`, `ASRKit/LanguageDetector` |
 | Script detection (Myanmar + Extended-A/B) | Done | `Unicode.isMyanmarScalar` |
 | NFC normalization before anything matches | Done | stage 1 |
-| Spoken punctuation ပုဒ်မ/ပုဒ်မကြီး → ။, ပုဒ်ဖြတ်/ပုဒ်မငယ် → ၊ (plus English "full stop"/"comma") | Done | `MyText` |
-| Myanmar vs Western digit preference | Done | stage 4, per profile |
+| Spoken punctuation | **Disabled by default** — the Myanmar-script command words were removed in review (byte-identical to ordinary vocabulary; ပုဒ်မ = "section"); English command words remain, opt-in, pending native-speaker-validated vocabulary (G18) | `MyText` |
+| Myanmar vs Western digit preference | Done in stage 4; **no settings UI** (G17) | stage 4, per profile |
 | Unspaced-script handling: phrase-mode dictionary, no Latin space hygiene, no capitalization | Done | stages 1/2/4 |
-| Zawgyi *detection* for imported dictionary text | Done (heuristic) | `ZawgyiDetector` |
+| Zawgyi *detection* | Not shipped — the rule-based prototype misclassified legitimate Unicode Burmese and was removed (G14) | — |
 | Zawgyi → Unicode *conversion* | Not shipped | docs/11 G14 |
 | Cleanup prompt + validator guards (no translation, no transliteration) | Done | `lang_my.txt`, `OutputValidator` |
-| Cleanup off by default for Burmese | Done | `Language.allowsCleanupByDefault` |
+| Cleanup off by default for Burmese | Done; the per-profile opt-in exists in the session gate but needs the profile editor to be reachable (G17) | `Language.allowsCleanupByDefault` |
 | Burmese-capable ASR engine | **Not shipped** — Whisper is used and is poor | docs/11 G13 |
 
 The honest summary shown to users lives in one place, `BurmeseSupportNote`, so both apps say
@@ -190,13 +190,13 @@ the same thing.
   they were right: Unicode-only with NFC normalization; spoken punctuation commands for
   ၊ (U+104A) and ။ (U+104B) since CTC engines emit none; Myanmar vs Arabic digits as a
   preference; no LLM cleanup by default (small local LLMs corrupt Burmese) — dictionary and
-  punctuation commands only. Two are still open: Zawgyi *conversion* (detection ships; the
-  google/myanmar-tools table does not — G14), and Mac-only Sailor2-8B via Ollama as an
-  opt-in cleanup experiment, which the per-profile Burmese pin now makes reachable.
-- Architecture already accommodated it, as designed: v1.1 needed a new `Language` case, a
-  Burmese rule file for stages 1/4, and catalog entries — **no pipeline changes**, which is
-  the claim §2 makes. The remaining work is the sherpa-onnx adapter behind
-  `TranscriptionEngine`.
+  punctuation commands only. Two are still open: Zawgyi handling (neither detection nor
+  conversion ships — G14), and Mac-only Sailor2-8B via Ollama as an opt-in cleanup
+  experiment, which becomes reachable once the profile editor lands (G17).
+- Architecture accommodated it well, though not at the "no pipeline changes" ideal §2
+  hoped for: v1.1 added a new `Language` case, new stage-1/4 branches, validator rules,
+  and catalog entries — additive surface in the shared pipeline, no architectural change.
+  The remaining work is the sherpa-onnx adapter behind `TranscriptionEngine`.
 
 ### Engine status in v1.1
 

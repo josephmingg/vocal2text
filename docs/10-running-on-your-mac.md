@@ -60,7 +60,7 @@ Then: focus any text field anywhere, **hold Fn, speak, release**. Text lands at 
 | Full package incl. GRDB persistence + WhisperKit adapter | Compiles + tests on CI's macOS runner |
 | VocalMac app target | Compiles unsigned on CI's macOS runner |
 | Hotkey capture, paste insertion, mic quality, real latency, Apple-engine/FM adapters | **Cannot be verified in any cloud** — first run on your Mac is milestone M0's spike checklist (docs/06). File issues for anything that misbehaves; each spike has a fallback documented in docs/03/04 |
-| Burmese (မြန်မာ) **recognition accuracy** | **Known poor, not a bug to file.** The text layer is complete and unit-tested, but transcription still runs on Whisper, which manages 80–100% WER on Burmese. A Burmese-capable engine is docs/11 G13 |
+| Burmese (မြန်မာ) **recognition accuracy** | **Known poor, not a bug to file.** Text handling is in place and unit-tested (formatting options await the profile editor, docs/11 G17), but transcription still runs on Whisper, which manages 80–100% WER on Burmese. A Burmese-capable engine is docs/11 G13 |
 
 ## Known v1 seams (deliberate, documented)
 

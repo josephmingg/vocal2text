@@ -97,6 +97,17 @@ struct OutputValidatorTests {
         #expect(result == .accepted(cleaned: output))
     }
 
+    /// Review round 2: the input opening with a marker word licenses that one
+    /// word — not every preamble the model might then attach behind it.
+    @Test func aMarkerInputDoesNotLicenseAModelPreamble() {
+        let result = OutputValidator.validate(
+            output: "Sure! Here is the cleaned text: let's meet on Saturday at three.",
+            input: "sure let's meet on saturday at three",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "meta-text"))
+    }
+
     @Test func markdownFenceAtStartIsRejected() {
         let result = OutputValidator.validate(
             output: "```\nmeet on Saturday\n```",

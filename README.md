@@ -14,14 +14,16 @@ deliberate gaps are tracked in [`docs/11-known-gaps.md`](docs/11-known-gaps.md).
 |---|---|---|
 | English | Whisper large-v3-turbo | Full |
 | 中文 (Simplified) | Whisper large-v3-turbo | Full |
-| မြန်မာ (Burmese) — **new in 1.1** | Whisper, **poor quality** (see below) | Full |
+| မြန်မာ (Burmese) — **new in 1.1** | Whisper, **poor quality** (see below) | Core (see below) |
 
-Burmese ships with an uneven story, stated plainly rather than papered over. The text layer
-is complete: Unicode NFC normalization, per-utterance script detection, the custom dictionary
-in phrase mode, spoken punctuation (say "ပုဒ်မ" for ။, "ပုဒ်ဖြတ်" for ၊), and a Myanmar/Western
-digit preference. Recognition still runs on Whisper, which transcribes Burmese at 80–100% WER
-— a Burmese-capable engine (Meta's Omnilingual ASR via sherpa-onnx) is catalogued but not yet
-wired. AI cleanup is off by default for Burmese because small local models corrupt it.
+Burmese ships with an uneven story, stated plainly rather than papered over. Working today:
+Unicode NFC normalization, per-utterance script detection, and the custom dictionary in
+phrase mode. In the engine but dormant: a Myanmar/Western digit preference and spoken
+punctuation, both awaiting a profile editor (docs/11 G17) — and the spoken-command
+vocabulary additionally needs native-speaker validation before it can ship on (G18).
+Recognition still runs on Whisper, which transcribes Burmese at 80–100% WER — a
+Burmese-capable engine (Meta's Omnilingual ASR via sherpa-onnx) is catalogued but not yet
+wired (G13). AI cleanup is off for Burmese because small local models corrupt it.
 See [`docs/04` Appendix A](docs/04-asr-engines-and-languages.md).
 
 ## Core loop
@@ -62,5 +64,6 @@ hold hotkey ──▶ speak ──▶ release
 - **Offline by default.** No network calls in the core dictation path, ever.
 - **Personal use.** One user, personally signed builds, no App Store, no telemetry.
 - **Languages:** English + Mandarin Chinese since v1; Burmese added in v1.1 through the
-  pluggable language layer — a new enum case and rule files, no pipeline changes.
+  pluggable language layer — additive branches in the shared pipeline stages, no
+  architectural change.
 - **Clean code.** Protocol-boundaried modules, testable pure pipeline, evidence-backed "done".

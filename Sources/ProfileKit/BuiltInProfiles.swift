@@ -2,8 +2,9 @@ import CoreModels
 import Foundation
 
 /// The five starter profiles from docs/05 §4, pre-authored so cleanup works
-/// the moment the user opts in. All are editable and deletable like any
-/// user-created profile.
+/// the moment the user opts in. Intended to be editable and deletable like
+/// user-created profiles — but no profile editor exists yet and nothing
+/// persists a profile, so today these ARE the profile set (docs/11 G17).
 ///
 /// Shipped `cleanupEnabled` state: every profile ships `true` EXCEPT
 /// Terminal / Code (`false`). This is safe because the global cleanup master

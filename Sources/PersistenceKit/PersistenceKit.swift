@@ -283,13 +283,13 @@ public final class DatabaseStore: Sendable {
 
     public func dictionaryEntries() throws -> [DictionaryEntry] {
         try dbQueue.read { db -> [DictionaryEntry] in
-            let documents = try String.fetchAll(
+            let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT document FROM dictionary_entry ORDER BY rowid"
+                sql: "SELECT id, document FROM dictionary_entry ORDER BY rowid"
             )
-            return try documents.map {
-                try Self.decodeJSON(DictionaryEntry.self, from: $0, column: "dictionary_entry.document")
-            }
+            return Self.decodedDocuments(
+                DictionaryEntry.self, from: rows, column: "dictionary_entry.document"
+            )
         }
     }
 
@@ -320,13 +320,11 @@ public final class DatabaseStore: Sendable {
 
     public func profiles() throws -> [Profile] {
         try dbQueue.read { db -> [Profile] in
-            let documents = try String.fetchAll(
+            let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT document FROM profile ORDER BY name, rowid"
+                sql: "SELECT id, document FROM profile ORDER BY name, rowid"
             )
-            return try documents.map {
-                try Self.decodeJSON(Profile.self, from: $0, column: "profile.document")
-            }
+            return Self.decodedDocuments(Profile.self, from: rows, column: "profile.document")
         }
     }
 
@@ -369,6 +367,26 @@ public final class DatabaseStore: Sendable {
     /// a JSON column got mangled. Either way, one bad row must not make the
     /// user's entire history disappear — everything else in the table is
     /// still perfectly good.
+    /// The `decodedRecords` rule applied to a JSON-document table: one row a
+    /// newer build wrote (or one mangled document) must not hide every other
+    /// row. Skipping is safe for these tables specifically because nothing
+    /// destructive enumerates them — the transcript Delete-All lesson: any
+    /// future "delete all" must be one SQL statement, never
+    /// fetch-decode-delete-each.
+    private static func decodedDocuments<T: Decodable>(
+        _ type: T.Type, from rows: [Row], column: String
+    ) -> [T] {
+        rows.compactMap { row in
+            do {
+                return try decodeJSON(type, from: row["document"], column: column)
+            } catch {
+                let id: String? = row["id"]
+                print("Vocal: skipping unreadable \(column) row \(id ?? "<unknown>"): \(error)")
+                return nil
+            }
+        }
+    }
+
     private static func decodedRecords(from rows: [Row]) -> [TranscriptRecord] {
         rows.compactMap { row in
             do {
