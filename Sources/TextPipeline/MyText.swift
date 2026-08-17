@@ -72,13 +72,17 @@ enum MyText {
 
     /// Spoken punctuation commands → marks.
     ///
-    /// Whisper emits Burmese punctuation erratically and CTC engines emit none
-    /// at all, so saying the mark is the only reliable way to get one. Each
-    /// command is recognized in Burmese and in English (people code-switch the
-    /// command words constantly), and a mark already present is left alone.
+    /// Burmese recognizers punctuate erratically (Whisper) or not at all
+    /// (CTC engines), so saying the mark is the only reliable way to get
+    /// one. v1.1 recognizes only English command words — Burmese speakers
+    /// code-switch them constantly — because the Myanmar-script commands
+    /// this branch briefly carried were byte-identical to ordinary
+    /// vocabulary (ပုဒ်မ is the everyday word for "section/article") and a
+    /// substring match destroyed legitimate prose. Reintroducing them needs
+    /// a native-speaker-validated vocabulary: docs/11 G18.
     ///
-    /// Only applied when the profile allows auto-punctuation, so verbatim
-    /// profiles still get literal transcription.
+    /// Gated behind `FormattingOptions.myanmarSpokenPunctuation`, which
+    /// ships OFF.
     static func spokenPunctuationApplied(_ text: String) -> String {
         var result = text
         for command in punctuationCommands {
@@ -87,45 +91,30 @@ enum MyText {
         return collapsingDuplicateMarks(result)
     }
 
-    /// Applied longest command first.
-    ///
-    /// Several commands are prefixes of others — ပုဒ်မ starts both ပုဒ်မကြီး
-    /// and ပုဒ်မငယ် — so a shorter rule running first would eat the head of a
-    /// longer one and strand its tail as literal text. Sorting here rather
-    /// than trusting the table's hand-written order keeps that safe when
-    /// someone adds a command later.
+    /// Longest command first, recomputed rather than hand-maintained, so a
+    /// multi-word command ("full stop") is always consumed before a shorter
+    /// one could partially match inside it.
     private static let punctuationCommands: [(spoken: String, mark: Character)] =
         rawPunctuationCommands.sorted { $0.spoken.count > $1.spoken.count }
 
     private static let rawPunctuationCommands: [(spoken: String, mark: Character)] = [
         // ။ — end of sentence.
-        ("ပုဒ်မ", section),
-        ("ပုဒ်မကြီး", section),
         ("full stop", section),
         ("full-stop", section),
         ("period", section),
         // ၊ — phrase break.
-        ("ပုဒ်ဖြတ်", littleSection),
-        ("ပုဒ်မငယ်", littleSection),
         ("comma", littleSection),
     ]
 
-    /// Replaces a spoken command with its mark.
-    ///
-    /// Burmese has no word boundaries, so the Myanmar-script commands match as
-    /// plain substrings; the Latin ones require non-letter neighbors so
-    /// "period" inside "periodic" survives. Any run of spaces around the
-    /// command collapses into the mark, since a mark never takes a leading
-    /// space.
+    /// Replaces a spoken command with its mark. Every command is a Latin word
+    /// or phrase and must stand alone — the lookarounds keep "periodic" and
+    /// "commander" intact — and the outer `\s*` folds surrounding spaces into
+    /// the mark, since a mark never takes a leading space.
     private static func replacingCommand(
         _ spoken: String, with mark: Character, in text: String
     ) -> String {
         let escaped = NSRegularExpression.escapedPattern(for: spoken)
-        let isLatin = spoken.unicodeScalars.allSatisfy { $0.isASCII }
-        let pattern =
-            isLatin
-            ? "\\s*(?<![\\p{L}\\p{N}])" + escaped + "(?![\\p{L}\\p{N}])\\s*"
-            : "\\s*" + escaped + "\\s*"
+        let pattern = "\\s*(?<![\\p{L}\\p{N}])" + escaped + "(?![\\p{L}\\p{N}])\\s*"
         return PipelineRegex.replacing(pattern: pattern, in: text, with: String(mark))
     }
 
@@ -175,18 +164,27 @@ enum MyText {
 
     /// Appends ။ when a Burmese utterance ends without any terminal mark.
     ///
-    /// Mirrors the English terminal-period rule, but the floor is a character
-    /// count rather than a word count because the script has no word
-    /// boundaries. Six is deliberately low: a Myanmar syllable is typically
-    /// two to four Swift Characters — U+102C and U+1038 are excluded from
-    /// `SpacingMark` by UAX #29, so they break the grapheme cluster rather
-    /// than joining it — which puts the floor at roughly two syllables.
+    /// Mirrors the English terminal-period rule with two Burmese-shaped
+    /// guards. The floor is a character count (the script has no word
+    /// boundaries): a syllable is typically two to four Swift Characters —
+    /// U+102C and U+1038 are excluded from `SpacingMark` by UAX #29, so they
+    /// break the grapheme cluster rather than joining it — which puts five
+    /// at roughly two syllables: enough for a minimal complete sentence
+    /// (မလုပ်ဘူး), while interjections (ဟုတ်ကဲ့) stay bare. And the text must
+    /// actually contain a Myanmar letter: a dictated phone number is not a
+    /// sentence, however long.
     static func appendingSectionIfSentenceLike(_ text: String) -> String {
         guard let last = text.last else { return text }
         guard !isMark(last), !last.isPunctuation else { return text }
-        // Short interjections ("ဟုတ်ကဲ့" — "yes") do not want a full stop.
-        guard text.count >= 6 else { return text }
+        guard text.unicodeScalars.contains(where: isMyanmarLetter) else { return text }
+        guard text.count >= 5 else { return text }
         return text + String(section)
+    }
+
+    /// Myanmar consonants and independent vowels — the scalars that can
+    /// carry a sentence, as opposed to digits, signs, and punctuation.
+    private static func isMyanmarLetter(_ scalar: Unicode.Scalar) -> Bool {
+        (0x1000...0x102A).contains(scalar.value)
     }
 }
 

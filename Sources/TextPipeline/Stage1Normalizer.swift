@@ -43,6 +43,10 @@ public enum Stage1Normalizer: Sendable {
             // Spoken marks first, so the terminal-mark check below sees them.
             if formatting.myanmarSpokenPunctuation {
                 result = MyText.spokenPunctuationApplied(result)
+                // A command spoken as the very first word leaves its mark at
+                // position 0; the general orphan strip already ran before the
+                // substitution existed, so re-run it on what it produced.
+                result = stripLeadingOrphanPunctuation(result)
             }
             result = MyText.tidiedSpacing(result)
             result = MyText.appendingSectionIfSentenceLike(result)

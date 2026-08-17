@@ -28,9 +28,12 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
     public var panguSpacing: Bool
     /// Burmese: which digit set stage 4 emits (docs/04 Appendix A).
     public var myanmarDigits: MyanmarDigits
-    /// Burmese: turn spoken "ပုဒ်မ" / "full stop" into ။ and "ပုဒ်ဖြတ်" /
-    /// "comma" into ၊. Burmese recognizers punctuate erratically or not at
-    /// all, so saying the mark is the reliable path (docs/04 Appendix A).
+    /// Burmese: turn spoken punctuation commands into marks ("full stop" → ။,
+    /// "comma" → ၊). Ships OFF. The Myanmar-script command words were removed
+    /// in review — ပုဒ်မ is the everyday word for "section", and a substring
+    /// match destroyed legitimate prose (docs/11 G18) — so until a
+    /// native-speaker-validated vocabulary lands, only English command words
+    /// exist and the whole feature stays opt-in.
     public var myanmarSpokenPunctuation: Bool
 
     public init(
@@ -40,7 +43,7 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         enforceFullWidthZhPunctuation: Bool = true,
         panguSpacing: Bool = false,
         myanmarDigits: MyanmarDigits = .asRecognized,
-        myanmarSpokenPunctuation: Bool = true
+        myanmarSpokenPunctuation: Bool = false
     ) {
         self.autoPunctuation = autoPunctuation
         self.smartSpacing = smartSpacing

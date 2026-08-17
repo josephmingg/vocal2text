@@ -192,13 +192,15 @@ struct Stage1NormalizerTests {
 
 // MARK: - Burmese (v1.1)
 
-@Test func burmeseGetsASectionMarkAndSpokenPunctuation() {
+/// ပုဒ်မ is the ordinary word for "section" — the default pipeline must never
+/// rewrite it, and the sentence still earns its terminal mark.
+@Test func burmeseSectionWordsSurviveAndTheSentenceStillTerminates() {
     let result = Stage1Normalizer.normalize(
-        "ဒီနေ့ ရာသီဥတု ကောင်းတယ် ပုဒ်မ",
+        "ပုဒ်မ ၅ ကို ကြည့်ပါ",
         language: .burmese,
         formatting: FormattingOptions()
     )
-    #expect(result == "ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+    #expect(result == "ပုဒ်မ ၅ ကို ကြည့်ပါ။")
 }
 
 @Test func burmeseWithoutASpokenMarkStillTerminates() {
@@ -226,17 +228,19 @@ struct Stage1NormalizerTests {
     let result = Stage1Normalizer.normalize(
         raw, language: .burmese, formatting: .verbatim
     )
-    // No mark substitution, no appended ။ — the spoken command stays literal.
+    // No appended ။, nothing rewritten — verbatim means verbatim.
     #expect(result == raw)
 }
 
-@Test func spokenPunctuationCanBeTurnedOffWithoutLosingTheTerminalMark() {
+/// Spoken punctuation is opt-in (ships OFF, docs/11 G18); when enabled, the
+/// English command words convert.
+@Test func spokenPunctuationIsOptInAndConvertsEnglishCommandWords() {
     let result = Stage1Normalizer.normalize(
-        "ဒီနေ့ရာသီဥတုကောင်းတယ်",
+        "ဒီနေ့ ကောင်းတယ် full stop",
         language: .burmese,
-        formatting: FormattingOptions(myanmarSpokenPunctuation: false)
+        formatting: FormattingOptions(myanmarSpokenPunctuation: true)
     )
-    #expect(result.hasSuffix("။"))
+    #expect(result == "ဒီနေ့ ကောင်းတယ်။")
 }
 
 @Test func burmeseArtifactStrippingStillRuns() {

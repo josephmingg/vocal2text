@@ -262,7 +262,7 @@ func myanmarScriptDetection(text: String, expected: Bool) {
     #expect(decoded.smartSpacing)
     // New keys take their defaults rather than failing the decode.
     #expect(decoded.myanmarDigits == .asRecognized)
-    #expect(decoded.myanmarSpokenPunctuation)
+    #expect(!decoded.myanmarSpokenPunctuation)  // ships OFF (docs/11 G18)
 }
 
 @Test func formattingOptionsDecodesAnEmptyDocument() throws {

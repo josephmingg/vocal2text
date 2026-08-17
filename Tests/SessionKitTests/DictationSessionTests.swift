@@ -514,7 +514,7 @@ struct BurmeseCleanupGateTests {
     @Test func burmeseGoesThroughTheBurmesePipeline() async throws {
         let harness = makeHarness(
             engineResult: TranscriptionResult(
-                text: "ဒီနေ့ ရာသီဥတု ကောင်းတယ် ပုဒ်မ", detectedLanguage: .burmese
+                text: "ဒီနေ့ ရာသီဥတု ကောင်းတယ်", detectedLanguage: .burmese
             ),
             profile: Profile(
                 name: "Burmese",
@@ -525,7 +525,7 @@ struct BurmeseCleanupGateTests {
         await harness.session.pressEnded()
 
         let delivered = await harness.deliverer.deliveredTexts
-        // Spoken "ပုဒ်မ" became ။, and no English capitalization or period.
+        // The terminal ။ was appended — no English capitalization or period.
         #expect(delivered == ["ဒီနေ့ ရာသီဥတု ကောင်းတယ်။"])
         let records = await harness.store.records
         #expect(records.first?.language == .burmese)

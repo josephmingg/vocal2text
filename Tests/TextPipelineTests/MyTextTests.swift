@@ -29,20 +29,19 @@ struct MyTextTests {
 
     // MARK: - Spoken punctuation
 
-    @Test func spokenSectionBecomesAMark() {
-        #expect(MyText.spokenPunctuationApplied("မင်္ဂလာပါ ပုဒ်မ") == "မင်္ဂလာပါ။")
-    }
-
-    @Test func spokenPhraseBreakBecomesALittleSection() {
-        #expect(MyText.spokenPunctuationApplied("စာ ပုဒ်ဖြတ် ရေး") == "စာ၊ရေး")
-    }
-
-    /// ပုဒ်မ is a prefix of both ပုဒ်မငယ် and ပုဒ်မကြီး. Applying the short
-    /// command first would replace the head and strand the tail as literal
-    /// text ("။ငယ်"), so commands run longest-first.
-    @Test func aCommandThatIsAPrefixOfAnotherDoesNotEatIt() {
-        #expect(MyText.spokenPunctuationApplied("စာ ပုဒ်မငယ် ရေး") == "စာ၊ရေး")
-        #expect(MyText.spokenPunctuationApplied("စာ ပုဒ်မကြီး ရေး") == "စာ။ရေး")
+    /// The Myanmar-script command words that shipped briefly in this branch
+    /// were byte-identical to ordinary vocabulary — ပုဒ်မ is the everyday word
+    /// for "section/article" — and a substring match destroyed it. These
+    /// fixtures are the destruction cases; they must pass through untouched
+    /// forever.
+    @Test(arguments: [
+        "ပုဒ်မ ၅",  // "Section 5"
+        "ပုဒ်မခွဲ",  // "sub-section"
+        "စာပုဒ်မရှိပါ",  // paragraph + negated verb
+        "ပုဒ်ဖြတ်သင်္ကေတ",  // "punctuation symbol"
+    ])
+    func burmeseVocabularyIsNeverRewritten(text: String) {
+        #expect(MyText.spokenPunctuationApplied(text) == text)
     }
 
     @Test func englishCommandWordsWorkForCodeSwitchingSpeakers() {
@@ -58,7 +57,7 @@ struct MyTextTests {
     }
 
     @Test func adjacentMarksCollapse() {
-        #expect(MyText.spokenPunctuationApplied("စာ ပုဒ်ဖြတ် ပုဒ်မ") == "စာ။")
+        #expect(MyText.spokenPunctuationApplied("စာ comma full stop") == "စာ။")
     }
 
     @Test func textWithNoCommandsIsUnchanged() {
@@ -95,6 +94,18 @@ struct MyTextTests {
     @Test func shortInterjectionsAreLeftAlone() {
         #expect(MyText.appendingSectionIfSentenceLike("ဟုတ်") == "ဟုတ်")
         #expect(MyText.appendingSectionIfSentenceLike("") == "")
+    }
+
+    /// A dictated phone number is not a sentence, however many characters.
+    @Test func digitOnlyTextGetsNoSectionMark() {
+        #expect(MyText.appendingSectionIfSentenceLike("၀၉၇၉၁၂၃၄၅၆") == "၀၉၇၉၁၂၃၄၅၆")
+        #expect(MyText.appendingSectionIfSentenceLike("123 456") == "123 456")
+    }
+
+    /// ~Two syllables: မလုပ်ဘူး ("won't do it") is a complete sentence and
+    /// deserves its mark — the floor must not treat it as an interjection.
+    @Test func shortCompleteSentencesGetTheMark() {
+        #expect(MyText.appendingSectionIfSentenceLike("မလုပ်ဘူး") == "မလုပ်ဘူး။")
     }
 
     // MARK: - Normalization
