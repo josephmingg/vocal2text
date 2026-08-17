@@ -135,6 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isLockModeActive = false
         lockCapTask?.cancel()
         lockCapTask = nil
+        // Keep the decision core's Escape watch in sync — when lock ends via
+        // the cap timer (rather than a tap the core saw), the core would
+        // otherwise keep emitting no-op cancels on every Escape (docs/11 G5).
+        hotkeyMonitor?.noteLockEnded()
         if stopping {
             appState.stopDictation(isLockMode: true)
         }
@@ -178,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.isLockModeActive = false
+                    self?.hotkeyMonitor?.noteLockEnded()
                     self?.appState.cancelDictation()
                 }
             }

@@ -1,6 +1,7 @@
 import ASRKit
 import ASREngineSherpaOnnx
 import ASREngineWhisperKit
+import AppKit
 import AudioPipeline
 import CleanupKit
 import Combine
@@ -85,6 +86,13 @@ final class AppState: ObservableObject {
     /// unstructured Tasks give no FIFO guarantee, so each control call chains
     /// on the previous one.
     private var controlTask: Task<Void, Never>?
+    /// Bumped at every take boundary. The first-run model hint is computed by
+    /// an async availability check that can outlive a short take; a hint may
+    /// only write to the HUD while its own take is still current (docs/11 G16).
+    private var hintGeneration = 0
+    /// Set when the FR-1.3 low-disk guard finished a take early, so the notice
+    /// shows after delivery instead of being overwritten by phase changes.
+    private var pendingLowDiskNotice = false
     /// Live profile set (docs/11 G17): persisted, seeded from the built-ins on
     /// first run, and edited by Settings → Profiles. One instance, so the
     /// resolver, the menu-bar pin picker, and the editor agree on UUIDs
@@ -117,8 +125,9 @@ final class AppState: ObservableObject {
             primary: engine,
             overrides: [.burmese: burmeseEngine]
         )
+        let microphone = MicrophoneCapture()
         let dependencies = DictationSession.Dependencies(
-            audio: MicrophoneCaptureAdapter(microphone: MicrophoneCapture()),
+            audio: MicrophoneCaptureAdapter(microphone: microphone),
             engine: routedEngine,
             // The pipeline is wired unconditionally; the session's own
             // precedence gating (docs/05 §0: master switch → per-profile
@@ -186,7 +195,25 @@ final class AppState: ObservableObject {
         self.session = DictationSession(dependencies: dependencies)
 
         relay.appState = self
+        // FR-1.3 (docs/11 G4): when free disk drops below the guard floor
+        // mid-take, finish the take through the normal stop path — the audio
+        // captured so far is transcribed and delivered, and the user is told
+        // why the recording stopped.
+        Task { [weak self] in
+            await microphone.setLowDiskHandler {
+                Task { @MainActor [weak self] in
+                    self?.lowDiskGuardTripped()
+                }
+            }
+        }
         startPhaseMirror()
+    }
+
+    /// The FR-1.3 mid-take low-disk guard fired: end the take normally and
+    /// queue the explanation for when the HUD returns to idle.
+    private func lowDiskGuardTripped() {
+        pendingLowDiskNotice = true
+        stopDictation(isLockMode: false)
     }
 
     /// Loads (downloading on first run) the ASR model so the first dictation
@@ -204,10 +231,14 @@ final class AppState: ObservableObject {
         hudState.isRemoteCleanup = cleanupLeavesDevice && settings.cleanupMasterSwitch
         // First-run honesty (FR-2.4): if the routed model isn't resident yet,
         // the release will trigger a download (WhisperKit ~600 MB, Burmese
-        // ~790 MB) or a slow load — say so instead of looking frozen.
+        // ~790 MB) or a slow load — say so instead of looking frozen. The
+        // availability check can outlive a short take, so the hint is tagged
+        // with this take's generation and dropped when stale (docs/11 G16).
         let engine = engine
         let burmeseEngine = burmeseEngine
         let mode = settings.languageMode
+        hintGeneration += 1
+        let generation = hintGeneration
         Task { [weak self] in
             if mode == .pinned(.burmese) {
                 let loaded = await burmeseEngine.isModelLoaded
@@ -220,11 +251,13 @@ final class AppState: ObservableObject {
                 } else {
                     hint = "Loading the မြန်မာ speech model — the first dictation after launch takes longer."
                 }
-                self?.hudState.partialText = hint
+                guard let self, self.hintGeneration == generation else { return }
+                self.hudState.partialText = hint
             } else {
                 let loaded = await engine.isModelLoaded
                 guard !loaded else { return }
-                self?.hudState.partialText =
+                guard let self, self.hintGeneration == generation else { return }
+                self.hudState.partialText =
                     "First run: downloading the speech model (~600 MB) and preparing it — this can take several minutes. Later dictations are instant."
             }
         }
@@ -276,12 +309,20 @@ final class AppState: ObservableObject {
         case .transcribing, .cleaning, .delivering:
             hudState.mode = .processing
         case .cancelled:
+            hintGeneration += 1
+            pendingLowDiskNotice = false
             hudState.mode = .hidden
             hudState.partialText = ""
         case .idle:
+            // The take is over: any first-run hint still in flight is stale
+            // (docs/11 G16).
+            hintGeneration += 1
             // The session clears lastError at every pressBegan, so any error
             // visible when it returns to idle belongs to this take.
-            if case .notice = hudState.mode {
+            if pendingLowDiskNotice {
+                pendingLowDiskNotice = false
+                showNotice("Disk almost full — take saved before recording stopped")
+            } else if case .notice = hudState.mode {
                 // A delivery notice (clipboard fallback / secure block) is
                 // already showing; let its own dismiss timer run.
             } else if let error = await session.lastError {
@@ -381,7 +422,14 @@ final class AppState: ObservableObject {
         switch error {
         case .modelNotInstalled: return "Speech model not installed"
         case .engineUnavailable: return "Transcription engine unavailable"
-        case .audioUnreadable: return "Could not capture microphone audio"
+        case .audioUnreadable(let detail):
+            // The capture layer refuses to start below the FR-1.3 disk floor;
+            // the session wraps that in audioUnreadable, so the reason is only
+            // recoverable from the detail string (docs/11 G4).
+            if detail.contains("insufficientDiskSpace") {
+                return "Disk almost full — free up space to record"
+            }
+            return "Could not capture microphone audio"
         case .cancelled: return "Dictation cancelled"
         }
     }
@@ -446,6 +494,17 @@ private actor DatabaseTranscriptStore: TranscriptStoring {
 
     func save(_ record: TranscriptRecord) async throws {
         guard let database else { return }
+        var record = record
+        if record.targetAppName == nil, let bundleID = record.targetAppBundleID {
+            // FR-5.1 (docs/11 G8): history should say "Slack", not a bundle
+            // ID. Resolved at save time — the target app is still running
+            // moments after delivery; a lookup miss just keeps HistoryView's
+            // bundle-ID fallback.
+            record.targetAppName = await MainActor.run {
+                NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                    .first?.localizedName
+            }
+        }
         try database.save(record)
     }
 }

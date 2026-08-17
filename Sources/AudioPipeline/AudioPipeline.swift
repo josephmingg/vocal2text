@@ -50,6 +50,37 @@ public enum RecoveryFileReaper {
     }
 }
 
+/// FR-1.3 low-disk guard (docs/11 G4): a recording must not fill the disk.
+/// A take is refused at start, or finished early mid-take, when the volume
+/// holding the recovery sidecars drops below `minimumFreeBytes`. The decision
+/// logic is pure and Linux-tested; the stat itself is Darwin-only.
+public enum DiskSpaceGuard {
+    /// FR-1.3: stop recording below 1 GB free.
+    public static let minimumFreeBytes: Int64 = 1_000_000_000
+    /// Ingested chunks between free-space stats — the check is a filesystem
+    /// stat, cheap but not free, and chunks arrive ~12×/second.
+    public static let checkInterval = 50
+
+    /// An unknown capacity (the stat failed) is NOT critical: refusing to
+    /// record because a stat failed would fail takes on healthy disks.
+    public static func isCritical(availableBytes: Int64?) -> Bool {
+        guard let availableBytes else { return false }
+        return availableBytes < minimumFreeBytes
+    }
+
+    #if canImport(Darwin)
+    /// Free bytes on the volume containing `url`, by the "important usage"
+    /// capacity — purgeable space counts as free, matching what the system
+    /// would actually grant the recording.
+    public static func availableBytes(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        )
+        return values?.volumeAvailableCapacityForImportantUsage
+    }
+    #endif
+}
+
 #if canImport(AVFoundation)
 import AVFoundation
 
@@ -63,6 +94,9 @@ public enum CaptureError: Error, Sendable, Equatable {
     case alreadyCapturing
     case formatUnavailable
     case engineStartFailed(String)
+    /// FR-1.3: below the `DiskSpaceGuard` floor — recording refused rather
+    /// than started on a disk it could fill.
+    case insufficientDiskSpace
 }
 
 /// One live capture: the chunk stream plus stop/cancel handles. Mirrors
@@ -110,13 +144,35 @@ public actor MicrophoneCapture {
     private var recoveryURL: URL?
     private var recoveryHandle: FileHandle?
     private var isCapturing = false
+    /// FR-1.3 (docs/11 G4): invoked at most once per take when free space
+    /// drops below the `DiskSpaceGuard` floor mid-recording. The composition
+    /// root wires this to "finish the take normally" — the audio captured so
+    /// far is delivered, not lost.
+    private var lowDiskHandler: (@Sendable () -> Void)?
+    private var ingestsSinceDiskCheck = 0
+    private var lowDiskTripped = false
 
     public init() {}
+
+    /// Installs the low-disk callback (see `lowDiskHandler`).
+    public func setLowDiskHandler(_ handler: @escaping @Sendable () -> Void) {
+        lowDiskHandler = handler
+    }
 
     /// Begin capturing. The returned session's `chunks` yields converted audio
     /// as it arrives; call `finish` to stop and receive the concatenated take.
     public func start() async throws -> MicrophoneSession {
         guard !isCapturing else { throw CaptureError.alreadyCapturing }
+        // FR-1.3: refuse to start a recording the disk cannot hold.
+        if DiskSpaceGuard.isCritical(
+            availableBytes: DiskSpaceGuard.availableBytes(
+                at: FileManager.default.temporaryDirectory
+            )
+        ) {
+            throw CaptureError.insufficientDiskSpace
+        }
+        ingestsSinceDiskCheck = 0
+        lowDiskTripped = false
 
         let engine = AVAudioEngine()
         let input = engine.inputNode
@@ -268,6 +324,25 @@ public actor MicrophoneCapture {
         chunkContinuation?.yield(PCMChunk(samples: converted))
         let data = converted.withUnsafeBufferPointer { Data(buffer: $0) }
         try? recoveryHandle?.write(contentsOf: data)
+
+        // FR-1.3 mid-take guard (docs/11 G4): a long (locked) take must not
+        // record until the disk fills. Fires the handler once; the app
+        // finishes the take through the normal stop path, so the audio
+        // captured so far is transcribed and delivered.
+        ingestsSinceDiskCheck += 1
+        if ingestsSinceDiskCheck >= DiskSpaceGuard.checkInterval {
+            ingestsSinceDiskCheck = 0
+            if !lowDiskTripped,
+                DiskSpaceGuard.isCritical(
+                    availableBytes: DiskSpaceGuard.availableBytes(
+                        at: FileManager.default.temporaryDirectory
+                    )
+                )
+            {
+                lowDiskTripped = true
+                lowDiskHandler?()
+            }
+        }
     }
 
     /// Stop the engine, then drain the ordered native-sample stream so every
