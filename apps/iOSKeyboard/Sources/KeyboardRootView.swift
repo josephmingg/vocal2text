@@ -230,7 +230,10 @@ private struct KeyButton: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.title3)
-                .frame(width: 56, maxHeight: .infinity)
+                // Two frames, not one: SwiftUI has no overload mixing a fixed
+                // width with a flexible height.
+                .frame(maxHeight: .infinity)
+                .frame(width: 56)
                 .background(Color(uiColor: .systemBackground), in: .rect(cornerRadius: 12))
                 .foregroundStyle(Color.primary)
         }

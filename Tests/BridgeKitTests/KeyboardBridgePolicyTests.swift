@@ -198,6 +198,50 @@ struct ReplyInsertionTests {
             )
         }
     }
+
+    @Test("A cancellation or failure is still ours, so it can be reported at once")
+    func nonTextRepliesAreStillCurrent() {
+        let id = UUID()
+        for outcome in [BridgeReply.Outcome.cancelled, .failed(reason: "boom"), .text("")] {
+            #expect(
+                KeyboardBridgePolicy.isCurrent(
+                    reply: reply(id: id, outcome: outcome), awaitingRequestID: id, now: epoch
+                ),
+                "a \(outcome) reply to our own request must not wait to age out"
+            )
+        }
+    }
+
+    @Test("isCurrent still refuses other requests and stale replies")
+    func currentnessKeepsItsGuards() {
+        let id = UUID()
+        #expect(
+            !KeyboardBridgePolicy.isCurrent(
+                reply: reply(id: UUID()), awaitingRequestID: id, now: epoch
+            )
+        )
+        #expect(
+            !KeyboardBridgePolicy.isCurrent(reply: reply(id: id), awaitingRequestID: nil, now: epoch)
+        )
+        let late = epoch.addingTimeInterval(KeyboardBridgePolicy.replyFreshnessWindow + 1)
+        #expect(
+            !KeyboardBridgePolicy.isCurrent(reply: reply(id: id), awaitingRequestID: id, now: late)
+        )
+    }
+
+    @Test("Insertion is strictly narrower than currentness")
+    func insertionImpliesCurrentness() {
+        let id = UUID()
+        let candidate = reply(id: id)
+        #expect(
+            KeyboardBridgePolicy.shouldInsert(
+                reply: candidate, awaitingRequestID: id, now: epoch
+            )
+        )
+        #expect(
+            KeyboardBridgePolicy.isCurrent(reply: candidate, awaitingRequestID: id, now: epoch)
+        )
+    }
 }
 
 @Suite("Keyboard status line")

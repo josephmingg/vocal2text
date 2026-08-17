@@ -90,19 +90,35 @@ public enum KeyboardBridgePolicy {
         return age <= statusFreshnessWindow
     }
 
-    /// Whether a reply found on disk should be inserted at the cursor.
+    /// Whether a reply answers a request this keyboard is waiting on and is
+    /// still recent enough to act on — whatever its outcome.
     ///
-    /// Two guards, both about not typing the wrong thing into someone's chat:
-    /// the reply must answer a request this keyboard instance issued, and it
-    /// must be recent.
-    public static func shouldInsert(
+    /// Two guards, both about not acting on the wrong take: the reply must
+    /// answer a request this keyboard instance issued, and it must be recent
+    /// (a transcript from the previous host app must never surface in this
+    /// one). Cancellations and failures pass this check too, so the keyboard
+    /// can report them immediately instead of waiting for them to age out.
+    public static func isCurrent(
         reply: BridgeReply,
         awaitingRequestID: UUID?,
         now: Date
     ) -> Bool {
         guard let awaitingRequestID, reply.requestID == awaitingRequestID else { return false }
-        guard reply.insertableText?.isEmpty == false else { return false }
         return now.timeIntervalSince(reply.producedAt) <= replyFreshnessWindow
+    }
+
+    /// Whether a reply's text should be typed at the cursor. A strictly
+    /// narrower condition than ``isCurrent(reply:awaitingRequestID:now:)``:
+    /// only a non-empty transcript is ever inserted.
+    public static func shouldInsert(
+        reply: BridgeReply,
+        awaitingRequestID: UUID?,
+        now: Date
+    ) -> Bool {
+        guard isCurrent(reply: reply, awaitingRequestID: awaitingRequestID, now: now) else {
+            return false
+        }
+        return reply.insertableText?.isEmpty == false
     }
 
     /// One-line status text under the keys.

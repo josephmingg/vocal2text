@@ -202,7 +202,12 @@ final class CaptureSessionCoordinator: ObservableObject {
 
         switch request.command {
         case .startRecording:
-            guard phase == .idle else { return }
+            guard phase == .idle else {
+                // Answer rather than drop it: an unanswered request leaves the
+                // keyboard waiting on a take that will never arrive.
+                reply(to: request.id, outcome: .failed(reason: "Vocal is busy with another take"))
+                return
+            }
             activeRequestID = request.id
             takeID = request.id
             appState.keyboardProfileOverride = request.requestedProfileName

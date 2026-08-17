@@ -140,8 +140,11 @@ final class KeyboardModel: ObservableObject {
     private func consumeReplyIfReady(autoInsert: Bool, at moment: Date) {
         guard let store, let reply = (try? store.readReply()) ?? nil else { return }
 
+        // Gate on "is this ours and recent", not on "is it insertable" — a
+        // cancellation or a failure is ours too, and the user should hear
+        // about it now rather than when it ages out of the slot.
         guard
-            KeyboardBridgePolicy.shouldInsert(
+            KeyboardBridgePolicy.isCurrent(
                 reply: reply, awaitingRequestID: awaitingRequestID, now: moment
             )
         else {
@@ -151,14 +154,18 @@ final class KeyboardModel: ObservableObject {
                 > KeyboardBridgePolicy.replyFreshnessWindow
             {
                 try? store.clear(.reply)
-                surfaceNonTextOutcome(reply)
             }
             return
         }
 
         try? store.clear(.reply)
         awaitingRequestID = nil
-        guard let text = reply.insertableText else {
+        guard
+            KeyboardBridgePolicy.shouldInsert(
+                reply: reply, awaitingRequestID: reply.requestID, now: moment
+            ),
+            let text = reply.insertableText
+        else {
             surfaceNonTextOutcome(reply)
             return
         }
