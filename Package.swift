@@ -109,7 +109,9 @@ let package = Package(
 
         // ── Tests ───────────────────────────────────────────────────────
         .testTarget(name: "CoreModelsTests", dependencies: ["CoreModels"]),
-        .testTarget(name: "CleanupEvalTests", dependencies: ["CleanupEval"]),
+        // CleanupKit is explicit, not transitive: the contamination guard builds
+        // the shipped prompt and compares it against the real case files.
+        .testTarget(name: "CleanupEvalTests", dependencies: ["CleanupEval", "CleanupKit"]),
         .testTarget(
             name: "TextPipelineTests",
             dependencies: ["TextPipeline"],
