@@ -301,3 +301,42 @@ struct BurmeseOutputValidatorTests {
         #expect(prompt.contains(cue.lowercased()), "prompt is missing cue: \(cue)")
     }
 }
+
+/// Listing "sorry" as a cue with no condition attached made both evaluated
+/// models delete the apology from "sorry I'm late, the traffic was bad"
+/// (eval cases `en-corr-010` and `zh-corr-005`). A cue is only a cue when
+/// something before it is being replaced; the prompt has to say so, and has
+/// to carry a worked counter-example — a bare rule was not enough for a 3B
+/// model to resist a word sitting right there in the cue list.
+@Test func theCueRuleRequiresSomethingToCorrect() {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english)
+    )
+    #expect(prompt.contains("A cue only counts when"))
+    #expect(prompt.lowercased().contains("counter-example"))
+    // The counter-example must exist in both scripts: 「对不起」 is the ZH
+    // twin and fails the same way.
+    #expect(prompt.contains("sorry I'm late"))
+    #expect(prompt.contains("对不起"))
+}
+
+/// The style slot reached the model but carried no authority: the core prompt
+/// said "Do not rephrase" and the English rules said to keep the speaker's
+/// spelling "unless the task instructions say otherwise" — and a style prompt
+/// is not the task instructions. A literal-minded model was therefore correct
+/// to ignore "Use British spelling", which is what the whole style category
+/// did in the first live runs. AC-11 needs the override stated, not implied.
+@Test func theStyleSectionCanOverrideTheKeepWordingRules() {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english, stylePrompt: "Use British spelling.")
+    )
+    let lowered = prompt.lowercased()
+    #expect(lowered.contains("do not rephrase, except where the task or style"))
+    #expect(lowered.contains("unless the task or style sections say otherwise"))
+    #expect(lowered.contains("they override \"keep the speaker's wording\""))
+    // A banned word that carries meaning must be substituted, not deleted —
+    // otherwise "the amazing thing is it just works" loses its subject.
+    #expect(lowered.contains("substitute a word that keeps the meaning"))
+    // The escape hatch stays shut: style must not become a licence to answer.
+    #expect(lowered.contains("hard rules still win"))
+}
