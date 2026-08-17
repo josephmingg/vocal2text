@@ -23,6 +23,12 @@ struct Options {
     var category: String?
     var language: Language?
     var timeoutSeconds = 30
+    /// Greedy decoding by default. The app ships at 0.2, but a sampled run is
+    /// not a measurement: two runs of the same prompt against the same model
+    /// differed by two cases, which is the same size as the prompt effects
+    /// being chased. Score the prompt deterministically, and pass
+    /// `--temperature 0.2` when the question is what the app actually does.
+    var temperature = 0.0
     var verbose = false
 }
 
@@ -46,6 +52,9 @@ func parseOptions() -> Options {
     if let value = take("--category") { options.category = value }
     if let value = take("--language") { options.language = Language(rawValue: value) }
     if let value = take("--timeout"), let seconds = Int(value) { options.timeoutSeconds = seconds }
+    if let value = take("--temperature"), let degrees = Double(value) {
+        options.temperature = degrees
+    }
     options.verbose = arguments.contains("--verbose")
 
     if arguments.contains("--help") || arguments.contains("-h") {
@@ -60,6 +69,8 @@ func parseOptions() -> Options {
               --category NAME  run one category only
               --language en|zh|my
               --timeout SEC    per-case timeout (default 30)
+              --temperature T  sampling temperature (default 0 — deterministic;
+                               the app ships at 0.2)
               --verbose        print each output
             """
         )
@@ -97,10 +108,14 @@ guard let baseURL = URL(string: options.endpoint) else {
 let provider = OpenAICompatibleProvider(
     baseURL: baseURL,
     model: options.model,
+    temperature: options.temperature,
     id: .ollama(model: options.model)
 )
 
-print("eval-cleanup: \(cases.count) cases → \(options.model) at \(options.endpoint)\n")
+print(
+    "eval-cleanup: \(cases.count) cases → \(options.model) at \(options.endpoint) "
+        + "(temperature \(options.temperature))\n"
+)
 
 guard await provider.isAvailable() else {
     FileHandle.standardError.write(
@@ -145,7 +160,8 @@ if let path = options.output {
         summary: summary,
         model: options.model,
         endpoint: options.endpoint,
-        stamp: stamp
+        stamp: stamp,
+        temperature: options.temperature
     )
     do {
         try markdown.write(toFile: path, atomically: true, encoding: .utf8)

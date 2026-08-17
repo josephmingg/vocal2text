@@ -15,6 +15,8 @@ public struct PromptAssembler: Sendable {
 
     private let coreTemplate: String
     private let languageRules: [Language: String]
+    /// Wrapper for a non-empty style prompt; see `styleBlock(for:)`.
+    private let styleSection: String
 
     /// Loads the bundled templates. A missing resource degrades to an empty
     /// template rather than crashing; the assembler itself never fails.
@@ -25,14 +27,21 @@ public struct PromptAssembler: Sendable {
                 .english: Self.loadPrompt(named: "lang_en"),
                 .chinese: Self.loadPrompt(named: "lang_zh"),
                 .burmese: Self.loadPrompt(named: "lang_my"),
-            ]
+            ],
+            styleSection: Self.loadPrompt(named: "style_section")
         )
     }
 
-    /// Injection seam for tests and prompt experiments.
-    public init(coreTemplate: String, languageRules: [Language: String]) {
+    /// Injection seam for tests and prompt experiments. `styleSection` defaults
+    /// to a bare passthrough so an injected core template behaves verbatim.
+    public init(
+        coreTemplate: String,
+        languageRules: [Language: String],
+        styleSection: String = "{STYLE_PROMPT}"
+    ) {
         self.coreTemplate = coreTemplate
         self.languageRules = languageRules
+        self.styleSection = styleSection
     }
 
     /// Convenience for the two-language call sites that predate Burmese.
@@ -54,7 +63,7 @@ public struct PromptAssembler: Sendable {
             .replacingOccurrences(of: Slot.languageRules, with: rules)
             .replacingOccurrences(of: Slot.protectedTerms, with: protectedTermsBlock(for: request))
             .replacingOccurrences(of: Slot.profilePrompt, with: block(request.profilePrompt))
-            .replacingOccurrences(of: Slot.stylePrompt, with: block(request.stylePrompt))
+            .replacingOccurrences(of: Slot.stylePrompt, with: styleBlock(for: request))
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -73,6 +82,25 @@ public struct PromptAssembler: Sendable {
     private func block(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "(none)" : trimmed
+    }
+
+    /// The whole STYLE section, or nothing at all when the user set no style
+    /// prompt — which is the common case.
+    ///
+    /// The section carries a licence: it tells the model that one instruction
+    /// may override "keep the speaker's wording" for spelling and word choice.
+    /// Shipping that licence unconditionally, above a slot reading "(none)",
+    /// gave qwen2.5:3b-instruct a standing permission with nothing concrete to
+    /// bind it to, and it generalised: embedded English inside Chinese came
+    /// back translated (eval `mix-002`, `mix-007`) and an English dictation
+    /// came back in Chinese outright (`en-corr-010`, rejected by the validator
+    /// as `language-mismatch`). No style prompt, no licence.
+    private func styleBlock(for request: CleanupRequest) -> String {
+        let trimmed = request.stylePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return styleSection
+            .replacingOccurrences(of: Slot.stylePrompt, with: trimmed)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func loadPrompt(named name: String) -> String {

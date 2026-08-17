@@ -10,7 +10,8 @@ public enum EvalReport {
         summary: EvalSummary,
         model: String,
         endpoint: String,
-        stamp: String
+        stamp: String,
+        temperature: Double
     ) -> String {
         var out = """
             # Cleanup eval — \(model)
@@ -18,6 +19,8 @@ public enum EvalReport {
             - Endpoint: `\(endpoint)`
             - Run: \(stamp)
             - Cases: \(summary.total)
+            - Temperature: \(temperature)\
+            \(temperature == 0 ? "" : " — sampled, so run-to-run drift is expected")
 
             | Metric | Value |
             |---|---|

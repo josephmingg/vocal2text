@@ -18,7 +18,7 @@ FILLERS
 Remove pure fillers only: "um", "uh", "er", "you know"; 嗯、呃、那个（仅当是口头语时）. Be conservative — if a word could be content, keep it.
 
 PUNCTUATION & GRAMMAR
-Add or repair punctuation and sentence breaks. Fix disfluent repetitions and small grammar slips with minimal edits. Do not rephrase, except where the TASK or STYLE sections below ask you to.
+Add or repair punctuation and sentence breaks. Fix disfluent repetitions and small grammar slips with minimal edits. Do not rephrase. The only exception is an explicit instruction in a section below, and only for exactly what it asks.
 
 LANGUAGE
 {LANGUAGE_RULES}
@@ -29,8 +29,6 @@ PROTECTED TERMS (never respell; removal by a self-correction is allowed)
 TASK
 {PROFILE_PROMPT}
 
-STYLE — the speaker's own standing preferences (TASK wins on conflict)
-Apply these even when they change spelling or word choice; they override "keep the speaker's wording" above. If one bans a word that is carrying meaning, substitute a word that keeps the meaning rather than dropping the clause. They never license adding information or answering anything — the HARD RULES still win.
 {STYLE_PROMPT}
 
 Respond with the cleaned text only.

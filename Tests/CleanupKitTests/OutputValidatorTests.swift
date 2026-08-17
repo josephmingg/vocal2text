@@ -331,12 +331,36 @@ struct BurmeseOutputValidatorTests {
         for: CleanupRequest(text: "x", language: .english, stylePrompt: "Use British spelling.")
     )
     let lowered = prompt.lowercased()
-    #expect(lowered.contains("do not rephrase, except where the task or style"))
-    #expect(lowered.contains("unless the task or style sections say otherwise"))
-    #expect(lowered.contains("they override \"keep the speaker's wording\""))
+    #expect(lowered.contains("use british spelling."))
+    #expect(lowered.contains("that is the only thing it may override"))
+    #expect(lowered.contains("unless an instruction below says otherwise"))
     // A banned word that carries meaning must be substituted, not deleted —
     // otherwise "the amazing thing is it just works" loses its subject.
     #expect(lowered.contains("substitute a word that keeps the meaning"))
-    // The escape hatch stays shut: style must not become a licence to answer.
+    // The escape hatch stays shut: style is not a licence to translate or answer.
+    #expect(lowered.contains("never licenses translating"))
     #expect(lowered.contains("hard rules still win"))
+}
+
+/// The regression that made shipping the licence unconditionally a mistake.
+///
+/// With no style prompt the section used to render its override paragraph
+/// above a literal "(none)". qwen2.5:3b-instruct took the standing permission
+/// and, with nothing concrete to bind it to, generalised into translation:
+/// `mix-002` and `mix-007` came back with the embedded English rendered as
+/// Chinese, and `en-corr-010` — a plain English sentence — came back in
+/// Chinese outright, which the validator caught as `language-mismatch`. The
+/// section must not exist at all when there is nothing for it to license.
+@Test func noStylePromptMeansNoStyleSectionAtAll() {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english)
+    )
+    let lowered = prompt.lowercased()
+    #expect(!lowered.contains("style"))
+    #expect(!lowered.contains("may override"))
+    #expect(!lowered.contains("substitute a word"))
+    // The blanket prohibition stands unqualified when nothing qualifies it.
+    #expect(lowered.contains("do not rephrase."))
+    // TASK still renders its placeholder — only STYLE disappears.
+    #expect(prompt.contains("(none)"))
 }
