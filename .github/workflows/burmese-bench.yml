@@ -1,0 +1,58 @@
+# FLEURS my_mm benchmark for the Burmese engine decision (docs/11 G13).
+#
+# Lives in CI because Actions runners have open network: the dev sandbox
+# cannot reach huggingface.co (dataset) or k2-fsa/sherpa-onnx releases
+# (models). Runs only on demand or when the bench itself changes — never on
+# ordinary pushes, so it costs nothing day to day.
+name: Burmese ASR benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Comma-separated model sizes to test"
+        default: "300m,1b"
+      max_utts:
+        description: "Max FLEURS test utterances (all ≈ 400+)"
+        default: "250"
+  push:
+    branches: ["claude/vocal-app-review-burmese-x8gify"]
+    paths:
+      - "scripts/burmese_bench/**"
+      - ".github/workflows/burmese-bench.yml"
+
+concurrency:
+  group: burmese-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: FLEURS my_mm — Omnilingual CTC
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install runtime
+        run: pip install --quiet sherpa-onnx soundfile numpy
+      - name: Run benchmark
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MODELS: ${{ inputs.models || '300m,1b' }}
+          MAX_UTTS: ${{ inputs.max_utts || '250' }}
+        run: python scripts/burmese_bench/run_bench.py
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f results/summary.md ]; then
+            cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: burmese-bench-results
+          path: results/
+          if-no-files-found: ignore
