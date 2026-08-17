@@ -112,7 +112,8 @@ migrates to the matching preset on first launch, with nothing to do.
   transcribes on release; preview field exists).
 - Audio files are not yet retained in history (text + metadata are); the retention
   setting is wired for when capture persistence lands.
-- Profiles live in memory (built-ins) until first saved to the database; the pin picker
-  re-lists them per launch.
-- iOS app: main-app dictation with auto-copy delivery ships; the keyboard extension
-  (docs/02 mode D2) is the remaining piece.
+- Profiles persist and are edited in Settings → Profiles (docs/11 G17); the built-ins are
+  seeded into the database on first launch, so pins and edits survive relaunch.
+- iOS app: main-app dictation with auto-copy delivery, the keyboard extension, share-sheet
+  import, and the Live Activity are all built and compile in CI — none of it has run on a
+  physical iPhone yet (docs/11 G10).
