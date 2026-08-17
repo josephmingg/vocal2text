@@ -45,8 +45,7 @@ struct VocalIOSApp: App {
                 // Coming back to the foreground is the moment to pick up work
                 // that arrived while the app was away: a keyboard request that
                 // outlived a suspension, and newly shared voice notes.
-                coordinator.handlePendingRequest()
-                coordinator.refreshImportCount()
+                coordinator.applicationBecameActive()
                 processor.refresh()
             }
         }

@@ -50,6 +50,10 @@ final class IOSAppState: ObservableObject {
     /// Profile the keyboard picked for the current take; nil falls back to the
     /// user's own selection (docs/02 FR-i3.3 — iOS cannot route by host app).
     var keyboardProfileOverride: String?
+    /// Runs immediately before capture starts, whichever entry point began the
+    /// take. The capture-session coordinator uses it to release the residency
+    /// tap, so two AVAudioEngines never contend for the same input node.
+    var willStartCapture: (() -> Void)?
 
     // Persisted scalar settings (FR-i parity subset). Plain @Published with
     // UserDefaults persistence — @AppStorage only publishes inside Views.
@@ -178,6 +182,7 @@ final class IOSAppState: ObservableObject {
     // MARK: - Dictation controls
 
     func startDictation() {
+        willStartCapture?()
         do {
             try AudioSessionManager.activate()
         } catch {

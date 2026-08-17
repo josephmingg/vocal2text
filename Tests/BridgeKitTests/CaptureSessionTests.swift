@@ -71,6 +71,30 @@ struct CaptureSessionTests {
         #expect(extended.isArmed(at: later.addingTimeInterval(299)))
     }
 
+    @Test("Expiring ends the session now but keeps how it was armed")
+    func expiringKeepsTheTerms() {
+        let state = CaptureSessionState.armed(
+            window: .sixtyMinutes, profileName: "Email", now: epoch
+        )
+        let stopped = state.expired(at: epoch.addingTimeInterval(120))
+        #expect(!stopped.isArmed(at: epoch.addingTimeInterval(120)))
+        // These are what the keyboard's re-arm link offers back.
+        #expect(stopped.window == .sixtyMinutes)
+        #expect(stopped.profileName == "Email")
+        #expect(stopped.armedAt == epoch)
+    }
+
+    @Test("Expiring never extends a session that already ended")
+    func expiringNeverExtends() {
+        let state = CaptureSessionState.armed(
+            window: .fiveMinutes, profileName: "Chat", now: epoch
+        )
+        let alreadyOver = epoch.addingTimeInterval(9_999)
+        let stopped = state.expired(at: alreadyOver)
+        #expect(stopped.expiresAt == state.expiresAt)
+        #expect(!stopped.isArmed(at: epoch.addingTimeInterval(299)))
+    }
+
     @Test("Retargeting keeps the clock")
     func retargetingKeepsTheClock() {
         let state = CaptureSessionState.armed(

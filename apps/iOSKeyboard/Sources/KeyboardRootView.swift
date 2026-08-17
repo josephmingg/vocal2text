@@ -129,7 +129,7 @@ struct KeyboardRootView: View {
     private var micHint: String {
         switch model.micAction {
         case .startRecording: "Tap the mic to dictate into this field"
-        case .stopRecording: "Tap to finish · hold to cancel"
+        case .stopRecording: "Tap to finish · 🗑 to discard"
         case .openApp: "Tap the mic to open Vocal and arm a session"
         case .busy(let message), .unavailable(let message): message
         }
@@ -147,8 +147,23 @@ struct KeyboardRootView: View {
 
             micKey
 
-            KeyButton(systemImage: "delete.left", accessibilityLabel: "Delete") {
-                onDeleteBackward()
+            // While a take is running the right-hand key throws it away; the
+            // rest of the time it deletes. A separate key rather than a
+            // long-press on the mic, because a SwiftUI long-press gesture does
+            // not suppress the button's own tap action — the cancel would be
+            // immediately overwritten by a stop on finger-lift.
+            if model.isRecording {
+                KeyButton(
+                    systemImage: "trash",
+                    accessibilityLabel: "Discard this dictation",
+                    tint: .red
+                ) {
+                    model.cancelRecording()
+                }
+            } else {
+                KeyButton(systemImage: "delete.left", accessibilityLabel: "Delete") {
+                    onDeleteBackward()
+                }
             }
         }
         .frame(height: 56)
@@ -172,10 +187,6 @@ struct KeyboardRootView: View {
         .disabled(isMicDisabled)
         .accessibilityLabel(micTitle)
         .accessibilityHint(micHint)
-        // Hold to throw away a take that went wrong, without leaving the app.
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5).onEnded { _ in model.cancelRecording() }
-        )
     }
 
     private var isMicDisabled: Bool {
@@ -224,6 +235,7 @@ struct KeyboardRootView: View {
 private struct KeyButton: View {
     let systemImage: String
     let accessibilityLabel: String
+    var tint: Color = .primary
     let action: () -> Void
 
     var body: some View {
@@ -235,7 +247,7 @@ private struct KeyButton: View {
                 .frame(maxHeight: .infinity)
                 .frame(width: 56)
                 .background(Color(uiColor: .systemBackground), in: .rect(cornerRadius: 12))
-                .foregroundStyle(Color.primary)
+                .foregroundStyle(tint)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(accessibilityLabel)

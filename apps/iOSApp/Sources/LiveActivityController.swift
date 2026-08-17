@@ -33,26 +33,36 @@ final class LiveActivityController {
         )
     }
 
-    func update(_ state: RecordingActivityState) async {
+    func update(_ state: RecordingActivityState) {
         guard let activity else { return }
-        await activity.update(ActivityContent(state: state, staleDate: nil))
+        Task { await activity.update(ActivityContent(state: state, staleDate: nil)) }
     }
 
     /// Ends the activity, leaving the final state visible for a few seconds.
-    func finish(with state: RecordingActivityState) async {
-        guard let activity else { return }
-        self.activity = nil
-        await activity.end(
-            ActivityContent(state: state, staleDate: nil),
-            dismissalPolicy: .after(Date().addingTimeInterval(Self.dismissAfter))
-        )
+    func finish(with state: RecordingActivityState) {
+        end(with: ActivityContent(state: state, staleDate: nil), policy: .after(Date().addingTimeInterval(Self.dismissAfter)))
     }
 
     /// Tears the activity down immediately — used when a take is cancelled.
-    func dismiss() async {
+    func dismiss() {
+        end(with: nil, policy: .immediate)
+    }
+
+    /// Releases the handle *synchronously*, then ends the activity in the
+    /// background.
+    ///
+    /// The ordering is the point: if the handle were only cleared after the
+    /// `await`, a user who cancels a take and immediately starts another would
+    /// find `start` refusing (the old handle is still there) while the queued
+    /// teardown ends the old activity anyway — the second take would run with
+    /// no indicator at all.
+    private func end(
+        with content: ActivityContent<RecordingActivityState>?,
+        policy: ActivityUIDismissalPolicy
+    ) {
         guard let activity else { return }
         self.activity = nil
-        await activity.end(nil, dismissalPolicy: .immediate)
+        Task { await activity.end(content, dismissalPolicy: policy) }
     }
 }
 

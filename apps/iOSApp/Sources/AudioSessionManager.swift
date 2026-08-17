@@ -57,12 +57,20 @@ final class CaptureResidency {
     var isRunning: Bool { engine?.isRunning ?? false }
 
     /// Starts the discard tap. Safe to call when already running.
-    func beginIdleHold() {
-        guard engine == nil else { return }
+    ///
+    /// Returns whether a tap is running afterwards. The caller must not ignore
+    /// this: an armed session with no running tap is a lie — iOS suspends the
+    /// app within seconds and the keyboard's mic key then reaches nobody.
+    @discardableResult
+    func beginIdleHold() -> Bool {
+        guard engine == nil else { return true }
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else { return }
+        // A zero sample rate is what an input node reports when microphone
+        // permission has never been granted — `setActive(true)` succeeds even
+        // then, so this is the first place the truth shows up.
+        guard format.sampleRate > 0 else { return false }
         // Samples are deliberately dropped: this tap exists to keep the audio
         // session running, not to capture anything.
         input.installTap(onBus: 0, bufferSize: 4_096, format: format) { _, _ in }
@@ -70,8 +78,10 @@ final class CaptureResidency {
         do {
             try engine.start()
             self.engine = engine
+            return true
         } catch {
             input.removeTap(onBus: 0)
+            return false
         }
     }
 

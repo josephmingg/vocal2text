@@ -97,4 +97,17 @@ public struct CaptureSessionState: Codable, Sendable, Hashable {
         copy.profileName = name
         return copy
     }
+
+    /// Ends the session now, keeping its window and profile.
+    ///
+    /// Disarming expires the session rather than forgetting it, so the
+    /// keyboard's "open Vocal to re-arm" link can offer the window and profile
+    /// the user actually chose instead of silently downgrading them to the
+    /// 5-minute default. `isArmed(at:)` remains the single source of truth for
+    /// whether it is live.
+    public func expired(at now: Date) -> CaptureSessionState {
+        var copy = self
+        copy.expiresAt = min(expiresAt, now)
+        return copy
+    }
 }

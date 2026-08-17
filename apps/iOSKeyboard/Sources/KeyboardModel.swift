@@ -37,7 +37,16 @@ final class KeyboardModel: ObservableObject {
     private let store: BridgeStore?
     private let hasFullAccess: () -> Bool
     private let now: () -> Date
+    /// The request this keyboard instance issued, and when.
+    ///
+    /// Deliberately never adopted from the app's published status. Each host
+    /// app gets its own keyboard process with its own fresh model, so a
+    /// keyboard that "recovered" an in-flight request ID would happily insert
+    /// a transcript dictated in Messages into a Mail field. Losing the insert
+    /// after a mid-take teardown is the cheaper failure — the transcript is
+    /// still in History and on the clipboard.
     private var awaitingRequestID: UUID?
+    private var awaitingSince: Date?
     private var pollTask: Task<Void, Never>?
     #if canImport(Darwin)
     private var subscriptions: [DarwinSignalCenter.Subscription] = []
@@ -82,10 +91,25 @@ final class KeyboardModel: ObservableObject {
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        // A preview belongs to the field it was dictated into; it must not
+        // outlive this appearance of the keyboard.
+        pendingInsert = nil
         #if canImport(Darwin)
         subscriptions.forEach { $0.cancel() }
         subscriptions.removeAll()
         #endif
+    }
+
+    /// The host app changed the text or moved the cursor.
+    ///
+    /// The keyboard cannot identify text fields — `textDocumentProxy` always
+    /// addresses whatever is first responder *now* — so a pending preview is
+    /// discarded the moment the input context moves. Otherwise tapping ✓ after
+    /// switching from Mail's body to its To: field would file the paragraph in
+    /// the wrong one.
+    func inputContextChanged() {
+        pendingInsert = nil
+        refresh()
     }
 
     private func startPolling() {
@@ -128,13 +152,23 @@ final class KeyboardModel: ObservableObject {
             now: moment
         )
 
-        // Recover the in-flight take after the keyboard was torn down and
-        // rebuilt mid-dictation (iOS does that freely).
-        if awaitingRequestID == nil, let active = status?.activeRequestID {
-            awaitingRequestID = active
-        }
-
+        expireStaleWait(at: moment)
         consumeReplyIfReady(autoInsert: status?.autoInsert ?? false, at: moment)
+    }
+
+    /// Stop waiting on a request the app will never answer.
+    ///
+    /// The app drops requests it was suspended through without replying, and
+    /// it can be killed mid-take. Without this the keyboard would poll every
+    /// 350 ms forever inside a jetsam-capped process and keep showing
+    /// "Listening…".
+    private func expireStaleWait(at moment: Date) {
+        guard let since = awaitingSince,
+            moment.timeIntervalSince(since) > KeyboardBridgePolicy.replyFreshnessWindow
+        else { return }
+        awaitingRequestID = nil
+        awaitingSince = nil
+        notice = "Vocal didn't answer. Open it once and try again."
     }
 
     private func consumeReplyIfReady(autoInsert: Bool, at moment: Date) {
@@ -160,6 +194,7 @@ final class KeyboardModel: ObservableObject {
 
         try? store.clear(.reply)
         awaitingRequestID = nil
+        awaitingSince = nil
         guard
             KeyboardBridgePolicy.shouldInsert(
                 reply: reply, awaitingRequestID: reply.requestID, now: moment
@@ -201,13 +236,23 @@ final class KeyboardModel: ObservableObject {
         }
     }
 
-    /// Long-press on the mic key while recording: throw the take away.
+    /// Throw the current take away. Driven by its own key rather than a
+    /// long-press on the mic: a `simultaneousGesture` does not suppress a
+    /// `Button`'s action, so a long press would fire cancel *and then* stop,
+    /// and the stop would overwrite the cancel in the single-slot request file.
     func cancelRecording() {
         guard case .stopRecording(let requestID) = micAction else { return }
         post(command: .cancelRecording, id: requestID)
         awaitingRequestID = nil
+        awaitingSince = nil
         pendingInsert = nil
         notice = "Cancelled"
+    }
+
+    /// True while a take is running, so the view can offer the cancel key.
+    var isRecording: Bool {
+        if case .stopRecording = micAction { return true }
+        return false
     }
 
     func confirmPendingInsert() {
@@ -229,10 +274,11 @@ final class KeyboardModel: ObservableObject {
             notice = KeyboardBridgePolicy.fullAccessMessage
             return
         }
+        let issuedAt = now()
         let request = BridgeRequest(
             id: id,
             command: command,
-            issuedAt: now(),
+            issuedAt: issuedAt,
             requestedProfileName: chosenProfileName
         )
         do {
@@ -241,7 +287,13 @@ final class KeyboardModel: ObservableObject {
             notice = "Could not reach Vocal. Open the app once and try again."
             return
         }
-        awaitingRequestID = command == .cancelRecording ? nil : id
+        if command == .cancelRecording {
+            awaitingRequestID = nil
+            awaitingSince = nil
+        } else {
+            awaitingRequestID = id
+            awaitingSince = issuedAt
+        }
         notice = command == .startRecording ? "Listening…" : nil
         #if canImport(Darwin)
         DarwinSignalCenter.shared.post(.requestPosted)

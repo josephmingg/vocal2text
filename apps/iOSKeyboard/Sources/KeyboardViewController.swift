@@ -73,9 +73,13 @@ final class KeyboardViewController: UIInputViewController {
         model?.stop()
     }
 
+    /// Fires on every text or selection change, including a move to another
+    /// field. The model treats that as "the target moved" and drops any
+    /// transcript still awaiting ✓, because `textDocumentProxy` always writes
+    /// to whatever is first responder now.
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
-        model?.refresh()
+        model?.inputContextChanged()
     }
 
     /// Opening the container app from a keyboard requires Full Access on

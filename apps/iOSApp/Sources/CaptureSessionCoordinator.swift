@@ -49,6 +49,8 @@ final class CaptureSessionCoordinator: ObservableObject {
     private var handledRequest: BridgeRequest?
     private var takeStartedAt: Date?
     private var takeID = UUID()
+    /// Set when a disarm landed mid-take; honoured when the take ends.
+    private var wantsAudioSessionRelease = false
     private var heartbeat: Task<Void, Never>?
     #if canImport(Darwin)
     private var subscription: DarwinSignalCenter.Subscription?
@@ -76,6 +78,12 @@ final class CaptureSessionCoordinator: ObservableObject {
         }
         appState.onDisplayChanged = { [weak self] display in
             self?.displayChanged(display)
+        }
+        appState.willStartCapture = { [weak self] in
+            // Whoever started this take, the residency tap has to let go of the
+            // input node first — the in-app mic button and the App Intent reach
+            // here too, not just the keyboard.
+            self?.residency.endIdleHold()
         }
 
         #if canImport(Darwin)
@@ -109,6 +117,19 @@ final class CaptureSessionCoordinator: ObservableObject {
             return false
         }
 
+        // Residency is the whole point of arming, so a tap that fails to
+        // start is an arming failure — not a quietly half-armed session that
+        // iOS suspends seconds later.
+        if phase == .idle, !residency.beginIdleHold() {
+            lastNotice =
+                AudioSessionManager.hasMicrophonePermission
+                ? "Could not start the microphone. Try again, or reopen Vocal."
+                : "Vocal needs microphone access before it can arm a session. "
+                    + "Dictate once in the app to grant it."
+            AudioSessionManager.deactivate()
+            return false
+        }
+
         let requested = profileName ?? ""
         session = .armed(
             window: window,
@@ -116,9 +137,6 @@ final class CaptureSessionCoordinator: ObservableObject {
                 ? (appState?.effectiveProfileName ?? "Default") : requested,
             now: Date()
         )
-        if phase == .idle {
-            residency.beginIdleHold()
-        }
         lastNotice = nil
         publishStatus()
         startHeartbeat()
@@ -126,15 +144,39 @@ final class CaptureSessionCoordinator: ObservableObject {
     }
 
     func disarm() {
-        session = nil
+        // Expire rather than forget: the keyboard's re-arm link then offers the
+        // window and profile the user actually chose.
+        session = session?.expired(at: Date())
         heartbeat?.cancel()
         heartbeat = nil
         residency.endIdleHold()
-        // Only release the session when nothing is actively recording.
-        if phase == .idle {
-            AudioSessionManager.deactivate()
-        }
+        releaseAudioSessionWhenIdle()
         publishStatus()
+    }
+
+    /// Hands the audio session back, or remembers to once the take in flight
+    /// finishes. Disarming mid-take must not tear the microphone out from
+    /// under it, but it must not strand an active session either.
+    private func releaseAudioSessionWhenIdle() {
+        guard phase == .idle else {
+            wantsAudioSessionRelease = true
+            return
+        }
+        wantsAudioSessionRelease = false
+        AudioSessionManager.deactivate()
+    }
+
+    /// Called at every terminal take transition: clears the per-take state
+    /// that must not leak into the next one, and finishes any deferred
+    /// teardown.
+    private func takeDidEnd() {
+        appState?.keyboardProfileOverride = nil
+        if let session, session.isArmed(at: Date()) {
+            residency.beginIdleHold()
+        } else {
+            residency.endIdleHold()
+            if wantsAudioSessionRelease { releaseAudioSessionWhenIdle() }
+        }
     }
 
     private func startHeartbeat() {
@@ -159,10 +201,12 @@ final class CaptureSessionCoordinator: ObservableObject {
 
     private func publishStatus() {
         guard let store else { return }
-        let live = session.flatMap { $0.isArmed(at: Date()) ? $0 : nil }
+        // Published as-is, expired or not: `isArmed(at:)` is the single
+        // source of truth for every reader, and an expired session still
+        // carries the window and profile worth re-arming with.
         let status = BridgeStatus(
             updatedAt: Date(),
-            session: live,
+            session: session,
             phase: phase,
             activeRequestID: activeRequestID,
             availableProfileNames: appState?.profiles.map(\.name) ?? [],
@@ -170,9 +214,33 @@ final class CaptureSessionCoordinator: ObservableObject {
             autoInsert: autoInsert
         )
         try? store.writeStatus(status)
+        reapStaleReply()
         #if canImport(Darwin)
         DarwinSignalCenter.shared.post(.statusChanged)
         #endif
+    }
+
+    /// Deletes a reply nobody came to collect.
+    ///
+    /// Only an on-screen keyboard consumes the reply slot, so a transcript
+    /// produced after the user dismissed the keyboard would otherwise sit in
+    /// the shared container in cleartext until the next take overwrote it.
+    /// Anything past the keyboard's own freshness window can no longer be
+    /// inserted, so it has no reason to exist.
+    private func reapStaleReply() {
+        guard let store, let reply = (try? store.readReply()) ?? nil else { return }
+        guard
+            Date().timeIntervalSince(reply.producedAt) > KeyboardBridgePolicy.replyFreshnessWindow
+        else { return }
+        try? store.clear(.reply)
+    }
+
+    /// The app came to the foreground: pick up anything that happened while it
+    /// was away.
+    func applicationBecameActive() {
+        handlePendingRequest()
+        refreshImportCount()
+        publishStatus()
     }
 
     // MARK: - Request handling
@@ -195,13 +263,16 @@ final class CaptureSessionCoordinator: ObservableObject {
                 <= KeyboardBridgePolicy.replyFreshnessWindow
         else { return }
 
-        guard let session, session.isArmed(at: Date()) else {
-            reply(to: request.id, outcome: .failed(reason: "Vocal's capture session expired"))
-            return
-        }
-
+        // Only *starting* needs a live session. Stopping and cancelling must
+        // work at the expiry boundary — a take can outlive the window it began
+        // in, and refusing to stop it would leave the microphone running with
+        // no way for the keyboard to reach it again.
         switch request.command {
         case .startRecording:
+            guard let session, session.isArmed(at: Date()) else {
+                reply(to: request.id, outcome: .failed(reason: "Vocal's capture session expired"))
+                return
+            }
             guard phase == .idle else {
                 // Answer rather than drop it: an unanswered request leaves the
                 // keyboard waiting on a take that will never arrive.
@@ -212,9 +283,8 @@ final class CaptureSessionCoordinator: ObservableObject {
             takeID = request.id
             appState.keyboardProfileOverride = request.requestedProfileName
             self.session = session.extended(to: Date())
-            // Hand the microphone from the residency tap to the real capture
-            // engine before the session actor asks for it.
-            residency.endIdleHold()
+            // A reply from an earlier take is definitively dead now.
+            try? store.clear(.reply)
             appState.startDictation()
 
         case .stopRecording:
@@ -271,7 +341,7 @@ final class CaptureSessionCoordinator: ObservableObject {
                 reply(to: requestID, outcome: .failed(reason: message))
                 activeRequestID = nil
             }
-            resumeResidencyIfArmed()
+            takeDidEnd()
         case .idle:
             if phase != .idle {
                 phase = .idle
@@ -281,8 +351,8 @@ final class CaptureSessionCoordinator: ObservableObject {
                     reply(to: requestID, outcome: .cancelled)
                     activeRequestID = nil
                 }
-                Task { await liveActivity.dismiss() }
-                resumeResidencyIfArmed()
+                liveActivity.dismiss()
+                takeDidEnd()
             }
         }
         publishStatus()
@@ -294,7 +364,6 @@ final class CaptureSessionCoordinator: ObservableObject {
             reply(to: requestID, outcome: .text(text), language: language)
             activeRequestID = nil
         }
-        appState?.keyboardProfileOverride = nil
         // A take that lands is evidence the session is in use — push expiry
         // back so it does not die between two sentences.
         if let session, session.isArmed(at: Date()) {
@@ -306,16 +375,8 @@ final class CaptureSessionCoordinator: ObservableObject {
             preview: text,
             language: language
         )
-        resumeResidencyIfArmed()
+        takeDidEnd()
         publishStatus()
-    }
-
-    private func resumeResidencyIfArmed() {
-        guard let session, session.isArmed(at: Date()) else {
-            residency.endIdleHold()
-            return
-        }
-        residency.beginIdleHold()
     }
 
     // MARK: - Live Activity
@@ -336,7 +397,7 @@ final class CaptureSessionCoordinator: ObservableObject {
         let state = RecordingActivityState(
             stage: stage, startedAt: takeStartedAt ?? Date(), profileName: profileName
         )
-        Task { await liveActivity.update(state) }
+        liveActivity.update(state)
     }
 
     private func finishActivity(
@@ -355,13 +416,19 @@ final class CaptureSessionCoordinator: ObservableObject {
         if let preview {
             state = state.withPreview(preview, language: language)
         }
-        Task { await liveActivity.finish(with: state) }
+        liveActivity.finish(with: state)
     }
 
     // MARK: - Imports
 
     func refreshImportCount() {
-        pendingImportCount = inbox?.pendingCount() ?? 0
+        let count = inbox?.pendingCount() ?? 0
+        guard count != pendingImportCount else { return }
+        pendingImportCount = count
+        // The keyboard reads this from the status file, and with no armed
+        // session there is no heartbeat to carry it — so publish here or the
+        // count on disk goes stale until the next take.
+        publishStatus()
     }
 
     // MARK: - Deep links

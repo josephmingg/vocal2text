@@ -60,8 +60,14 @@ public enum KeyboardBridgePolicy {
             return .openApp(VocalURL.arm(window: .default, profileName: nil).url)
         }
         guard let session = status.session, session.isArmed(at: now) else {
+            // Re-arm on the terms the user last chose. The app expires a
+            // session rather than forgetting it, so a 60-minute "Email"
+            // session comes back as 60 minutes of "Email".
+            let previous = status.session
             return .openApp(
-                VocalURL.arm(window: .default, profileName: status.session?.profileName).url
+                VocalURL.arm(
+                    window: previous?.window ?? .default, profileName: previous?.profileName
+                ).url
             )
         }
 

@@ -91,6 +91,23 @@ struct KeyboardBridgePolicyTests {
         #expect(VocalURL(url) == .arm(window: .default, profileName: "Chat"))
     }
 
+    @Test("Re-arming offers the window and profile the user actually chose")
+    func reArmCarriesTheSessionTerms() throws {
+        let armedAt = epoch
+        let expired = CaptureSessionState.armed(
+            window: .sixtyMinutes, profileName: "Email", now: armedAt
+        ).expired(at: armedAt.addingTimeInterval(3_000))
+        let now = armedAt.addingTimeInterval(3_100)
+        let status = BridgeStatus(updatedAt: now, session: expired)
+
+        guard case .openApp(let url) = action(status, at: now) else {
+            Issue.record("expected .openApp")
+            return
+        }
+        // Not silently downgraded to the 5-minute default.
+        #expect(VocalURL(url) == .arm(window: .sixtyMinutes, profileName: "Email"))
+    }
+
     @Test("Armed and idle starts a recording")
     func armedIdleStarts() {
         #expect(action(armedStatus(phase: .idle)) == .startRecording)
