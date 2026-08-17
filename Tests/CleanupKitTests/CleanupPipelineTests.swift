@@ -28,32 +28,56 @@ private struct ExplodingProvider: CleanupProvider {
     }
 }
 
-/// A provider that never answers — stands in for an in-process model (Apple
-/// Foundation Models) that stalls and has no `URLRequest` timeout to save it.
-private struct HangingProvider: CleanupProvider {
+/// A provider that cannot be interrupted: it parks on a continuation that is
+/// never resumed — the async analogue of an inference call stuck in native
+/// code. This is deliberately NOT a `Task.sleep` fake: sleep is
+/// cancellation-cooperative and returns the instant the deadline race cancels
+/// it, which lets a timeout that merely relabels a late failure pass the test
+/// without ever bounding anything. (This test's first version made exactly
+/// that mistake.)
+private struct NonCooperativeProvider: CleanupProvider {
     let id: CleanupProviderID = .appleFoundationModels
     let leavesDevice = false
 
     func isAvailable() async -> Bool { true }
     func prewarm() async {}
     func cleanup(_ request: CleanupRequest, timeout: Duration) async throws -> CleanupResponse {
-        // Deliberately ignores `timeout`, exactly as the real
-        // FoundationModelsProvider must (its API exposes no deadline).
-        try await Task.sleep(for: .seconds(600))
-        return CleanupResponse(text: "never arrives", modelName: "hang")
+        // Ignores the timeout parameter AND cancellation. The hung task leaks
+        // for the life of the test process; that is the point.
+        await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
+        return CleanupResponse(text: "unreachable", modelName: "hung")
     }
 }
 
 struct CleanupPipelineTests {
 
-    /// FR-7.3: a provider that never returns must not park the dictation in
-    /// `.cleaning` — the pipeline enforces the budget itself and falls back so
-    /// the stage-2 text still gets delivered.
-    @Test func providerThatIgnoresItsTimeoutStillFallsBack() async {
-        let pipeline = CleanupPipeline(provider: HangingProvider())
+    /// FR-7.3: a provider that never returns — and never honours cancellation
+    /// — must not park the dictation in `.cleaning`. The pipeline has to come
+    /// back at its own deadline and deliver the stage-2 text. The time limit
+    /// is the real assertion: a regression here hangs, it does not fail.
+    @Test(.timeLimit(.minutes(1)))
+    func providerThatIgnoresCancellationStillFallsBackOnTime() async {
+        let pipeline = CleanupPipeline(provider: NonCooperativeProvider())
+        let clock = ContinuousClock()
+        let start = clock.now
         let outcome = await pipeline.run(
             CleanupRequest(text: "meet on saturday", language: .english),
-            timeout: .milliseconds(50)
+            timeout: .milliseconds(100)
+        )
+        let elapsed = clock.now - start
+        #expect(outcome == .fellBack(reason: "timed-out"))
+        // Generous CI margin; the point is that it returns near the budget,
+        // not after the provider deigns to.
+        #expect(elapsed < .seconds(30))
+    }
+
+    /// "No time" must mean fail-now, not run-unbounded.
+    @Test(.timeLimit(.minutes(1)))
+    func zeroTimeoutFailsImmediately() async {
+        let pipeline = CleanupPipeline(provider: NonCooperativeProvider())
+        let outcome = await pipeline.run(
+            CleanupRequest(text: "meet on saturday", language: .english),
+            timeout: .zero
         )
         #expect(outcome == .fellBack(reason: "timed-out"))
     }

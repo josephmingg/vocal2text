@@ -209,35 +209,74 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         let session = URLSession(configuration: configuration)
         defer { session.finishTasksAndInvalidate() }
 
+        // Without a cancellation handler, a continuation-based transport is
+        // deaf to cancellation: CleanupPipeline's deadline race would abandon
+        // this request but the network work would run to its own timeout.
+        // The box forwards the cancellation to the URLSession task, closing
+        // the one gap between "requested" and "actually stopped".
+        let box = DataTaskBox()
         do {
-            return try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<HTTPReply, any Error>) in
-                let task = session.dataTask(with: request) { data, response, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else if let http = response as? HTTPURLResponse {
-                        continuation.resume(
-                            returning: HTTPReply(statusCode: http.statusCode, body: data ?? Data())
-                        )
-                    } else {
-                        continuation.resume(
-                            throwing: CleanupError.transport("non-HTTP response")
-                        )
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<HTTPReply, any Error>) in
+                    let task = session.dataTask(with: request) { data, response, error in
+                        if let error {
+                            continuation.resume(throwing: error)
+                        } else if let http = response as? HTTPURLResponse {
+                            continuation.resume(
+                                returning: HTTPReply(statusCode: http.statusCode, body: data ?? Data())
+                            )
+                        } else {
+                            continuation.resume(
+                                throwing: CleanupError.transport("non-HTTP response")
+                            )
+                        }
                     }
+                    box.store(task)
+                    task.resume()
                 }
-                task.resume()
+            } onCancel: {
+                box.cancel()
             }
         } catch let error as CleanupError {
             throw error
         } catch {
-            if let urlError = error as? URLError, urlError.code == .timedOut {
+            if let urlError = error as? URLError,
+                urlError.code == .timedOut || urlError.code == .cancelled {
+                // .cancelled: the only canceller is the stage-3 deadline race.
                 throw CleanupError.timedOut
             }
             let nsError = error as NSError
-            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorTimedOut {
+            if nsError.domain == NSURLErrorDomain,
+                nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorCancelled {
                 throw CleanupError.timedOut
             }
             throw CleanupError.transport(String(describing: error))
+        }
+    }
+
+    /// Carries the in-flight `URLSessionDataTask` across the cancellation
+    /// handler boundary. `onCancel` can fire before `store` (cancelled while
+    /// the task is being created), so the box remembers and cancels late.
+    private final class DataTaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionDataTask?
+        private var isCancelled = false
+
+        func store(_ task: URLSessionDataTask) {
+            lock.lock()
+            self.task = task
+            let cancelNow = isCancelled
+            lock.unlock()
+            if cancelNow { task.cancel() }
+        }
+
+        func cancel() {
+            lock.lock()
+            isCancelled = true
+            let task = task
+            lock.unlock()
+            task?.cancel()
         }
     }
 }
