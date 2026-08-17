@@ -141,7 +141,14 @@ public actor MicrophoneCapture {
             throw CaptureError.formatUnavailable
         }
 
-        RecoveryFileReaper.reapExpiredRecoveryFiles()
+        // Fire-and-forget. Sweeping the temp directory means listing it and
+        // stat-ing every entry, and this runs between the hotkey press and
+        // the microphone opening — exactly where work does not belong, since
+        // every millisecond here is speech the user already spoke. Nothing
+        // downstream waits on the result.
+        Task.detached(priority: .utility) {
+            RecoveryFileReaper.reapExpiredRecoveryFiles()
+        }
 
         let recoveryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32")
