@@ -3,9 +3,21 @@
 Answers to these questions tune the plan. Defaults are chosen so work can proceed if a
 question is unanswered — each shows the assumption currently baked into the PRDs.
 
-Answered so far:
+Answered so far (owner, 2026-08-16):
 
-- ✅ **Languages**: English + Chinese for v1; **Burmese deferred** (owner decision, 2026-08-16).
+- ✅ **Languages**: English + Chinese for v1; **Burmese deferred**.
+- ✅ **A1/A3 Hardware**: confirmed M-series Mac ≥16 GB + iPhone 15 Pro or newer — the
+  plan's baked-in assumptions hold as-is.
+- ✅ **B5 Chinese script**: owner asked for a recommendation → **Simplified output for v1**
+  (Whisper's Mandarin output is Simplified-dominant, so it's the zero-fighting-the-model
+  path), with the deterministic offline Simplified↔Traditional conversion toggle added
+  later (it's a data-table feature, cheap to add when wanted). Code-switched English is
+  preserved verbatim either way.
+- ✅ **F20 Dictation targets**: Email & documents, Code & terminal, Notes/ideas on the go
+  (chat is *not* a priority). Consequences: the Email, Terminal/Code, and Notes built-in
+  profiles and their fixtures are the tuning priority; the Messages profile still ships
+  but is not optimized first; the iPhone Action-Button capture flow ranks above the
+  keyboard in polish order (M6 before M7 was already the plan — confirmed).
 
 ## A. Hardware & OS (determines engine + API choices)
 
@@ -44,10 +56,12 @@ convention), applied by a deterministic formatter, not the LLM.
 
 ## C. Interaction design
 
-**C8. Preferred push-to-talk key on Mac?** Options: Fn/Globe hold (Wispr Flow default; needs
-key interception), Right-⌘ hold, Right-⌥ hold, or a chord like ⌥Space.
-Default assumption: **Right-⌥ (right Option) hold** to start; Fn support investigated as an
-upgrade. Also: hold-to-talk AND a double-tap-to-lock ("hands-free") mode — want both?
+**C8. Preferred push-to-talk key on Mac?** Options: Fn/Globe hold (Wispr Flow default),
+Right-⌘ hold, Right-⌥ hold, or a chord like ⌥Space (discouraged — dies in secure-input
+sessions).
+Default assumption (baked into FR-1.4 after research): **hold-Fn/Globe**, with a one-time
+onboarding step setting "Press 🌐 key to: Do Nothing"; **Right-⌘ hold** as the first-class
+fallback. Both hold-to-talk and double-tap-to-lock ship (FR-1.2/1.3).
 
 **C9. While you speak, do you want live partial text on screen (streaming preview in the HUD),**
 **or is a simple "listening" indicator enough?**
@@ -68,17 +82,17 @@ because keyboard extensions carry real constraints (see iOS PRD).
 ## D. AI cleanup
 
 **D12. For Mac cleanup, do you already run Ollama (or LM Studio)? Which models are pulled?**
-Default assumption: we bundle in-process MLX cleanup (no external dependency) and also support
-Ollama if present.
+Default assumption: Apple Foundation Models is the zero-install default local provider; a
+downloadable MLX model is the quality upgrade; Ollama is auto-detected if present (FR-7.2).
 
 **D13. Any cloud provider you'd want as optional fallback (OpenAI, Groq, DeepSeek, none)?**
 Default assumption: none configured; the provider abstraction supports any OpenAI-compatible
 URL + key if you add one later.
 
-**D14. Default cleanup aggressiveness:** light touch (fillers + punctuation only) vs full
-rewrite-to-style?
-Default assumption: light touch as the global default profile; heavier styles opt-in per app
-profile.
+**D14. Default cleanup aggressiveness (once you turn the global cleanup switch ON):** light
+touch (fillers + punctuation only) vs full rewrite-to-style?
+Default assumption: cleanup ships globally **OFF** (F7). When enabled, the Default profile
+does light touch; heavier styles are opt-in per app profile.
 
 ## E. Data & sync
 
@@ -87,8 +101,8 @@ Default assumption: v1 local-only per device; optional iCloud (CloudKit private 
 later milestone — offline-first, sync is only a convenience layer.
 
 **E16. Keep audio recordings in history, or text only?**
-Default assumption: keep audio (Opus, ~30 MB per recorded hour) with a retention setting
-(e.g. auto-delete audio after 30 days, keep text forever).
+Default assumption: keep audio (Opus 16–24 kbps mono, ~7–11 MB per recorded hour) with a
+retention setting (e.g. auto-delete audio after 30 days, keep text forever).
 
 **E17. Any encryption requirement beyond FileVault/iOS data protection?**
 Default assumption: rely on OS-level encryption; no app-layer crypto.

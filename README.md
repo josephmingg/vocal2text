@@ -36,6 +36,7 @@ hold hotkey ──▶ speak ──▶ release
 | [06 · Roadmap](docs/06-roadmap.md) | Milestones with acceptance criteria |
 | [07 · Risks](docs/07-risks.md) | Risk register |
 | [08 · Interview questions](docs/08-interview-questions.md) | Open questions for the product owner |
+| [09 · Reference codebases](docs/09-reference-codebases.md) | Learnings from SpeakType, VoiceInk, Handy |
 
 ## Ground rules
 

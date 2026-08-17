@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast + cheap: pure-logic targets on Linux. Apple-only targets compile to
+  # guarded stubs here, so this job proves the whole package parses and the
+  # text pipeline / cleanup / profile / session logic passes its tests.
+  linux-core:
+    name: Linux — core tests
+    runs-on: ubuntu-latest
+    container: swift:6.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-linux-
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test
+
+  # The real thing: full dependency graph (GRDB, WhisperKit) + all tests on macOS.
+  macos-full:
+    name: macOS — full build & tests
+    runs-on: macos-15
+    needs: linux-core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-macos-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-macos-
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test
+
+  # The VocalIOS app target: unsigned simulator compile.
+  ios-app:
+    name: iOS — VocalIOS app build
+    runs-on: macos-15
+    needs: macos-full
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Build app (unsigned, simulator)
+        run: |
+          set +e
+          xcodebuild -project Vocal.xcodeproj -scheme VocalIOS -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build > build-ios.log 2>&1
+          status=$?
+          set -e
+          grep -E "error:" build-ios.log | head -80 || true
+          tail -5 build-ios.log
+          exit $status
+
+  # The VocalMac app target: XcodeGen project + unsigned xcodebuild compile.
+  macos-app:
+    name: macOS — VocalMac app build
+    runs-on: macos-15
+    needs: macos-full
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Cache DerivedData SPM
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/**/SourcePackages
+          key: xcode-spm-${{ hashFiles('Package.swift') }}
+          restore-keys: xcode-spm-
+      - name: Build app (unsigned)
+        run: |
+          set +e
+          xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1
+          status=$?
+          set -e
+          grep -E "error:" build.log | head -80 || true
+          tail -5 build.log
+          exit $status
+
+# Retrigger marker: repo now public, probing runner availability 2026-08-17T07:20Z

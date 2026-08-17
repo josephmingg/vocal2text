@@ -1,0 +1,93 @@
+# XcodeGen manifest — `make generate` produces Vocal.xcodeproj (gitignored).
+name: Vocal
+options:
+  bundleIdPrefix: com.vocal
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    ENABLE_HARDENED_RUNTIME: NO
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_APP_SANDBOX: NO
+
+packages:
+  DictationCore:
+    path: .
+
+targets:
+  VocalIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: apps/iOSApp/Sources
+    info:
+      path: apps/iOSApp/Info.plist
+      properties:
+        CFBundleDisplayName: Vocal
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation button."
+        UIBackgroundModes: [audio]
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    dependencies:
+      - package: DictationCore
+        products:
+          - CoreModels
+          - TextPipeline
+          - CleanupKit
+          - ProfileKit
+          - ModelStore
+          - ASRKit
+          - SessionKit
+          - AudioPipeline
+          - PersistenceKit
+          - ASREngineWhisperKit
+          - ASREngineAppleSpeech
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vocal.ios
+        TARGETED_DEVICE_FAMILY: "1"
+
+  VocalMac:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: apps/MacApp/Sources
+      - path: apps/MacApp/Resources
+        optional: true
+    info:
+      path: apps/MacApp/Info.plist
+      properties:
+        CFBundleDisplayName: Vocal
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSUIElement: true
+        LSMinimumSystemVersion: "15.0"
+        NSMicrophoneUsageDescription: "Vocal records only while you hold the dictation key — never at idle."
+        NSAppleEventsUsageDescription: "Vocal reads the active browser tab's address to route website profiles. Only the hostname is used, in memory, never stored."
+    dependencies:
+      - package: DictationCore
+        products:
+          - CoreModels
+          - TextPipeline
+          - CleanupKit
+          - ProfileKit
+          - ModelStore
+          - ASRKit
+          - SessionKit
+          - AudioPipeline
+          - PersistenceKit
+          - ASREngineWhisperKit
+          - ASREngineAppleSpeech
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vocal.mac
+        # Dev builds use a distinct bundle ID so a debug build never wedges the
+        # daily-driver's TCC grants (docs/03 §3.4).
+        PRODUCT_BUNDLE_IDENTIFIER[config=Debug]: com.vocal.mac.dev
