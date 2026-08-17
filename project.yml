@@ -225,6 +225,7 @@ targets:
           - PersistenceKit
           - ASREngineWhisperKit
           - ASREngineAppleSpeech
+          - ASREngineSherpaOnnx
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vocal.mac

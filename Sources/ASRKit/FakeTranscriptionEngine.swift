@@ -13,6 +13,7 @@ public actor FakeTranscriptionEngine: TranscriptionEngine {
     private nonisolated let partials: [String]
     private nonisolated let delay: Duration
     private nonisolated let failure: TranscriptionError?
+    private nonisolated let scriptedAvailability: EngineAvailability
 
     public private(set) var prepareCount = 0
     public private(set) var unloadCount = 0
@@ -25,16 +26,18 @@ public actor FakeTranscriptionEngine: TranscriptionEngine {
         result: TranscriptionResult,
         partials: [String] = [],
         delay: Duration = .zero,
-        failure: TranscriptionError? = nil
+        failure: TranscriptionError? = nil,
+        availability: EngineAvailability = .ready
     ) {
         self.result = result
         self.partials = partials
         self.delay = delay
         self.failure = failure
+        self.scriptedAvailability = availability
     }
 
     public func availability(for language: Language) async -> EngineAvailability {
-        .ready
+        scriptedAvailability
     }
 
     public func prepare(languageMode: LanguageMode) async throws {
