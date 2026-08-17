@@ -62,6 +62,9 @@ private func makeHarness(
     config: StaticConfig = StaticConfig(),
     cleanup: CleanupPipeline? = nil,
     cleanupProviderID: CleanupProviderID = .ollama(model: "qwen2.5"),
+    /// Per-take provider selection. Defaults to the fixed `cleanup` pipeline,
+    /// so existing tests read unchanged.
+    selectCleanup: DictationSession.CleanupSelecting? = nil,
     prewarm: @escaping @Sendable () async -> Void = {},
     deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes")
 ) -> Harness {
@@ -77,8 +80,14 @@ private func makeHarness(
     let dependencies = DictationSession.Dependencies(
         audio: audio,
         engine: engine,
-        cleanup: cleanup,
-        cleanupProviderID: cleanupProviderID,
+        selectCleanup: selectCleanup
+            ?? { _ in
+                cleanup.map {
+                    DictationSession.CleanupSelection(
+                        pipeline: $0, providerID: cleanupProviderID
+                    )
+                }
+            },
         prewarmCleanup: prewarm,
         deliverer: deliverer,
         store: store,
@@ -270,6 +279,91 @@ struct DictationSessionTests {
         #expect(
             labels == ["idle", "arming", "recording", "transcribing", "cleaning", "delivering", "idle"]
         )
+    }
+
+    // MARK: - Per-take provider selection (docs/11 G3, G15)
+
+    @Test func cleanupProviderIsSelectedPerTakeFromThePinnedProfile() async throws {
+        // The selector runs once per take and sees the take's profile, so a
+        // profile override picks the provider (G3) and a settings change
+        // applies on the next dictation instead of the next launch (G15).
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let seen = ProfileRecorder()
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
+            profile: Profile(
+                name: "Notes",
+                cleanupEnabled: true,
+                providerOverride: .ollama(model: "sailor2:8b")
+            ),
+            config: StaticConfig(masterSwitch: true),
+            selectCleanup: { profile in
+                await seen.record(profile)
+                // What the Mac app does: build from the profile's override,
+                // falling back to the global model when it names none.
+                guard case .ollama(let model)? = profile.providerOverride else {
+                    return DictationSession.CleanupSelection(
+                        pipeline: CleanupPipeline(provider: provider),
+                        providerID: .ollama(model: "global-default")
+                    )
+                }
+                return DictationSession.CleanupSelection(
+                    pipeline: CleanupPipeline(provider: provider),
+                    providerID: .ollama(model: model)
+                )
+            }
+        )
+
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let profiles = await seen.profiles
+        #expect(profiles.count == 1)
+        #expect(profiles.first?.name == "Notes")
+        // History records the overridden provider, not a launch-time default.
+        let record = try #require(await harness.store.records.first)
+        #expect(
+            record.cleanup
+                == .applied(provider: .ollama(model: "sailor2:8b"), model: "scripted-upper")
+        )
+    }
+
+    @Test func theSelectorIsNotConsultedWhenCleanupIsGatedOff() async throws {
+        // Master switch off: no provider is built at all, so a take costs
+        // nothing even when the endpoint is misconfigured.
+        let seen = ProfileRecorder()
+        let harness = makeHarness(
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: false),
+            selectCleanup: { profile in
+                await seen.record(profile)
+                return nil
+            }
+        )
+
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        #expect(await seen.profiles.isEmpty)
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .masterSwitchOff))
+    }
+
+    @Test func aNilSelectionRecordsProviderUnavailableAndStillDelivers() async throws {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            selectCleanup: { _ in nil }
+        )
+
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .providerUnavailable))
+        // A missing provider is never a reason to lose the take (FR-7.3).
+        #expect(await harness.deliverer.deliveredTexts == ["Meet on saturday."])
     }
 
     @Test func validatorRejectionFallsBackToStage2Text() async throws {

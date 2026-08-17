@@ -198,7 +198,33 @@ private struct ProfileEditorForm: View {
                     .frame(minHeight: 80)
             }
             Toggle("Ignore the global style prompt", isOn: field(\.ignoresGlobalStyle))
+            TextField("Model override (optional)", text: providerOverrideModel)
+            Text(
+                "Leave empty to use the model from Settings → Cleanup. Name a "
+                    + "different Ollama model to run this profile's cleanup on "
+                    + "it — useful when one profile needs a stronger model."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
+    }
+
+    /// The profile's Ollama model override as editable text (docs/11 G3).
+    /// Empty clears the override; only Ollama is offered because it is the one
+    /// provider Settings carries a URL for.
+    private var providerOverrideModel: Binding<String> {
+        Binding(
+            get: {
+                guard case .ollama(let model)? = profile.providerOverride else { return "" }
+                return model
+            },
+            set: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                var updated = profile
+                updated.providerOverride = trimmed.isEmpty ? nil : .ollama(model: trimmed)
+                profileStore.save(updated)
+            }
+        )
     }
 
     private var languageSection: some View {

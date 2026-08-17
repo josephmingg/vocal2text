@@ -28,17 +28,35 @@ public actor DictationSession {
         case cancelled
     }
 
+    /// The stage-3 pipeline chosen for one take, plus the provider identity
+    /// history records — `CleanupPipeline` does not expose its provider, so
+    /// the two travel together.
+    public struct CleanupSelection: Sendable {
+        public var pipeline: CleanupPipeline
+        public var providerID: CleanupProviderID
+
+        public init(pipeline: CleanupPipeline, providerID: CleanupProviderID) {
+            self.pipeline = pipeline
+            self.providerID = providerID
+        }
+    }
+
+    /// Chooses the stage-3 pipeline for one take, called after the profile is
+    /// pinned and only when cleanup is actually going to run.
+    ///
+    /// Resolving per take rather than per launch is what makes a profile's
+    /// `providerOverride` real (docs/11 G3) and lets a changed model or server
+    /// URL take effect on the next dictation instead of the next launch
+    /// (docs/11 G15). Returning nil means no provider is configured, and the
+    /// take is recorded as `skipped(providerUnavailable)`.
+    public typealias CleanupSelecting = @Sendable (Profile) async -> CleanupSelection?
+
     /// Everything a session needs, injected by the composition root.
     public struct Dependencies: Sendable {
         public var audio: any AudioCapturing
         public var engine: any TranscriptionEngine
-        /// Stage-3 pipeline; nil when no provider is configured.
-        public var cleanup: CleanupPipeline?
-        /// Identity of the provider behind `cleanup`, recorded in history
-        /// outcomes. `CleanupPipeline` does not expose its provider, so the
-        /// composition root supplies the ID alongside the pipeline; a
-        /// profile's `providerOverride` wins when set.
-        public var cleanupProviderID: CleanupProviderID
+        /// Stage-3 provider selection, resolved per take.
+        public var selectCleanup: CleanupSelecting
         /// Fired fire-and-forget at hotkey press so the model is hot at
         /// release (docs/03 §2). Wire to `CleanupProvider.prewarm`; defaults
         /// to a no-op.
@@ -57,6 +75,9 @@ public actor DictationSession {
         /// tests pin timestamps.
         public var now: @Sendable () -> Date
 
+        /// Fixed-pipeline form: every take uses the same provider. Used by
+        /// tests and by platforms with a single built-in provider; the Mac app
+        /// passes a `selectCleanup` closure instead.
         public init(
             audio: any AudioCapturing,
             engine: any TranscriptionEngine,
@@ -73,10 +94,39 @@ public actor DictationSession {
             ),
             now: @escaping @Sendable () -> Date = { Date() }
         ) {
+            self.init(
+                audio: audio,
+                engine: engine,
+                selectCleanup: { _ in
+                    cleanup.map { CleanupSelection(pipeline: $0, providerID: cleanupProviderID) }
+                },
+                prewarmCleanup: prewarmCleanup,
+                deliverer: deliverer,
+                store: store,
+                config: config,
+                profileResolution: profileResolution,
+                now: now
+            )
+        }
+
+        public init(
+            audio: any AudioCapturing,
+            engine: any TranscriptionEngine,
+            selectCleanup: @escaping CleanupSelecting,
+            prewarmCleanup: @escaping @Sendable () async -> Void = {},
+            deliverer: any TextDelivering,
+            store: any TranscriptStoring,
+            config: any SessionConfiguring,
+            profileResolution: @escaping @Sendable () async -> (
+                profile: Profile,
+                routeKind: TranscriptRecord.RouteKind,
+                pressTimeBundleID: String?
+            ),
+            now: @escaping @Sendable () -> Date = { Date() }
+        ) {
             self.audio = audio
             self.engine = engine
-            self.cleanup = cleanup
-            self.cleanupProviderID = cleanupProviderID
+            self.selectCleanup = selectCleanup
             self.prewarmCleanup = prewarmCleanup
             self.deliverer = deliverer
             self.store = store
@@ -322,13 +372,14 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .profileDisabled)
         } else if !Self.cleanupAllowed(for: language, profile: profile) {
             cleanupOutcome = .skipped(reason: .languageOptOut)
-        } else if let pipeline = deps.cleanup {
+        } else if let selection = await deps.selectCleanup(profile) {
             transition(to: .cleaning)
-            // History must record what actually ran (FR-5.1). Only one pipeline
-            // is injected today, so a profile's providerOverride is routing
-            // intent, not reality — runtime provider selection is a known gap
-            // (docs/11).
-            let providerID = deps.cleanupProviderID
+            // Resolved for this take from this profile, so history records the
+            // provider that actually ran (FR-5.1) — including a profile's
+            // `providerOverride` (docs/11 G3) and any settings change made
+            // since launch (docs/11 G15).
+            let pipeline = selection.pipeline
+            let providerID = selection.providerID
             let stylePrompt: String
             if profile.ignoresGlobalStyle {
                 stylePrompt = ""

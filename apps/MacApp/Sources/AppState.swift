@@ -78,8 +78,15 @@ final class AppState: ObservableObject {
     private let routedEngine: LanguageRoutingEngine
 
     /// Whether the configured cleanup provider sends text off-device — drives
-    /// the HUD privacy badge (FR-7.4). Ollama at localhost: false.
-    private let cleanupLeavesDevice: Bool
+    /// the HUD privacy badge (FR-7.4). Ollama at localhost: false. Computed
+    /// from the *current* server URL rather than the one read at launch, so
+    /// pointing Vocal at a remote endpoint is reflected on the next dictation
+    /// (the settings-take-effect rule behind docs/11 G15).
+    private var cleanupLeavesDevice: Bool {
+        OpenAICompatibleProvider(
+            baseURL: Self.ollamaBaseURL(), model: settings.ollamaModel
+        ).leavesDevice
+    }
 
     private var phaseTask: Task<Void, Never>?
     /// Hotkey edges must reach the session actor in order; independent
@@ -108,11 +115,15 @@ final class AppState: ObservableObject {
         let frontmost = FrontmostContext()
         let relay = ResolutionRelay()
 
-        let model = settings.ollamaModel
-        let provider = OpenAICompatibleProvider(
+        // Rebuilt per take from the live settings (docs/11 G15) and the take's
+        // profile (docs/11 G3) — see `selectCleanup` below. This one is only
+        // for the press-time prewarm, which needs *a* provider before the
+        // profile is known; a model changed since launch still prewarms the
+        // old one, which costs nothing but a wasted keep-alive ping.
+        let prewarmProvider = OpenAICompatibleProvider(
             baseURL: AppState.ollamaBaseURL(),
-            model: model,
-            id: .ollama(model: model)
+            model: settings.ollamaModel,
+            id: .ollama(model: settings.ollamaModel)
         )
 
         let engine = WhisperKitEngine()
@@ -129,18 +140,31 @@ final class AppState: ObservableObject {
         let dependencies = DictationSession.Dependencies(
             audio: MicrophoneCaptureAdapter(microphone: microphone),
             engine: routedEngine,
-            // The pipeline is wired unconditionally; the session's own
-            // precedence gating (docs/05 §0: master switch → per-profile
-            // opt-in) decides per dictation whether stage 3 runs, and an
-            // unreachable Ollama falls back to stage-2 text (FR-7.3).
-            cleanup: CleanupPipeline(provider: provider),
-            cleanupProviderID: .ollama(model: model),
+            // Built per take, only when the session has already decided stage 3
+            // will run (docs/05 §0 gating). Constructing the provider is a few
+            // string copies — no network — so this is cheaper than the
+            // relaunch it replaces (docs/11 G3/G15).
+            selectCleanup: { profile in
+                let (baseURL, globalModel) = await MainActor.run {
+                    (AppState.ollamaBaseURL(), settings.ollamaModel)
+                }
+                let model = AppState.cleanupModel(for: profile, globalModel: globalModel)
+                let provider = OpenAICompatibleProvider(
+                    baseURL: baseURL,
+                    model: model,
+                    id: .ollama(model: model)
+                )
+                return DictationSession.CleanupSelection(
+                    pipeline: CleanupPipeline(provider: provider),
+                    providerID: .ollama(model: model)
+                )
+            },
             prewarmCleanup: {
                 // Fired at press (docs/03 §2); skip the network touch entirely
                 // while the master switch is off.
                 guard await settings.cleanupMasterSwitch else { return }
-                guard await provider.isAvailable() else { return }
-                await provider.prewarm()
+                guard await prewarmProvider.isAvailable() else { return }
+                await prewarmProvider.prewarm()
             },
             deliverer: MacTextDelivering(
                 deliverer: TextDeliverer(
@@ -184,7 +208,6 @@ final class AppState: ObservableObject {
         self.burmeseEngine = burmeseEngine
         self.routedEngine = routedEngine
         self.profileStore = profileStore
-        self.cleanupLeavesDevice = provider.leavesDevice
         self.hudState = HUDState(
             mode: .hidden,
             partialText: "",
@@ -393,6 +416,19 @@ final class AppState: ObservableObject {
             print("Vocal: failed to open database — history disabled: \(error)")
             return nil
         }
+    }
+
+    /// The Ollama model a take runs cleanup on: the profile's override when it
+    /// names one, else the global Settings → Cleanup model (docs/11 G3).
+    ///
+    /// Only `.ollama` overrides are honored because Ollama is the only
+    /// provider v1 carries configuration for — a profile asking for an
+    /// OpenAI-compatible endpoint has no URL or key to reach it with, so it
+    /// falls back to the global model rather than failing every take.
+    nonisolated static func cleanupModel(for profile: Profile, globalModel: String) -> String {
+        guard case .ollama(let model)? = profile.providerOverride else { return globalModel }
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? globalModel : trimmed
     }
 
     /// Ollama server root; its OpenAI-compatible surface lives under /v1

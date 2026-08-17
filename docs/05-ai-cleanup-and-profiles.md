@@ -153,6 +153,12 @@ Selection: per-profile provider override → global default provider → fallbac
 (local → skip). Timeout default 6 s (configurable); on timeout deliver stage-2 text and record
 `cleanup: timed-out` in history.
 
+**Resolved per take**, not per launch (`DictationSession.Dependencies.selectCleanup`, docs/11
+G3/G15): the session asks for a provider only after the profile is pinned and only when stage 3
+is actually going to run, so a profile's override selects the model and a Settings change applies
+to the next dictation. v1 honors `.ollama` overrides only — no other provider has a configured
+URL or key to reach, so those fall back to the global model instead of failing the take.
+
 ### 3.3 Prompt architecture
 
 One **system prompt template** with slots, versioned in-repo as a resource
