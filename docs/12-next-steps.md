@@ -21,7 +21,7 @@ Read `docs/11-known-gaps.md` alongside — G-numbers below refer to it.
 
 | # | Goal | Notes |
 |---|---|---|
-| A1 | **Turn on AI cleanup for real** | Owner installs Ollama (`brew install ollama`, `ollama pull qwen2.5:3b-instruct` or newer Qwen), flips Settings → Cleanup. Then: run the 60-case eval against it, tune the prompt files in `Sources/CleanupKit/Resources/Prompts/`, and iterate on real dictations. The showcase test: "meet Friday, sorry Saturday" and 「周五，啊不对，周六」 |
+| A1 | **Turn on AI cleanup for real** | **Harness built, never run against a model.** The 62-case eval set and `make eval-cleanup` now exist (`evals/cleanup/`) — they did not before, which is why "run the 60-case eval" had no way to happen. Owner installs Ollama (`brew install ollama`, `ollama pull qwen2.5:3b-instruct` or newer Qwen), flips Settings → Cleanup, runs `make eval-cleanup`, commits the report, then tunes `Sources/CleanupKit/Resources/Prompts/` against it. Showcase cases are `en-corr-001` ("meet Friday, sorry Saturday") and `zh-corr-001` (「周五，啊不对，周六」). Gates AC-4: ≥ 90% hard-rule pass rate |
 | A2 | **Live HUD feedback** (G2) | Feed real mic levels into WaveformView; wire `engine.transcribeStream` partials into `hudState.partialText` |
 | A3 | **Audio retention + cancel recovery** (G9) | Encode takes to Opus/AAC in `MicrophoneCapture.finish`, honor the retention setting, add History playback + the 24 h cancelled-take Recover flow |
 | A4 | **Insertion edge-case sweep** | Collect real paste failures from daily use; grow the per-app strategy table; expose overrides in Advanced settings |

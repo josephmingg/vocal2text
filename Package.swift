@@ -38,6 +38,10 @@ let package = Package(
         .library(name: "CoreModels", targets: ["CoreModels"]),
         .library(name: "TextPipeline", targets: ["TextPipeline"]),
         .library(name: "CleanupKit", targets: ["CleanupKit"]),
+        // Stage-3 eval harness: the scoring core is a library so it can be
+        // unit-tested, the CLI is a thin shell over it (docs/05 §7).
+        .library(name: "CleanupEval", targets: ["CleanupEval"]),
+        .executable(name: "eval-cleanup", targets: ["eval-cleanup"]),
         .library(name: "ProfileKit", targets: ["ProfileKit"]),
         .library(name: "ModelStore", targets: ["ModelStore"]),
         .library(name: "ASRKit", targets: ["ASRKit"]),
@@ -99,8 +103,13 @@ let package = Package(
             dependencies: ["CoreModels", "ASRKit", "ModelStore"] + sherpaOnnxProducts
         ),
 
+        // ── Eval tooling (pure; the CLI needs a live model, the core does not)
+        .target(name: "CleanupEval", dependencies: ["CoreModels", "CleanupKit"]),
+        .executableTarget(name: "eval-cleanup", dependencies: ["CleanupEval", "CleanupKit"]),
+
         // ── Tests ───────────────────────────────────────────────────────
         .testTarget(name: "CoreModelsTests", dependencies: ["CoreModels"]),
+        .testTarget(name: "CleanupEvalTests", dependencies: ["CleanupEval"]),
         .testTarget(
             name: "TextPipelineTests",
             dependencies: ["TextPipeline"],

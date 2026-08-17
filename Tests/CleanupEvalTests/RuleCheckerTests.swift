@@ -1,0 +1,264 @@
+import CoreModels
+import Foundation
+import Testing
+
+@testable import CleanupEval
+
+/// The eval harness produces numbers that get believed and checked into
+/// `docs/benchmarks/`. Its scoring is the one part that can be verified without
+/// a live model, so it is.
+
+// MARK: - mustContain / mustNotContain
+
+@Test func mustContainIsCaseInsensitive() {
+    let rule = EvalRule(kind: .mustContain, values: ["Saturday"])
+    #expect(RuleChecker.check(rule, output: "See you saturday.", input: "", protectedTerms: [])
+        .passed)
+}
+
+@Test func mustContainReportsWhatWasMissing() {
+    let rule = EvalRule(kind: .mustContain, values: ["Friday", "Saturday"])
+    let outcome = RuleChecker.check(
+        rule, output: "See you Saturday.", input: "", protectedTerms: []
+    )
+    #expect(!outcome.passed)
+    #expect(outcome.detail.contains("Friday"))
+    #expect(!outcome.detail.contains("Saturday"))
+}
+
+@Test func mustNotContainCatchesASurvivingFiller() {
+    let rule = EvalRule(kind: .mustNotContain, values: ["um", "uh"])
+    #expect(
+        !RuleChecker.check(
+            rule, output: "So um we should ship.", input: "", protectedTerms: []
+        ).passed
+    )
+    #expect(
+        RuleChecker.check(rule, output: "So we should ship.", input: "", protectedTerms: [])
+            .passed
+    )
+}
+
+@Test func latinMatchingRespectsWordBoundaries() {
+    // Substring matching would fail this case even though the model was right:
+    // "album" and "number" both contain "um".
+    let rule = EvalRule(kind: .mustNotContain, values: ["um"])
+    #expect(
+        RuleChecker.check(
+            rule, output: "Track the album number.", input: "", protectedTerms: []
+        ).passed
+    )
+    // Punctuation still bounds a word.
+    #expect(!RuleChecker.check(rule, output: "Um, right.", input: "", protectedTerms: []).passed)
+    #expect(!RuleChecker.check(rule, output: "Right (um).", input: "", protectedTerms: []).passed)
+}
+
+@Test func wordBoundaryScanSurvivesRepeatedNearMisses() {
+    // Several embedded hits before a real one must not end the scan early.
+    let rule = EvalRule(kind: .mustContain, values: ["um"])
+    #expect(
+        RuleChecker.check(
+            rule, output: "album number drum, um yes", input: "", protectedTerms: []
+        ).passed
+    )
+    #expect(
+        !RuleChecker.check(
+            rule, output: "album number drum", input: "", protectedTerms: []
+        ).passed
+    )
+}
+
+@Test func mustNotContainWorksOnHanWithoutWordBoundaries() {
+    // 「不对」 must not survive into the output of a self-correction.
+    let rule = EvalRule(kind: .mustNotContain, values: ["不对"])
+    #expect(
+        !RuleChecker.check(rule, output: "周五，啊不对，周六。", input: "", protectedTerms: [])
+            .passed
+    )
+    #expect(RuleChecker.check(rule, output: "周六。", input: "", protectedTerms: []).passed)
+}
+
+@Test func emptyRuleValuesPassRatherThanCrash() {
+    #expect(
+        RuleChecker.check(
+            EvalRule(kind: .mustContain, values: []), output: "anything", input: "",
+            protectedTerms: []
+        ).passed
+    )
+}
+
+// MARK: - preservesTerms
+
+@Test func preservesTermsDelegatesToTheShippingVerifier() {
+    let rule = EvalRule(kind: .preservesTerms, values: ["kubectl"])
+    let input = "run kubectl apply"
+    #expect(
+        RuleChecker.check(
+            rule, output: "Run kubectl apply.", input: input, protectedTerms: []
+        ).passed
+    )
+    // A mangled term is exactly what the shipping verifier exists to catch.
+    #expect(
+        !RuleChecker.check(
+            rule, output: "Run kubectl apply, i.e. kubect1 apply.", input: input,
+            protectedTerms: []
+        ).passed
+    )
+}
+
+@Test func preservesTermsFallsBackToTheCaseTerms() {
+    let rule = EvalRule(kind: .preservesTerms)
+    #expect(
+        RuleChecker.check(
+            rule, output: "Ship SwiftPM today.", input: "ship SwiftPM today",
+            protectedTerms: ["SwiftPM"]
+        ).passed
+    )
+}
+
+// MARK: - maxWords
+
+@Test func maxWordsCountsLatinWords() {
+    let rule = EvalRule(kind: .maxWords, limit: 5)
+    #expect(RuleChecker.check(rule, output: "one two three", input: "", protectedTerms: []).passed)
+    #expect(
+        !RuleChecker.check(
+            rule, output: "one two three four five six", input: "", protectedTerms: []
+        ).passed
+    )
+}
+
+@Test func maxWordsCountsHanCharactersIndividually() {
+    // Counting whitespace-delimited tokens would score any Chinese answer as
+    // one word, making the "model answered the question" guard useless.
+    #expect(RuleChecker.wordCount("周六。") == 2)
+    #expect(RuleChecker.wordCount("今天天气很好") == 6)
+    let rule = EvalRule(kind: .maxWords, limit: 3)
+    #expect(!RuleChecker.check(rule, output: "今天天气很好", input: "", protectedTerms: []).passed)
+}
+
+@Test func wordCountIgnoresPunctuationAndSpacing() {
+    #expect(RuleChecker.wordCount("Hello,   world!") == 2)
+    #expect(RuleChecker.wordCount("  ") == 0)
+    #expect(RuleChecker.wordCount("") == 0)
+}
+
+@Test func wordCountTreatsMixedScriptsAdditively() {
+    // Code-switching cases lean on this: 2 Han + 2 Latin.
+    #expect(RuleChecker.wordCount("打开 GitHub 的 repo") == 4)
+}
+
+// MARK: - Edit distance
+
+@Test func editDistanceIsZeroForIdenticalStrings() {
+    #expect(RuleChecker.normalizedEditDistance("same", "same") == 0)
+    #expect(RuleChecker.normalizedEditDistance("", "") == 0)
+}
+
+@Test func editDistanceIsOneWhenOneSideIsEmpty() {
+    #expect(RuleChecker.normalizedEditDistance("", "text") == 1)
+    #expect(RuleChecker.normalizedEditDistance("text", "") == 1)
+}
+
+@Test func editDistanceIsNormalizedAgainstTheLongerString() {
+    // One substitution in four characters.
+    #expect(abs(RuleChecker.normalizedEditDistance("abcd", "abce") - 0.25) < 0.0001)
+    // One insertion into three characters.
+    #expect(abs(RuleChecker.normalizedEditDistance("abc", "abcd") - 0.25) < 0.0001)
+}
+
+@Test func editDistanceIsSymmetric() {
+    let forward = RuleChecker.normalizedEditDistance("kitten", "sitting")
+    let backward = RuleChecker.normalizedEditDistance("sitting", "kitten")
+    #expect(forward == backward)
+}
+
+// MARK: - Summary arithmetic
+
+private func result(
+    id: String, rules: [Bool], validatorRule: String? = nil, error: String? = nil
+) -> CaseResult {
+    CaseResult(
+        caseID: id,
+        category: "test",
+        language: .english,
+        input: "in",
+        reference: "ref",
+        output: "out",
+        validatorRule: validatorRule,
+        ruleOutcomes: rules.map { RuleOutcome(label: "r", passed: $0) },
+        editDistance: 0.1,
+        latency: .milliseconds(100),
+        error: error
+    )
+}
+
+@Test func aCaseFailsWhenTheShippingValidatorRejectsItEvenIfEveryRulePassed() {
+    // The user sees no error in this case — the app quietly delivers the
+    // stage-2 text — so the eval has to be the thing that notices.
+    let rejected = result(id: "a", rules: [true, true], validatorRule: "meta-text")
+    #expect(!rejected.passed)
+    #expect(result(id: "b", rules: [true, true]).passed)
+}
+
+@Test func aCaseFailsWhenTheProviderErrored() {
+    #expect(!result(id: "c", rules: [], error: "timedOut").passed)
+}
+
+@Test func hardRulePassRateCountsRulesNotCases() {
+    // AC-4 is written against rule checks, so a case with many rules weighs
+    // more than one with a single rule.
+    let summary = EvalSummary(results: [
+        result(id: "a", rules: [true, true, true, true]),
+        result(id: "b", rules: [false]),
+    ])
+    #expect(summary.rulesChecked == 5)
+    #expect(summary.rulesPassed == 4)
+    #expect(abs(summary.hardRulePassRate - 0.8) < 0.0001)
+    #expect(summary.casePassRate == 0.5)
+    #expect(!summary.meetsAcceptanceCriterion)
+}
+
+@Test func acceptanceCriterionIsNinetyPercentOfRules() {
+    let nine = (0..<9).map { result(id: "p\($0)", rules: [true]) }
+    let one = [result(id: "f", rules: [false])]
+    #expect(EvalSummary(results: nine + one).meetsAcceptanceCriterion)
+    let eight = (0..<8).map { result(id: "p\($0)", rules: [true]) }
+    #expect(!EvalSummary(results: eight + [result(id: "f1", rules: [false, false])])
+        .meetsAcceptanceCriterion)
+}
+
+@Test func summaryOfNoResultsDoesNotDivideByZero() {
+    let summary = EvalSummary(results: [])
+    #expect(summary.hardRulePassRate == 0)
+    #expect(summary.casePassRate == 0)
+    #expect(summary.medianLatencyMilliseconds == 0)
+}
+
+@Test func percentileUsesNearestRank() {
+    #expect(EvalSummary.percentile([1, 2, 3, 4], 0.5) == 2)
+    #expect(EvalSummary.percentile([1, 2, 3, 4], 0.95) == 4)
+    #expect(EvalSummary.percentile([], 0.5) == nil)
+}
+
+@Test func durationConvertsToMilliseconds() {
+    #expect(abs(EvalSummary.milliseconds(.milliseconds(250)) - 250) < 0.001)
+    #expect(abs(EvalSummary.milliseconds(.seconds(2)) - 2000) < 0.001)
+}
+
+// MARK: - Case loading
+
+@Test func caseDecodingFillsOptionalFields() throws {
+    let json = """
+        [{"id":"en-001","category":"fillers","language":"en",
+          "input":"um hello","reference":"Hello.",
+          "rules":[{"kind":"mustNotContain","values":["um "]}]}]
+        """
+    let cases = try JSONDecoder().decode([EvalCase].self, from: Data(json.utf8))
+    #expect(cases.count == 1)
+    #expect(cases[0].profilePrompt.isEmpty)
+    #expect(cases[0].protectedTerms.isEmpty)
+    #expect(cases[0].language == .english)
+    // The request handed to the provider is the app's own type.
+    #expect(cases[0].request.text == "um hello")
+}

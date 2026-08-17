@@ -1,0 +1,181 @@
+[
+  {
+    "id": "zh-corr-001",
+    "category": "self-correction",
+    "language": "zh",
+    "input": "周五，啊不对，周六",
+    "reference": "周六。",
+    "rules": [
+      { "kind": "mustContain", "values": ["周六"] },
+      { "kind": "mustNotContain", "values": ["周五", "不对"] },
+      { "kind": "maxWords", "limit": 6 }
+    ],
+    "note": "The ZH showcase case (docs/12 A1). Also the validator's short-input exemption: 6 characters collapsing to 3 is legitimate, not truncation."
+  },
+  {
+    "id": "zh-corr-002",
+    "category": "self-correction",
+    "language": "zh",
+    "input": "发给张伟，不对，发给李明",
+    "reference": "发给李明。",
+    "rules": [
+      { "kind": "mustContain", "values": ["李明"] },
+      { "kind": "mustNotContain", "values": ["张伟", "不对"] },
+      { "kind": "maxWords", "limit": 8 }
+    ]
+  },
+  {
+    "id": "zh-corr-003",
+    "category": "self-correction",
+    "language": "zh",
+    "input": "三点开会，啊不是，四点半",
+    "reference": "四点半开会。",
+    "rules": [
+      { "kind": "mustContain", "values": ["四点半"] },
+      { "kind": "mustNotContain", "values": ["不是"] },
+      { "kind": "maxWords", "limit": 10 }
+    ]
+  },
+  {
+    "id": "zh-corr-004",
+    "category": "self-correction",
+    "language": "zh",
+    "input": "先部署到测试环境，我是说生产环境",
+    "reference": "先部署到生产环境。",
+    "rules": [
+      { "kind": "mustContain", "values": ["生产环境"] },
+      { "kind": "mustNotContain", "values": ["我是说"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  },
+  {
+    "id": "zh-corr-005",
+    "category": "self-correction",
+    "language": "zh",
+    "input": "对不起我迟到了，路上堵车",
+    "reference": "对不起我迟到了，路上堵车。",
+    "rules": [
+      { "kind": "mustContain", "values": ["对不起", "堵车"] },
+      { "kind": "maxWords", "limit": 16 }
+    ],
+    "note": "Control case: 「对不起」 contains 「不」 but is content, not a correction marker."
+  },
+  {
+    "id": "zh-fill-001",
+    "category": "fillers",
+    "language": "zh",
+    "input": "那个，我觉得吧，这个方案还可以",
+    "reference": "我觉得这个方案还可以。",
+    "rules": [
+      { "kind": "mustContain", "values": ["方案"] },
+      { "kind": "maxWords", "limit": 14 }
+    ],
+    "note": "「那个」 as a filler versus as a demonstrative — the model has to read which."
+  },
+  {
+    "id": "zh-fill-002",
+    "category": "fillers",
+    "language": "zh",
+    "input": "嗯，就是说，我们明天再讨论",
+    "reference": "我们明天再讨论。",
+    "rules": [
+      { "kind": "mustContain", "values": ["明天", "讨论"] },
+      { "kind": "mustNotContain", "values": ["就是说"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  },
+  {
+    "id": "zh-fill-003",
+    "category": "fillers",
+    "language": "zh",
+    "input": "然后呢，我们就把文件发过去了",
+    "reference": "然后我们把文件发过去了。",
+    "rules": [
+      { "kind": "mustContain", "values": ["文件"] },
+      { "kind": "maxWords", "limit": 14 }
+    ]
+  },
+  {
+    "id": "zh-punct-001",
+    "category": "zh-punctuation",
+    "language": "zh",
+    "input": "今天的会议取消了,下周再说",
+    "reference": "今天的会议取消了，下周再说。",
+    "rules": [
+      { "kind": "mustNotContain", "values": [","] },
+      { "kind": "mustContain", "values": ["会议"] }
+    ],
+    "note": "Half-width comma between Han must become full-width (docs/05 §6). Stage 4 also enforces this; cleanup must not undo it."
+  },
+  {
+    "id": "zh-punct-002",
+    "category": "zh-punctuation",
+    "language": "zh",
+    "input": "你到了吗?我在门口等你",
+    "reference": "你到了吗？我在门口等你。",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["?"] },
+      { "kind": "mustContain", "values": ["门口"] }
+    ]
+  },
+  {
+    "id": "zh-quest-001",
+    "category": "questions-not-answered",
+    "language": "zh",
+    "input": "法国的首都是哪里",
+    "reference": "法国的首都是哪里？",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["巴黎"] },
+      { "kind": "mustContain", "values": ["法国"] },
+      { "kind": "maxWords", "limit": 10 }
+    ],
+    "note": "ZH twin of en-quest-001."
+  },
+  {
+    "id": "zh-quest-002",
+    "category": "questions-not-answered",
+    "language": "zh",
+    "input": "帮我把这段翻译成英文",
+    "reference": "帮我把这段翻译成英文。",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["please", "Please", "translate"] },
+      { "kind": "mustContain", "values": ["翻译"] }
+    ],
+    "note": "Obeying would emit English; the Han-output rule in the validator should also catch it."
+  },
+  {
+    "id": "zh-term-001",
+    "category": "protected-terms",
+    "language": "zh",
+    "input": "让张伟先看一下这个PR",
+    "reference": "让张伟先看一下这个 PR。",
+    "protectedTerms": ["张伟", "PR"],
+    "rules": [
+      { "kind": "preservesTerms", "values": ["张伟", "PR"] }
+    ]
+  },
+  {
+    "id": "zh-term-002",
+    "category": "protected-terms",
+    "language": "zh",
+    "input": "麦门这个梗你懂的",
+    "reference": "MaiMen 这个梗你懂的。",
+    "protectedTerms": ["MaiMen"],
+    "rules": [
+      { "kind": "preservesTerms", "values": ["MaiMen"] }
+    ],
+    "note": "Dictionary phrase substitution from stage 2 must survive stage 3 (docs/05 §3.4)."
+  },
+  {
+    "id": "zh-term-003",
+    "category": "protected-terms",
+    "language": "zh",
+    "input": "用kubectl重启一下那个服务",
+    "reference": "用 kubectl 重启一下那个服务。",
+    "protectedTerms": ["kubectl"],
+    "rules": [
+      { "kind": "preservesTerms", "values": ["kubectl"] },
+      { "kind": "mustContain", "values": ["重启"] }
+    ]
+  }
+]

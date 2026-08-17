@@ -1,0 +1,109 @@
+[
+  {
+    "id": "style-001",
+    "category": "style-british",
+    "language": "en",
+    "input": "I'll organize the colors in the summary",
+    "reference": "I'll organise the colours in the summary.",
+    "stylePrompt": "Use British spelling.",
+    "rules": [
+      { "kind": "mustContain", "values": ["organise", "colours"] },
+      { "kind": "mustNotContain", "values": ["organize", "colors"] }
+    ],
+    "note": "AC-11: the global style prompt has to actually reach the model."
+  },
+  {
+    "id": "style-002",
+    "category": "style-british",
+    "language": "en",
+    "input": "we should analyze the behavior of the new center",
+    "reference": "We should analyse the behaviour of the new centre.",
+    "stylePrompt": "Use British spelling.",
+    "rules": [
+      { "kind": "mustContain", "values": ["behaviour"] },
+      { "kind": "mustNotContain", "values": ["behavior"] }
+    ]
+  },
+  {
+    "id": "style-003",
+    "category": "style-british",
+    "language": "en",
+    "input": "the license file needs updating",
+    "reference": "The licence file needs updating.",
+    "stylePrompt": "Use British spelling.",
+    "profilePrompt": "Write in a neutral, professional register.",
+    "rules": [
+      { "kind": "mustContain", "values": ["file"] },
+      { "kind": "maxWords", "limit": 10 }
+    ],
+    "note": "Style and profile prompts occupy different slots (docs/05 §3.3); this checks they compose rather than overwrite."
+  },
+  {
+    "id": "style-004",
+    "category": "style-banned-words",
+    "language": "en",
+    "input": "this is a really awesome result honestly",
+    "reference": "This is a very good result.",
+    "stylePrompt": "Never use the words 'awesome' or 'amazing'.",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["awesome", "amazing"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  },
+  {
+    "id": "style-005",
+    "category": "style-banned-words",
+    "language": "en",
+    "input": "the amazing thing is it just works",
+    "reference": "The remarkable thing is it just works.",
+    "stylePrompt": "Never use the words 'awesome' or 'amazing'.",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["amazing"] },
+      { "kind": "mustContain", "values": ["works"] }
+    ],
+    "note": "The banned word is load-bearing here, so the model must substitute rather than delete the clause."
+  },
+  {
+    "id": "style-006",
+    "category": "style-ignored",
+    "language": "en",
+    "input": "git commit dash m fix the color parsing",
+    "reference": "git commit -m fix the color parsing",
+    "profilePrompt": "Verbatim mode: do not reword, do not repunctuate.",
+    "stylePrompt": "",
+    "rules": [
+      { "kind": "mustContain", "values": ["color"] },
+      { "kind": "mustNotContain", "values": ["colour"] }
+    ],
+    "note": "The \"ignore global style\" profile (Terminal): stylePrompt is empty because the profile opted out, so British spelling must NOT appear. Verifies the opt-out reaches the prompt rather than being applied anyway."
+  },
+  {
+    "id": "style-007",
+    "category": "style-ignored",
+    "language": "en",
+    "input": "npm install dash dash save dev typescript",
+    "reference": "npm install --save-dev typescript",
+    "profilePrompt": "Verbatim mode: do not reword, do not repunctuate.",
+    "stylePrompt": "",
+    "protectedTerms": ["typescript"],
+    "rules": [
+      { "kind": "preservesTerms", "values": ["typescript"] },
+      { "kind": "maxWords", "limit": 10 }
+    ],
+    "note": "Verbatim profiles still get spoken-punctuation expansion; they must not get prose polish."
+  },
+  {
+    "id": "style-008",
+    "category": "style-british",
+    "language": "en",
+    "input": "can you check the color of the organizer badge",
+    "reference": "Can you check the colour of the organiser badge?",
+    "stylePrompt": "Use British spelling.",
+    "rules": [
+      { "kind": "mustContain", "values": ["colour"] },
+      { "kind": "mustNotContain", "values": ["Paris"] },
+      { "kind": "maxWords", "limit": 14 }
+    ],
+    "note": "Style applied to a question — the style prompt must not make the model start answering."
+  }
+]

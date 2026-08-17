@@ -1,6 +1,6 @@
 # Vocal — developer entry points. CI and humans use the same commands.
 
-.PHONY: test build generate generate-free mac clean reset-tcc
+.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup
 
 # Build + run all package tests (pure targets work on Linux; full graph on macOS).
 test:
@@ -8,6 +8,17 @@ test:
 
 build:
 	swift build
+
+# Score stage-3 cleanup against the curated case set (docs/05 §7, docs/12 A1).
+# Needs a model serving locally — it is not part of `make test`, which stays
+# hermetic. Writes a checked-in report so prompt changes are diffable.
+#   make eval-cleanup MODEL=qwen2.5:3b-instruct
+MODEL ?= qwen2.5:3b-instruct
+# Model tags carry colons and slashes; neither belongs in a filename.
+MODEL_SLUG = $(subst /,-,$(subst :,-,$(MODEL)))
+EVAL_REPORT ?= docs/benchmarks/cleanup-eval-$(MODEL_SLUG).md
+eval-cleanup:
+	swift run eval-cleanup --model "$(MODEL)" --out "$(EVAL_REPORT)"
 
 # Generate the Xcode project for the app shells (requires: brew install xcodegen).
 generate:
