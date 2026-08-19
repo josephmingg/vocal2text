@@ -87,41 +87,13 @@ public enum RuleChecker {
         guard !needle.isEmpty else { return true }
         let options: String.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
 
+        // The boundary walk itself lives in CoreModels, shared with the
+        // validator's self-correction cues — the two were separate
+        // implementations of the same question, and only one of them had
+        // boundaries at all.
         let isWordLike = needle.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
-        guard isWordLike else {
-            return haystack.range(of: needle, options: options) != nil
-        }
-
-        var searchRange = haystack.startIndex..<haystack.endIndex
-        while let found = haystack.range(of: needle, options: options, range: searchRange) {
-            let leadingOK = found.lowerBound == haystack.startIndex
-                || !isWordCharacter(haystack[haystack.index(before: found.lowerBound)])
-            let trailingOK = found.upperBound == haystack.endIndex
-                || !isWordCharacter(haystack[found.upperBound])
-            if leadingOK && trailingOK {
-                return true
-            }
-            guard found.lowerBound < haystack.endIndex else { break }
-            searchRange = haystack.index(after: found.lowerBound)..<haystack.endIndex
-        }
-        return false
-    }
-
-    /// Whether this character continues a *Latin* word.
-    ///
-    /// Han and Myanmar characters are letters as far as Swift is concerned, but
-    /// they do not extend a Latin token: in 「我们先review一下」 the word `review`
-    /// is bounded by 先 and 一. Counting those as word characters made every
-    /// code-switching case unmatchable — the terms were right there in the
-    /// output and the eval reported them missing.
-    static func isWordCharacter(_ character: Character) -> Bool {
-        guard character.isLetter || character.isNumber || character == "'" || character == "’"
-        else {
-            return false
-        }
-        return !character.unicodeScalars.contains {
-            Unicode.isHanScalar($0) || Unicode.isMyanmarScalar($0)
-        }
+        let boundary: TokenBoundary = isWordLike ? .latinWord : .none
+        return haystack.range(ofToken: needle, boundary: boundary, options: options) != nil
     }
 
     /// Han text has no spaces, so counting space-separated tokens would score
