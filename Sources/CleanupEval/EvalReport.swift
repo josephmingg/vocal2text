@@ -26,18 +26,30 @@ public enum EvalReport {
             |---|---|
             | **Hard-rule pass rate (AC-4 ≥ 90%)** | **\(percent(summary.hardRulePassRate))** \
             \(summary.meetsAcceptanceCriterion ? "✅" : "❌") |
+            | Delivered-text pass rate | \(percent(summary.deliveredRulePassRate)) |
             | Cases fully passing | \(summary.passedCases)/\(summary.total) \
             (\(percent(summary.casePassRate))) |
-            | Rules passing | \(summary.rulesPassed)/\(summary.rulesChecked) |
-            | Validator rejections (would deliver stage-2 text) | \(summary.validatorRejections) |
+            | Cases whose delivered text is acceptable | \
+            \(summary.deliveredPassedCases)/\(summary.total) |
+            | Rules passing (cleanup's own output) | \
+            \(summary.rulesPassed)/\(summary.rulesChecked) |
+            | Rules passing (text the app types) | \
+            \(summary.deliveredRulesPassed)/\(summary.rulesChecked) |
+            | Validator rejections (app delivers stage-2 text) | \(summary.validatorRejections) |
             | Provider errors | \(summary.errors) |
             | Median edit distance to reference | \(twoPlaces(summary.medianEditDistance)) |
             | Latency p50 / p95 | \(summary.medianLatencyMilliseconds) ms / \
             \(summary.p95LatencyMilliseconds) ms |
 
-            A case passes only when the provider answered, the shipping \
-            `OutputValidator` accepted the output, and every hard rule held. Edit \
-            distance is reported, never scored — several wordings can be equally right.
+            Two rates, because they answer different questions. **Hard-rule pass \
+            rate** asks whether cleanup did its job: a case counts only when the \
+            provider answered, the shipping `OutputValidator` accepted the output, \
+            and every hard rule held. AC-4 gates on it. **Delivered-text pass \
+            rate** asks what the user ended up with, scoring the rules against the \
+            text the app actually types — which is the stage-2 transcript whenever \
+            cleanup was rejected or failed (FR-7.3). The gap between them is work \
+            cleanup declined to do rather than damage it caused. Edit distance is \
+            reported, never scored — several wordings can be equally right.
 
 
             """
@@ -55,15 +67,23 @@ public enum EvalReport {
         return out
     }
 
+    /// Both rates per category, so a category that looks weak can be read for
+    /// which kind of weak it is: cleanup getting it wrong, or cleanup backing
+    /// out and leaving the transcript.
     private static func byCategory(_ results: [CaseResult]) -> String {
-        var out = "## By category\n\n| Category | Passed | Rules |\n|---|---|---|\n"
+        var out = "## By category\n\n"
+        out += "| Category | Cases | Rules (cleanup) | Rules (delivered) |\n|---|---|---|---|\n"
         let categories = Set(results.map(\.category)).sorted()
         for category in categories {
             let inCategory = results.filter { $0.category == category }
             let rules = inCategory.reduce(0) { $0 + $1.ruleOutcomes.count }
-            let rulesOK = inCategory.reduce(0) { $0 + $1.ruleOutcomes.filter(\.passed).count }
+            let strict = inCategory.reduce(0) { partial, result in
+                guard result.error == nil, result.validatorRule == nil else { return partial }
+                return partial + result.ruleOutcomes.filter(\.passed).count
+            }
+            let delivered = inCategory.reduce(0) { $0 + $1.ruleOutcomes.filter(\.passed).count }
             out += "| \(category) | \(inCategory.filter(\.passed).count)/\(inCategory.count) "
-            out += "| \(rulesOK)/\(rules) |\n"
+            out += "| \(strict)/\(rules) | \(delivered)/\(rules) |\n"
         }
         return out
     }
@@ -73,6 +93,9 @@ public enum EvalReport {
         out += "- Input: `\(result.input)`\n"
         out += "- Reference: `\(result.reference)`\n"
         out += "- Output: `\(result.output ?? "(none)")`\n"
+        if result.deliveredText != result.output {
+            out += "- Delivered: `\(result.deliveredText)` — what the app would type\n"
+        }
         if let error = result.error {
             out += "- **Provider error:** \(error)\n"
         }

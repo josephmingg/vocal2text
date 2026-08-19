@@ -144,9 +144,14 @@ print(
 
     ── Summary ──────────────────────────────────────────────
     Hard-rule pass rate  \(String(format: "%.1f%%", summary.hardRulePassRate * 100)) \
-    \(summary.meetsAcceptanceCriterion ? "✅ meets AC-4" : "❌ below AC-4 (90%)")
-    Cases passing        \(summary.passedCases)/\(summary.total)
-    Validator rejections \(summary.validatorRejections)
+    \(summary.meetsAcceptanceCriterion ? "✅ meets AC-4" : "❌ below AC-4 (90%)") \
+    — did cleanup do its job (\(summary.rulesPassed)/\(summary.rulesChecked))
+    Delivered-text rate  \
+    \(String(format: "%.1f%%", summary.deliveredRulePassRate * 100)) \
+    — what the user ends up with (\(summary.deliveredRulesPassed)/\(summary.rulesChecked))
+    Cases passing        \(summary.passedCases)/\(summary.total) cleanup, \
+    \(summary.deliveredPassedCases)/\(summary.total) delivered
+    Validator rejections \(summary.validatorRejections) (app delivers the transcript)
     Provider errors      \(summary.errors)
     Latency p50 / p95    \(summary.medianLatencyMilliseconds) ms / \
     \(summary.p95LatencyMilliseconds) ms

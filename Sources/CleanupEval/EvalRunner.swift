@@ -9,21 +9,38 @@ public struct CaseResult: Sendable {
     public var language: Language
     public var input: String
     public var reference: String
-    /// Raw provider output, or nil when the call failed outright.
+    /// Raw provider output, or nil when the call failed outright. Kept for
+    /// diagnosis — it is not what gets scored when the validator rejects.
     public var output: String?
-    /// What the shipping validator decided. A rejection means the app would
-    /// have silently delivered the stage-2 text instead — cleanup did nothing,
-    /// which is a failure even though the user sees no error (FR-7.3).
+    /// The text the app would actually type. Cleanup's own output when the
+    /// validator accepted it; the stage-2 transcript when it rejected or the
+    /// provider failed, because that is what FR-7.3 falls back to delivering.
+    public var deliveredText: String
+    /// What the shipping validator decided. A rejection means cleanup did
+    /// nothing and the user got their raw transcript — no error is shown, so
+    /// the eval has to be the thing that notices.
     public var validatorRule: String?
+    /// Scored against `deliveredText`, so an outcome always describes what the
+    /// user ended up with rather than a string the app discarded.
     public var ruleOutcomes: [RuleOutcome]
     public var editDistance: Double?
     public var latency: Duration?
     public var error: String?
 
-    /// A case passes only when the provider answered, the shipping validator
-    /// accepted the output, and every hard rule held.
+    /// Cleanup did its job: the provider answered, the shipping validator
+    /// accepted the output, and every hard rule held. This is the strict
+    /// reading, and the one AC-4 gates on.
     public var passed: Bool {
         error == nil && validatorRule == nil && ruleOutcomes.allSatisfy(\.passed)
+    }
+
+    /// The user ended up with acceptable text, whether or not cleanup is what
+    /// produced it. A correct rejection lands here and not in `passed`: the
+    /// dictation "what's the capital of France" answered as "Paris" is caught
+    /// by the validator, so the user receives their own question back — every
+    /// rule holds, and cleanup contributed nothing.
+    public var deliveredPassed: Bool {
+        ruleOutcomes.allSatisfy(\.passed)
     }
 }
 
@@ -51,6 +68,9 @@ public struct EvalRunner: Sendable {
             input: evalCase.input,
             reference: evalCase.reference,
             output: nil,
+            // The floor for every path: if stage 3 never produces usable text,
+            // the app types the transcript it already had (FR-7.3).
+            deliveredText: evalCase.input,
             validatorRule: nil,
             ruleOutcomes: [],
             editDistance: nil,
@@ -59,36 +79,47 @@ public struct EvalRunner: Sendable {
         )
 
         let started = ContinuousClock.now
-        let response: CleanupResponse
+        let response: CleanupResponse?
         do {
             response = try await provider.cleanup(evalCase.request, timeout: timeout)
         } catch {
+            // No early return: a failed call still delivers something to the
+            // user, and its rules still have to be counted. Returning here
+            // left the case contributing zero checks to *both* sides of the
+            // rate, so a run with provider errors quietly scored itself over a
+            // smaller denominator than the one it was supposed to answer.
             result.error = String(describing: error)
-            result.latency = ContinuousClock.now - started
-            return result
+            response = nil
         }
         result.latency = ContinuousClock.now - started
 
-        // Score what the user would actually receive: the validator strips
-        // reasoning blocks before accepting, and the app delivers that text.
-        switch OutputValidator.validate(
-            output: response.text, input: evalCase.input, language: evalCase.language
-        ) {
-        case .accepted(let cleaned):
-            result.output = cleaned
-        case .rejected(let rule):
+        // Score what the user would actually receive. The validator strips
+        // reasoning blocks before accepting and the app delivers that text; on
+        // a rejection the app delivers the stage-2 transcript unchanged, so
+        // that is what the rules are measured against. Scoring a rejected case
+        // against the string the pipeline threw away would describe an outcome
+        // nobody ever saw.
+        if let response {
             result.output = response.text
-            result.validatorRule = rule
+            switch OutputValidator.validate(
+                output: response.text, input: evalCase.input, language: evalCase.language
+            ) {
+            case .accepted(let cleaned):
+                result.deliveredText = cleaned
+            case .rejected(let rule):
+                result.validatorRule = rule
+            }
         }
 
-        let scored = result.output ?? ""
         result.ruleOutcomes = evalCase.rules.map {
             RuleChecker.check(
-                $0, output: scored, input: evalCase.input,
+                $0, output: result.deliveredText, input: evalCase.input,
                 protectedTerms: evalCase.protectedTerms
             )
         }
-        result.editDistance = RuleChecker.normalizedEditDistance(scored, evalCase.reference)
+        result.editDistance = RuleChecker.normalizedEditDistance(
+            result.deliveredText, evalCase.reference
+        )
         return result
     }
 
@@ -113,8 +144,10 @@ public struct EvalRunner: Sendable {
 public struct EvalSummary: Sendable {
     public var total: Int
     public var passedCases: Int
+    public var deliveredPassedCases: Int
     public var rulesChecked: Int
     public var rulesPassed: Int
+    public var deliveredRulesPassed: Int
     public var validatorRejections: Int
     public var errors: Int
     public var medianEditDistance: Double
@@ -125,8 +158,20 @@ public struct EvalSummary: Sendable {
         total == 0 ? 0 : Double(passedCases) / Double(total)
     }
 
+    /// Did cleanup do its job? A case counts only when stage 3 produced text
+    /// the validator accepted. This is what AC-4 gates on, deliberately: a
+    /// pipeline that rejected everything would be safe and useless, and a
+    /// number that called that success would be measuring the wrong thing.
     public var hardRulePassRate: Double {
         rulesChecked == 0 ? 0 : Double(rulesPassed) / Double(rulesChecked)
+    }
+
+    /// Did the user end up with acceptable text? Scored against what the app
+    /// actually types, which is the stage-2 transcript whenever cleanup was
+    /// rejected or failed. Always at least `hardRulePassRate`; the gap between
+    /// them is the work cleanup declined to do — safely.
+    public var deliveredRulePassRate: Double {
+        rulesChecked == 0 ? 0 : Double(deliveredRulesPassed) / Double(rulesChecked)
     }
 
     public var meetsAcceptanceCriterion: Bool { hardRulePassRate >= 0.9 }
@@ -134,17 +179,21 @@ public struct EvalSummary: Sendable {
     public init(results: [CaseResult]) {
         total = results.count
         passedCases = results.filter(\.passed).count
+        deliveredPassedCases = results.filter(\.deliveredPassed).count
         rulesChecked = results.reduce(0) { $0 + $1.ruleOutcomes.count }
-        // Rules only count as passed on output the user would actually receive.
-        // A rejected or errored case delivered nothing, and `mustNotContain`
-        // passes vacuously against nothing — the qwen3:8b run scored 64% with
-        // zero usable outputs, because every "must not contain" rule held
-        // against an empty string. A model that produces nothing must score
-        // nothing.
+        // The strict count: only cleanup's own accepted output earns credit.
+        // Rules are now scored against the delivered text, so a rejected case
+        // is measured against the raw transcript rather than against nothing —
+        // which is what the vacuous-pass guard was really protecting against.
+        // The qwen3:8b run that scored 64% with zero usable outputs did so
+        // because every "must not contain" rule held against an empty string;
+        // measured against the transcript the user actually received, those
+        // same cases fail on their fillers and punctuation, honestly.
         rulesPassed = results.reduce(0) { partial, result in
             guard result.error == nil, result.validatorRule == nil else { return partial }
             return partial + result.ruleOutcomes.filter(\.passed).count
         }
+        deliveredRulesPassed = results.reduce(0) { $0 + $1.ruleOutcomes.filter(\.passed).count }
         validatorRejections = results.filter { $0.validatorRule != nil }.count
         errors = results.filter { $0.error != nil }.count
 
