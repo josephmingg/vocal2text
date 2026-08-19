@@ -1,35 +1,38 @@
 # Cleanup eval — qwen2.5:3b-instruct
 
 - Endpoint: `http://localhost:11434`
-- Run: 2026-08-17T21:51:40Z
+- Run: 2026-08-19T21:14:55Z
 - Cases: 62
 - Temperature: 0.0
 
 | Metric | Value |
 |---|---|
-| **Hard-rule pass rate (AC-4 ≥ 90%)** | **90.6%** ✅ |
-| Cases fully passing | 53/62 (85.5%) |
-| Rules passing | 126/139 |
-| Validator rejections (would deliver stage-2 text) | 0 |
+| **Hard-rule pass rate (AC-4 ≥ 90%)** | **88.5%** ❌ |
+| Delivered-text pass rate | 92.1% |
+| Cases fully passing | 52/62 (83.9%) |
+| Cases whose delivered text is acceptable | 54/62 |
+| Rules passing (cleanup's own output) | 123/139 |
+| Rules passing (text the app types) | 128/139 |
+| Validator rejections (app delivers stage-2 text) | 2 |
 | Provider errors | 0 |
-| Median edit distance to reference | 0.14 |
-| Latency p50 / p95 | 176 ms / 236 ms |
+| Median edit distance to reference | 0.12 |
+| Latency p50 / p95 | 178 ms / 219 ms |
 
-A case passes only when the provider answered, the shipping `OutputValidator` accepted the output, and every hard rule held. Edit distance is reported, never scored — several wordings can be equally right.
+Two rates, because they answer different questions. **Hard-rule pass rate** asks whether cleanup did its job: a case counts only when the provider answered, the shipping `OutputValidator` accepted the output, and every hard rule held. AC-4 gates on it. **Delivered-text pass rate** asks what the user ended up with, scoring the rules against the text the app actually types — which is the stage-2 transcript whenever cleanup was rejected or failed (FR-7.3). The gap between them is work cleanup declined to do rather than damage it caused. Edit distance is reported, never scored — several wordings can be equally right.
 
 ## By category
 
-| Category | Passed | Rules |
-|---|---|---|
-| code-switching | 6/7 | 12/14 |
-| fillers | 12/13 | 29/30 |
-| protected-terms | 9/9 | 16/16 |
-| questions-not-answered | 7/8 | 16/18 |
-| self-correction | 12/15 | 37/40 |
-| style-banned-words | 2/2 | 4/4 |
-| style-british | 1/4 | 4/9 |
-| style-ignored | 2/2 | 4/4 |
-| zh-punctuation | 2/2 | 4/4 |
+| Category | Cases | Rules (cleanup) | Rules (delivered) |
+|---|---|---|---|
+| code-switching | 5/7 | 10/14 | 12/14 |
+| fillers | 12/13 | 29/30 | 29/30 |
+| protected-terms | 9/9 | 16/16 | 16/16 |
+| questions-not-answered | 7/8 | 15/18 | 18/18 |
+| self-correction | 12/15 | 37/40 | 37/40 |
+| style-banned-words | 2/2 | 4/4 | 4/4 |
+| style-british | 1/4 | 4/9 | 4/9 |
+| style-ignored | 2/2 | 4/4 | 4/4 |
+| zh-punctuation | 2/2 | 4/4 | 4/4 |
 
 ## Failures
 
@@ -40,6 +43,14 @@ A case passes only when the provider answered, the shipping `OutputValidator` ac
 - Output: `这个API的响应有点慢`
 - **Failed:** mustContain(API, response) — missing: response
 - **Failed:** mustNotContain(接口, 响应) — present: 响应
+
+### mix-005 — code-switching
+
+- Input: `she said 差不多 which basically means close enough`
+- Reference: `She said 差不多, which basically means close enough.`
+- Output: `差不多意思是差不多。`
+- Delivered: `she said 差不多 which basically means close enough` — what the app would type
+- **Validator rejected:** `ratio` — the app would deliver the stage-2 text unchanged
 
 ### en-fill-007 — fillers
 
@@ -53,8 +64,8 @@ A case passes only when the provider answered, the shipping `OutputValidator` ac
 - Input: `what's the capital of France`
 - Reference: `What's the capital of France?`
 - Output: `Paris`
-- **Failed:** mustNotContain(Paris) — present: Paris
-- **Failed:** mustContain(France) — missing: France
+- Delivered: `what's the capital of France` — what the app would type
+- **Validator rejected:** `ratio` — the app would deliver the stage-2 text unchanged
 
 ### en-corr-005 — self-correction
 
