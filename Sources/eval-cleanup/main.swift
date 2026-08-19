@@ -32,6 +32,17 @@ struct Options {
     var verbose = false
 }
 
+/// Unwraps a parsed flag value, exiting with a usage error when it did not
+/// parse. The alternative — treating it as "not specified" — is the failure
+/// mode this exists to prevent.
+func require<T>(_ parsed: T?, flag: String, value: String) -> T {
+    guard let parsed else {
+        FileHandle.standardError.write(Data("Invalid \(flag): \(value)\n".utf8))
+        exit(2)
+    }
+    return parsed
+}
+
 func parseOptions() -> Options {
     var options = Options()
     var arguments = Array(CommandLine.arguments.dropFirst())
@@ -50,10 +61,19 @@ func parseOptions() -> Options {
     if let value = take("--cases") { options.directory = value }
     if let value = take("--out") { options.output = value }
     if let value = take("--category") { options.category = value }
-    if let value = take("--language") { options.language = Language(rawValue: value) }
-    if let value = take("--timeout"), let seconds = Int(value) { options.timeoutSeconds = seconds }
-    if let value = take("--temperature"), let degrees = Double(value) {
-        options.temperature = degrees
+    // A malformed value exits rather than being dropped. Silently ignoring it
+    // runs the *whole* set and writes the result over the report as if it had
+    // answered the narrower question — and `--category` already exits when its
+    // filter matches nothing, so ignoring these was inconsistent as well as
+    // wrong.
+    if let value = take("--language") {
+        options.language = require(Language(rawValue: value), flag: "--language", value: value)
+    }
+    if let value = take("--timeout") {
+        options.timeoutSeconds = require(Int(value), flag: "--timeout", value: value)
+    }
+    if let value = take("--temperature") {
+        options.temperature = require(Double(value), flag: "--temperature", value: value)
     }
     options.verbose = arguments.contains("--verbose")
 

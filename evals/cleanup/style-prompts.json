@@ -33,10 +33,11 @@
     "stylePrompt": "Use British spelling.",
     "profilePrompt": "Write in a neutral, professional register.",
     "rules": [
-      { "kind": "mustContain", "values": ["file"] },
+      { "kind": "mustContain", "values": ["licence", "file"] },
+      { "kind": "mustNotContain", "values": ["license"] },
       { "kind": "maxWords", "limit": 10 }
     ],
-    "note": "Style and profile prompts occupy different slots (docs/05 §3.3); this checks they compose rather than overwrite."
+    "note": "Style and profile prompts occupy different slots (docs/05 §3.3); this checks they compose rather than overwrite. The spelling assertions are what make that checkable: without them a model that ignored the style prompt entirely still passed this case, so the composition claim was never actually tested."
   },
   {
     "id": "style-004",
@@ -100,10 +101,11 @@
     "reference": "Can you check the colour of the organiser badge?",
     "stylePrompt": "Use British spelling.",
     "rules": [
-      { "kind": "mustContain", "values": ["colour"] },
-      { "kind": "mustNotContain", "values": ["Paris"] },
+      { "kind": "mustContain", "values": ["colour", "organiser"] },
+      { "kind": "mustNotContain", "values": ["color", "organizer"] },
+      { "kind": "mustNotContain", "values": ["yes", "sure", "certainly"] },
       { "kind": "maxWords", "limit": 14 }
     ],
-    "note": "Style applied to a question — the style prompt must not make the model start answering."
+    "note": "Style applied to a question — the style prompt must not make the model start answering, which is what the yes/sure guard tests. It previously banned \"Paris\", copied from the questions category, where no answer to this question could ever contain it."
   }
 ]

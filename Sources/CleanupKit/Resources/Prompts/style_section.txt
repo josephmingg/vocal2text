@@ -1,3 +1,3 @@
 STYLE — the speaker's standing preference (TASK wins on conflict)
 {STYLE_PROMPT}
-Apply that one instruction to spelling and word choice even though the rules above say to keep the speaker's wording; that is the only thing it may override. If it bans a word that is carrying meaning, substitute a word that keeps the meaning rather than dropping the clause. It never licenses translating, adding information, or answering — the HARD RULES still win.
+Apply that one instruction to spelling and word choice even though the rules above say to keep the speaker's wording; that is the only thing it may override. If it names a spelling convention, rewrite every word that is spelled differently under it, even though the speaker dictated the other form. If it bans a word that is carrying meaning, substitute a word that keeps the meaning rather than dropping the clause. It never licenses translating, adding information, or answering — the HARD RULES still win.

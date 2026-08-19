@@ -11,12 +11,18 @@ public struct PromptAssembler: Sendable {
         static let protectedTerms = "{PROTECTED_TERMS}"
         static let profilePrompt = "{PROFILE_PROMPT}"
         static let stylePrompt = "{STYLE_PROMPT}"
+        /// Lives inside `lang_en.txt`, so it is filled after the language
+        /// rules are spliced in.
+        static let spellingRule = "{SPELLING_RULE}"
     }
 
     private let coreTemplate: String
     private let languageRules: [Language: String]
     /// Wrapper for a non-empty style prompt; see `styleBlock(for:)`.
     private let styleSection: String
+    /// Spelling instruction used when no style prompt is set; see
+    /// `spellingRuleBlock(for:)`.
+    private let spellingDefault: String
 
     /// Loads the bundled templates. A missing resource degrades to an empty
     /// template rather than crashing; the assembler itself never fails.
@@ -28,20 +34,25 @@ public struct PromptAssembler: Sendable {
                 .chinese: Self.loadPrompt(named: "lang_zh"),
                 .burmese: Self.loadPrompt(named: "lang_my"),
             ],
-            styleSection: Self.loadPrompt(named: "style_section")
+            styleSection: Self.loadPrompt(named: "style_section"),
+            spellingDefault: Self.loadPrompt(named: "spelling_default")
         )
     }
 
     /// Injection seam for tests and prompt experiments. `styleSection` defaults
-    /// to a bare passthrough so an injected core template behaves verbatim.
+    /// to a bare passthrough so an injected core template behaves verbatim, and
+    /// `spellingDefault` to nothing at all — an injected template that carries
+    /// no `{SPELLING_RULE}` slot is then unaffected either way.
     public init(
         coreTemplate: String,
         languageRules: [Language: String],
-        styleSection: String = "{STYLE_PROMPT}"
+        styleSection: String = "{STYLE_PROMPT}",
+        spellingDefault: String = ""
     ) {
         self.coreTemplate = coreTemplate
         self.languageRules = languageRules
         self.styleSection = styleSection
+        self.spellingDefault = spellingDefault
     }
 
     /// Convenience for the two-language call sites that predate Burmese.
@@ -61,6 +72,7 @@ public struct PromptAssembler: Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return coreTemplate
             .replacingOccurrences(of: Slot.languageRules, with: rules)
+            .replacingOccurrences(of: Slot.spellingRule, with: spellingRuleBlock(for: request))
             .replacingOccurrences(of: Slot.protectedTerms, with: protectedTermsBlock(for: request))
             .replacingOccurrences(of: Slot.profilePrompt, with: block(request.profilePrompt))
             .replacingOccurrences(of: Slot.stylePrompt, with: styleBlock(for: request))
@@ -95,6 +107,32 @@ public struct PromptAssembler: Sendable {
     /// back translated (eval `mix-002`, `mix-007`) and an English dictation
     /// came back in Chinese outright (`en-corr-010`, rejected by the validator
     /// as `language-mismatch`). No style prompt, no licence.
+    /// "Keep the speaker's spelling variant" — but only when nothing else has
+    /// been asked about spelling.
+    ///
+    /// A style prompt of "Use British spelling." used to be shipped underneath
+    /// a language rule reading "keep the speaker's wording *and spelling
+    /// variant*". Those are a flat contradiction about the same operation, and
+    /// qwen2.5:3b-instruct resolved it by doing nothing whatsoever: eval
+    /// `style-001`, `style-002` and `style-008` came back byte-identical to
+    /// their input, missing even the full stop the model adds everywhere else.
+    /// The STYLE section's override clause was not enough — an override is a
+    /// weaker signal to a small model than never stating the conflict.
+    ///
+    /// Silence is not the answer either. With no style prompt this rule is the
+    /// only thing stopping the model Americanising a British speaker, so it
+    /// ships whenever the STYLE section does not. Exactly one of the two is
+    /// ever present, and spelling has exactly one instruction at a time.
+    /// The slot sits flush against the preceding sentence's full stop, and this
+    /// supplies its own leading space, so dropping the rule leaves one space
+    /// between sentences rather than two.
+    private func spellingRuleBlock(for request: CleanupRequest) -> String {
+        let hasStyle = !request.stylePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !hasStyle else { return "" }
+        let rule = spellingDefault.trimmingCharacters(in: .whitespacesAndNewlines)
+        return rule.isEmpty ? "" : " \(rule)"
+    }
+
     private func styleBlock(for request: CleanupRequest) -> String {
         let trimmed = request.stylePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
