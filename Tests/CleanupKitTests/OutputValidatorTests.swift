@@ -247,3 +247,172 @@ struct BurmeseOutputValidatorTests {
         #expect(result == .rejected(rule: "ratio"))
     }
 }
+
+// MARK: - Self-correction collapses (found by the 2026-08-17 cleanup eval)
+
+@Test func aLongSelfCorrectionMayCollapsePastTheNormalFloor() {
+    // The eval's en-corr-007: 61 chars in, 17 out — 0.28 of the input, so the
+    // flat 0.4 floor rejected every correct answer and the app silently
+    // delivered the uncleaned text instead (FR-7.3).
+    let input = "call her on Tuesday scratch that she's away call her Thursday"
+    #expect(
+        OutputValidator.validate(output: "call her Thursday", input: input, language: .english)
+            == .accepted(cleaned: "call her Thursday")
+    )
+}
+
+@Test func truncationIsStillRejectedWhenACueIsPresent() {
+    // The floor moves to the content after the cue, it does not disappear:
+    // "she's away call her Thursday" is 28 chars, so a two-character answer is
+    // still well under 0.4 of it.
+    let input = "call her on Tuesday scratch that she's away call her Thursday"
+    #expect(
+        OutputValidator.validate(output: "ok", input: input, language: .english)
+            == .rejected(rule: "ratio")
+    )
+}
+
+@Test func aCueDoesNotLicenseExpansion() {
+    // The ceiling stays measured against the whole input.
+    let input = "call her on Tuesday scratch that she's away call her Thursday"
+    let padded = String(repeating: "call her on Thursday please. ", count: 8)
+    #expect(
+        OutputValidator.validate(output: padded, input: input, language: .english)
+            == .rejected(rule: "ratio")
+    )
+}
+
+/// The worst failure the pipeline can produce: the model answers the dictation
+/// instead of cleaning it, and the app types its answer in place of the user's
+/// words. It used to survive validation because the floor only applied above
+/// 60 characters and this question is 28, so a 0.18 collapse had nothing to
+/// clear. Rejecting it delivers the stage-2 transcript — the question the user
+/// actually asked.
+@Test(arguments: [
+    ("Paris", "what's the capital of France", Language.english),
+    ("巴黎", "法国的首都是哪里", Language.chinese),
+])
+func aShortDictationAnsweredInsteadOfCleanedIsRejected(
+    output: String, input: String, language: Language
+) {
+    #expect(
+        OutputValidator.validate(output: output, input: input, language: language)
+            == .rejected(rule: "ratio")
+    )
+}
+
+/// The floor is calibrated so it never rejects a correct answer. These are the
+/// two tightest legitimate collapses in `evals/cleanup` — both short enough to
+/// have had no floor at all before, and both must survive one.
+@Test(arguments: [
+    ("四点半开会。", "三点开会，啊不是，四点半", Language.chinese),
+    ("The file is on the desktop.", "the file is in downloads wait no it's on the desktop",
+     Language.english),
+])
+func theTightestCorrectAnswersInTheEvalSetStillPass(
+    output: String, input: String, language: Language
+) {
+    #expect(
+        OutputValidator.validate(output: output, input: input, language: language)
+            == .accepted(cleaned: output)
+    )
+}
+
+/// A short input that collapses hard for a *reason* keeps its licence: the cue
+/// moves the basis to the surviving half, so `en-corr-009` measures 1.1 rather
+/// than the 0.31 it would score against the whole dictation. At 36 characters
+/// it never met the old floor at all, so this only became load-bearing now.
+/// (`showcaseChineseSelfCorrectionIsAccepted` is the Chinese twin.)
+@Test func aShortSelfCorrectionMayStillCollapsePastTheFloor() {
+    #expect(
+        OutputValidator.validate(
+            output: "I'll drive.", input: "I'll take the train sorry I'll drive",
+            language: .english
+        ) == .accepted(cleaned: "I'll drive.")
+    )
+}
+
+@Test func inputsWithoutACueKeepTheFlatFloor() {
+    let input = String(repeating: "the quarterly numbers came in higher than we planned ", count: 2)
+    #expect(
+        OutputValidator.validate(output: "numbers up", input: input, language: .english)
+            == .rejected(rule: "ratio")
+    )
+}
+
+@Test func everyValidatorCueAppearsInTheShippedPrompt() {
+    // Two lists, one meaning: the prompt tells the model what a cue is, the
+    // validator uses the same set to know a collapse was expected. Drift here
+    // would silently re-break the case above.
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english)
+    ).lowercased()
+    for cue in SelfCorrectionCues.all {
+        #expect(prompt.contains(cue.lowercased()), "prompt is missing cue: \(cue)")
+    }
+}
+
+/// Listing "sorry" as a cue with no condition attached made both evaluated
+/// models delete the apology from "sorry I'm late, the traffic was bad"
+/// (eval cases `en-corr-010` and `zh-corr-005`). A cue is only a cue when
+/// something before it is being replaced; the prompt has to say so, and has
+/// to carry a worked counter-example — a bare rule was not enough for a 3B
+/// model to resist a word sitting right there in the cue list.
+@Test func theCueRuleRequiresSomethingToCorrect() {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english)
+    )
+    #expect(prompt.contains("A cue only counts when"))
+    // A negative example in each script, and each one uses a word from the cue
+    // list as ordinary content — the discrimination is the whole point, so a
+    // rule without a worked negative is not enough for a 3B model.
+    #expect(prompt.contains("Not a correction:"))
+    #expect(prompt.contains("sorry to bother you"))
+    #expect(prompt.contains("不是改正"))
+    #expect(prompt.contains("保留「不对」"))
+}
+
+/// The style slot reached the model but carried no authority: the core prompt
+/// said "Do not rephrase" and the English rules said to keep the speaker's
+/// spelling "unless the task instructions say otherwise" — and a style prompt
+/// is not the task instructions. A literal-minded model was therefore correct
+/// to ignore "Use British spelling", which is what the whole style category
+/// did in the first live runs. AC-11 needs the override stated, not implied.
+@Test func theStyleSectionCanOverrideTheKeepWordingRules() {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english, stylePrompt: "Use British spelling.")
+    )
+    let lowered = prompt.lowercased()
+    #expect(lowered.contains("use british spelling."))
+    #expect(lowered.contains("that is the only thing it may override"))
+    #expect(lowered.contains("unless an instruction below says otherwise"))
+    // A banned word that carries meaning must be substituted, not deleted —
+    // otherwise "the amazing thing is it just works" loses its subject.
+    #expect(lowered.contains("substitute a word that keeps the meaning"))
+    // The escape hatch stays shut: style is not a licence to translate or answer.
+    #expect(lowered.contains("never licenses translating"))
+    #expect(lowered.contains("hard rules still win"))
+}
+
+/// The regression that made shipping the licence unconditionally a mistake.
+///
+/// With no style prompt the section used to render its override paragraph
+/// above a literal "(none)". qwen2.5:3b-instruct took the standing permission
+/// and, with nothing concrete to bind it to, generalised into translation:
+/// `mix-002` and `mix-007` came back with the embedded English rendered as
+/// Chinese, and `en-corr-010` — a plain English sentence — came back in
+/// Chinese outright, which the validator caught as `language-mismatch`. The
+/// section must not exist at all when there is nothing for it to license.
+@Test func noStylePromptMeansNoStyleSectionAtAll() {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english)
+    )
+    let lowered = prompt.lowercased()
+    #expect(!lowered.contains("style"))
+    #expect(!lowered.contains("may override"))
+    #expect(!lowered.contains("substitute a word"))
+    // The blanket prohibition stands unqualified when nothing qualifies it.
+    #expect(lowered.contains("do not rephrase."))
+    // TASK still renders its placeholder — only STYLE disappears.
+    #expect(prompt.contains("(none)"))
+}

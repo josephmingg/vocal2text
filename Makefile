@@ -1,6 +1,6 @@
 # Vocal — developer entry points. CI and humans use the same commands.
 
-.PHONY: test build generate generate-free mac clean reset-tcc
+.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup
 
 # Build + run all package tests (pure targets work on Linux; full graph on macOS).
 test:
@@ -8,6 +8,17 @@ test:
 
 build:
 	swift build
+
+# Score stage-3 cleanup against the curated case set (docs/05 §7, docs/12 A1).
+# Needs a model serving locally — it is not part of `make test`, which stays
+# hermetic. Writes a checked-in report so prompt changes are diffable.
+#   make eval-cleanup MODEL=qwen2.5:3b-instruct
+MODEL ?= qwen2.5:3b-instruct
+# Model tags carry colons and slashes; neither belongs in a filename.
+MODEL_SLUG = $(subst /,-,$(subst :,-,$(MODEL)))
+EVAL_REPORT ?= docs/benchmarks/cleanup-eval-$(MODEL_SLUG).md
+eval-cleanup:
+	swift run eval-cleanup --model "$(MODEL)" --out "$(EVAL_REPORT)"
 
 # Generate the Xcode project for the app shells (requires: brew install xcodegen).
 generate:
@@ -36,6 +47,8 @@ mac: generate
 	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug build
 
+LSREGISTER = /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+
 # Release-build VocalMac and install it to /Applications as Vocal.app.
 # Requires the signing Team to be selected once in Xcode (Signing & Capabilities).
 # The build retries once after a symlink repair: the very first build is the
@@ -52,6 +65,11 @@ install:
 			-derivedDataPath build -allowProvisioningUpdates build; }
 	rm -rf /Applications/Vocal.app
 	ditto build/Build/Products/Release/VocalMac.app /Applications/Vocal.app
+	@# Xcode registers the build product with Launch Services, so Spotlight and
+	@# the Finder offer a second "Vocal" that lives in build/ — indistinguishable
+	@# from the installed one until you launch the wrong copy and wonder why your
+	@# settings are missing. Only /Applications/Vocal.app should be findable.
+	@$(LSREGISTER) -u build/Build/Products/Release/VocalMac.app 2>/dev/null || true
 	@echo "✅ Installed /Applications/Vocal.app — grant mic + Accessibility once for this copy."
 
 # Zip the installed app for sharing to another Mac (AirDrop the zip).

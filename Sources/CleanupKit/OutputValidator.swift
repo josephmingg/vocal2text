@@ -66,11 +66,42 @@ public enum OutputValidator {
         // [0.4, 2.5] bounds, and that is the safe direction for the language
         // most at risk of a model mangling it.
         let longInputThreshold = language.isUnspacedScript ? 20 : 60
-        if inputCount > longInputThreshold {
-            if ratio < 0.4 || ratio > 2.5 {
-                return .rejected(rule: "ratio")
-            }
-        } else if ratio > 4.0 {
+
+        // The lower bound catches truncation, but a self-correction
+        // legitimately discards everything before the cue — "call her on
+        // Tuesday scratch that she's away call her Thursday" → "call her
+        // Thursday" is 0.30 of the input, and no correct answer to that
+        // dictation could clear 0.4. Measure the floor against the content
+        // *after* the last cue instead, which keeps the truncation guard
+        // (a two-word answer still fails) while letting the abandoned half go.
+        //
+        // The floor applies at every length. It used to be inside the
+        // long-input branch, which left short dictations with no lower bound
+        // at all — so the single most damaging failure in the pipeline walked
+        // straight through it: "what's the capital of France" came back as
+        // "Paris", 0.18 of its input, and the app typed the model's answer in
+        // place of the user's words. Nothing about a short dictation makes
+        // that acceptable; shortness only ever justified a looser *ceiling*.
+        //
+        // 0.4 is calibrated against the 62 curated cases: the tightest correct
+        // answer in the set sits at 0.50 of this basis, the answer-instead-of-
+        // clean failures at 0.18. The two mistakes are not symmetric — a false
+        // rejection delivers the stage-2 transcript, which is what the user
+        // actually said (FR-7.3), while a false acceptance replaces their
+        // words with the model's. The bound sits where the cheaper mistake is
+        // the one we make.
+        let floorBasis = SelfCorrectionCues.contentAfterLastCue(in: input).map(\.count)
+            ?? inputCount
+        let floorRatio =
+            floorBasis > 0 ? Double(cleaned.count) / Double(floorBasis) : Double.infinity
+        if floorRatio < 0.4 {
+            return .rejected(rule: "ratio")
+        }
+        // The ceiling stays length-aware and measured against the whole input:
+        // a short dictation may legitimately gain punctuation, capitalisation
+        // and a spelled-out word where a long one cannot, and nothing about a
+        // correction licenses expansion.
+        if ratio > (inputCount > longInputThreshold ? 2.5 : 4.0) {
             return .rejected(rule: "ratio")
         }
 

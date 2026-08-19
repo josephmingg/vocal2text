@@ -93,8 +93,12 @@ struct OpenAICompatibleProviderTests {
     }
 
     @Test func maxTokensNeverStarvesAShortDictation() {
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 0) == 64)
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 10) == 64)
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 500) == 1_000)
+        // The floor is what makes reasoning models usable — see
+        // `maxTokensLeavesRoomForAReasoningModelToThink` in CleanupPipelineTests
+        // for the measurement behind it. Here we only pin that a tiny dictation
+        // is never the thing that starves the budget.
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 0) == 1_024)
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 10) == 1_024)
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 500) == 2_000)
     }
 }

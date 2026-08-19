@@ -1,0 +1,118 @@
+[
+  {
+    "id": "en-fill-001",
+    "category": "fillers",
+    "language": "en",
+    "input": "um so I was thinking uh we should ship on Friday",
+    "reference": "So I was thinking we should ship on Friday.",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["um", "uh"] },
+      { "kind": "mustContain", "values": ["Friday"] },
+      { "kind": "maxWords", "limit": 14 }
+    ]
+  },
+  {
+    "id": "en-fill-002",
+    "category": "fillers",
+    "language": "en",
+    "input": "you know like the thing is we don't have the budget yet",
+    "reference": "The thing is, we don't have the budget yet.",
+    "rules": [
+      { "kind": "mustContain", "values": ["budget"] },
+      { "kind": "maxWords", "limit": 16 }
+    ],
+    "note": "\"like\" and \"you know\" are fillers here; the model must not drop the actual claim."
+  },
+  {
+    "id": "en-fill-003",
+    "category": "fillers",
+    "language": "en",
+    "input": "so basically what I'm saying is the deploy failed twice last night",
+    "reference": "What I'm saying is the deploy failed twice last night.",
+    "rules": [
+      { "kind": "mustContain", "values": ["deploy", "twice"] },
+      { "kind": "maxWords", "limit": 16 }
+    ]
+  },
+  {
+    "id": "en-fill-004",
+    "category": "fillers",
+    "language": "en",
+    "input": "uh can you send me the the invoice again",
+    "reference": "Can you send me the invoice again?",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["uh"] },
+      { "kind": "mustContain", "values": ["invoice"] },
+      { "kind": "maxWords", "limit": 12 }
+    ],
+    "note": "Stutter repair: the doubled \"the the\" should collapse."
+  },
+  {
+    "id": "en-fill-005",
+    "category": "fillers",
+    "language": "en",
+    "input": "I mean it's fine I guess but I'd rather we waited",
+    "reference": "It's fine, but I'd rather we waited.",
+    "rules": [
+      { "kind": "mustContain", "values": ["waited"] },
+      { "kind": "maxWords", "limit": 14 }
+    ]
+  },
+  {
+    "id": "en-fill-006",
+    "category": "fillers",
+    "language": "en",
+    "input": "okay so um let's start with the the first item on the agenda",
+    "reference": "Let's start with the first item on the agenda.",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["um"] },
+      { "kind": "mustContain", "values": ["agenda"] },
+      { "kind": "maxWords", "limit": 14 }
+    ]
+  },
+  {
+    "id": "en-fill-007",
+    "category": "fillers",
+    "language": "en",
+    "input": "hmm right yeah I think that works for me",
+    "reference": "Yes, I think that works for me.",
+    "rules": [
+      { "kind": "mustNotContain", "values": ["hmm"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  },
+  {
+    "id": "en-fill-008",
+    "category": "fillers",
+    "language": "en",
+    "input": "the album number is uh seven I think",
+    "reference": "The album number is seven, I think.",
+    "rules": [
+      { "kind": "mustContain", "values": ["album", "number"] },
+      { "kind": "maxWords", "limit": 12 }
+    ],
+    "note": "Guards the scorer as much as the model: \"album\" and \"number\" both contain \"um\", so a substring-based filler check would fail a correct output."
+  },
+  {
+    "id": "en-fill-009",
+    "category": "fillers",
+    "language": "en",
+    "input": "sort of a rough draft you know nothing final",
+    "reference": "A rough draft, nothing final.",
+    "rules": [
+      { "kind": "mustContain", "values": ["draft"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  },
+  {
+    "id": "en-fill-010",
+    "category": "fillers",
+    "language": "en",
+    "input": "well anyway I'll circle back once the numbers land",
+    "reference": "I'll circle back once the numbers land.",
+    "rules": [
+      { "kind": "mustContain", "values": ["circle back"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  }
+]

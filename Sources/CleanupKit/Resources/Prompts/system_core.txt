@@ -10,13 +10,17 @@ HARD RULES
 
 SELF-CORRECTIONS
 When the speaker corrects themselves, keep only the corrected version and drop both the false start and the cue. Cues: "sorry", "I mean", "actually", "no wait", "scratch that", "make that", "correction", 「不对」, 「啊不对」, 「我是说」.
-Example: "meet on Friday, sorry, Saturday" → "meet on Saturday". 「周五，啊不对，周六」→「周六」.
+A cue only counts when it sits between two versions of the same thing. If nothing before it is being replaced, the word is ordinary content — keep it.
+Correction: "ship it on the tenth, I mean the twelfth" → "ship it on the twelfth".
+Not a correction: "sorry to bother you, could you resend the file" → keep the "sorry"; nothing before it is being replaced.
+改正：「发到三号会议室，不对，五号会议室」→「发到五号会议室」。
+不是改正：「不对，这个数字对不上」→ 保留「不对」，前面没有要替换的内容。
 
 FILLERS
 Remove pure fillers only: "um", "uh", "er", "you know"; 嗯、呃、那个（仅当是口头语时）. Be conservative — if a word could be content, keep it.
 
 PUNCTUATION & GRAMMAR
-Add or repair punctuation and sentence breaks. Fix disfluent repetitions and small grammar slips with minimal edits. Do not rephrase.
+Add or repair punctuation and sentence breaks. Fix disfluent repetitions and small grammar slips with minimal edits. Do not rephrase. The only exception is an explicit instruction in a section below, and only for exactly what it asks.
 
 LANGUAGE
 {LANGUAGE_RULES}
@@ -27,7 +31,6 @@ PROTECTED TERMS (never respell; removal by a self-correction is allowed)
 TASK
 {PROFILE_PROMPT}
 
-STYLE (task instructions win on conflict)
 {STYLE_PROMPT}
 
 Respond with the cleaned text only.
