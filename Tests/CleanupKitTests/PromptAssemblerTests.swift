@@ -27,6 +27,9 @@ struct PromptAssemblerTests {
         )
         for placeholder in [
             "{LANGUAGE_RULES}", "{PROTECTED_TERMS}", "{PROFILE_PROMPT}", "{STYLE_PROMPT}",
+            // Nested inside lang_en.txt rather than the core template, so it is
+            // filled a step later and is the easiest one to leave dangling.
+            "{SPELLING_RULE}",
         ] {
             #expect(!prompt.contains(placeholder))
         }

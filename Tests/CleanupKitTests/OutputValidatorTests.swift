@@ -385,7 +385,15 @@ func theTightestCorrectAnswersInTheEvalSetStillPass(
     let lowered = prompt.lowercased()
     #expect(lowered.contains("use british spelling."))
     #expect(lowered.contains("that is the only thing it may override"))
-    #expect(lowered.contains("unless an instruction below says otherwise"))
+    // Stating the override was still not enough, because the English rules went
+    // on saying "keep the speaker's wording *and spelling variant*" underneath
+    // it — a flat contradiction about the same operation, which the model
+    // resolved by doing nothing at all. That clause is now mutually exclusive
+    // with this section; see `theSpellingRuleAndTheStyleSectionAreExclusive`.
+    #expect(!lowered.contains("spelling variant"))
+    // "Use British spelling" names a convention but flags nothing in the input,
+    // so the model has to be told the instruction reaches every affected word.
+    #expect(lowered.contains("rewrite every word that is spelled differently"))
     // A banned word that carries meaning must be substituted, not deleted —
     // otherwise "the amazing thing is it just works" loses its subject.
     #expect(lowered.contains("substitute a word that keeps the meaning"))
@@ -415,4 +423,40 @@ func theTightestCorrectAnswersInTheEvalSetStillPass(
     #expect(lowered.contains("do not rephrase."))
     // TASK still renders its placeholder — only STYLE disappears.
     #expect(prompt.contains("(none)"))
+    // With nothing else asking about spelling, the preservation rule is the
+    // only thing stopping the model Americanising a British speaker, so it is
+    // present here even though it is absent whenever STYLE ships.
+    #expect(lowered.contains("keep the speaker's spelling variant"))
+}
+
+/// Exactly one instruction about spelling reaches the model, whatever the
+/// request looks like.
+///
+/// Two of them is what broke AC-11: "Use British spelling." shipped underneath
+/// "keep the speaker's wording and spelling variant", and qwen2.5:3b-instruct
+/// answered the contradiction by returning `style-001`, `style-002` and
+/// `style-008` byte-identical to their input — not even adding the full stop it
+/// adds everywhere else. Zero of them is the mirror failure: a British speaker
+/// with no style prompt gets quietly Americanised.
+@Test(arguments: ["", "Use British spelling.", "Never use the word 'awesome'."])
+func theSpellingRuleAndTheStyleSectionAreExclusive(style: String) {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english, stylePrompt: style)
+    ).lowercased()
+    let keepsVariant = prompt.contains("keep the speaker's spelling variant")
+    let hasStyleSection = prompt.contains("that is the only thing it may override")
+    #expect(keepsVariant != hasStyleSection, "exactly one must be present, not both or neither")
+    #expect(keepsVariant == style.isEmpty)
+}
+
+/// Dropping the spelling rule must not leave the sentence it sat between with a
+/// doubled space — the slot is flush against the preceding full stop.
+@Test func removingTheSpellingRuleLeavesNoWhitespaceScar() {
+    let prompt = PromptAssembler().systemPrompt(
+        for: CleanupRequest(text: "x", language: .english, stylePrompt: "Use British spelling.")
+    )
+    let languageLine = prompt.split(separator: "\n")
+        .first { $0.hasPrefix("The dictation is in English") }
+    #expect(languageLine != nil)
+    #expect(languageLine?.contains("  ") == false)
 }
