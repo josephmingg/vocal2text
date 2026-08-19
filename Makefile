@@ -47,6 +47,8 @@ mac: generate
 	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug build
 
+LSREGISTER = /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+
 # Release-build VocalMac and install it to /Applications as Vocal.app.
 # Requires the signing Team to be selected once in Xcode (Signing & Capabilities).
 # The build retries once after a symlink repair: the very first build is the
@@ -63,6 +65,11 @@ install:
 			-derivedDataPath build -allowProvisioningUpdates build; }
 	rm -rf /Applications/Vocal.app
 	ditto build/Build/Products/Release/VocalMac.app /Applications/Vocal.app
+	@# Xcode registers the build product with Launch Services, so Spotlight and
+	@# the Finder offer a second "Vocal" that lives in build/ — indistinguishable
+	@# from the installed one until you launch the wrong copy and wonder why your
+	@# settings are missing. Only /Applications/Vocal.app should be findable.
+	@$(LSREGISTER) -u build/Build/Products/Release/VocalMac.app 2>/dev/null || true
 	@echo "✅ Installed /Applications/Vocal.app — grant mic + Accessibility once for this copy."
 
 # Zip the installed app for sharing to another Mac (AirDrop the zip).
