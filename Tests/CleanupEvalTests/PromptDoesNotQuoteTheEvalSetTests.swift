@@ -51,20 +51,13 @@ struct PromptDoesNotQuoteTheEvalSetTests {
         #expect(!cases.isEmpty)
 
         // Every language's rule block, since a case is scored against whichever
-        // one its language selects — and both style states, because the STYLE
-        // section is rendered only when the user set a style prompt. A prompt
-        // built without one never contains `style_section.txt` at all, so an
-        // example added there would have been invisible to this guard. The
-        // sentinel is deliberately not English prose: its own text must not be
-        // what a needle collides with.
-        let prompts = [Language.english, .chinese, .burmese].flatMap { language in
-            ["", "STYLEPROBE"].map { style in
-                Self.normalized(
-                    PromptAssembler().systemPrompt(
-                        for: CleanupRequest(text: "x", language: language, stylePrompt: style)
-                    )
+        // one its language selects.
+        let prompts = [Language.english, .chinese, .burmese].map { language in
+            Self.normalized(
+                PromptAssembler().systemPrompt(
+                    for: CleanupRequest(text: "x", language: language)
                 )
-            }
+            )
         }
 
         for evalCase in cases {

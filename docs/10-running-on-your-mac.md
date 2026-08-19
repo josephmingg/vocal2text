@@ -122,13 +122,40 @@ migrates to the matching preset on first launch, with nothing to do.
 
 ## Known v1 seams (deliberate, documented)
 
-- HUD waveform shows a synthesized ripple until live mic levels are plumbed.
-- Streaming partial text in the HUD arrives with the WhisperKit streaming pass (v1
-  transcribes on release; preview field exists).
-- Audio files are not yet retained in history (text + metadata are); the retention
-  setting is wired for when capture persistence lands.
+- The HUD waveform shows the real microphone level (Mac stabilization, #19). Still open:
+  streaming partial text — no words appear while you speak until `transcribeStream`
+  partials are wired into the HUD (docs/11 G2; v1 transcribes on release, which is the
+  correctness path).
+- Audio retention shipped in #19: delivered takes are kept as AAC when Settings → "Keep
+  audio" is on, History plays them back, and a cancelled take can be recovered from the
+  menu bar for 24 h — unverified on hardware yet (docs/12 A3).
 - Profiles persist and are edited in Settings → Profiles (docs/11 G17); the built-ins are
   seeded into the database on first launch, so pins and edits survive relaunch.
 - iOS app: main-app dictation with auto-copy delivery, the keyboard extension, share-sheet
   import, and the Live Activity are all built and compile in CI — none of it has run on a
   physical iPhone yet (docs/11 G10).
+
+## One-time cleanup: a second "Vocal" in Spotlight
+
+Installs made before 2026-08-19 left the freshly-built copy under `build/` registered
+with Launch Services, so Spotlight and the Finder offered two identical "Vocal" apps —
+and launching the wrong one runs with empty settings and history. `make install` now
+unregisters the build product automatically, but a Mac that installed earlier needs one
+manual pass:
+
+```bash
+cd ~/path/to/vocal2text     # wherever you cloned the repo
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
+  -u build/Build/Products/Release/VocalMac.app 2>/dev/null
+rm -rf build/Build/Products/Release/VocalMac.app   # optional: delete the copy outright
+```
+
+Then confirm Spotlight finds exactly one Vocal, at `/Applications/Vocal.app`:
+
+```bash
+mdfind "kMDItemKind == 'Application'" -name Vocal
+```
+
+If any other path shows up (an old Xcode DerivedData build, a copy on the Desktop from
+an AirDrop zip), delete it — the only copy that should exist is `/Applications/Vocal.app`,
+because macOS keys Microphone and Accessibility permissions to that installed copy.
