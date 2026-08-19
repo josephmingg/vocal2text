@@ -257,13 +257,19 @@ import Testing
 private func result(
     id: String, rules: [Bool], validatorRule: String? = nil, error: String? = nil
 ) -> CaseResult {
-    CaseResult(
+    // Mirror the runner: the app types cleanup's own output only when the
+    // validator accepted it, and the stage-2 transcript otherwise (FR-7.3).
+    // A helper that always claimed the cleaned text was delivered would let
+    // `deliveredPassed` drift away from what it means in production.
+    let accepted = validatorRule == nil && error == nil
+    return CaseResult(
         caseID: id,
         category: "test",
         language: .english,
         input: "in",
         reference: "ref",
         output: "out",
+        deliveredText: accepted ? "out" : "in",
         validatorRule: validatorRule,
         ruleOutcomes: rules.map { RuleOutcome(label: "r", passed: $0) },
         editDistance: 0.1,
