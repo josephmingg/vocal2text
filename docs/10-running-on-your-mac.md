@@ -159,3 +159,70 @@ mdfind "kMDItemKind == 'Application'" -name Vocal
 If any other path shows up (an old Xcode DerivedData build, a copy on the Desktop from
 an AirDrop zip), delete it — the only copy that should exist is `/Applications/Vocal.app`,
 because macOS keys Microphone and Accessibility permissions to that installed copy.
+
+## Sharing Vocal with another Mac
+
+Field-verified: this is how the second machine got its copy. Vocal is personally signed
+rather than notarized, so the recipient does one extra step Apple would otherwise do for
+you — see *why the quarantine step* below.
+
+**Their Mac needs:** Apple Silicon (M1 or later) and **macOS 14 Sonoma or later**. The
+Release build links `arm64` only, so an Intel Mac will refuse to launch it. Confirm what
+you built with:
+
+```bash
+lipo -archs /Applications/Vocal.app/Contents/MacOS/VocalMac
+```
+
+### On your Mac
+
+```bash
+cd ~/vocal2text
+make share
+```
+
+`share` depends on `install`, so it rebuilds and reinstalls your own copy first, then
+writes `~/Desktop/Vocal.zip`. AirDrop that zip.
+
+### On their Mac
+
+1. Double-click the zip to unpack `Vocal.app`.
+2. Drag `Vocal.app` into **Applications**. It has to live there — permissions are keyed
+   to the installed copy, so running it from Downloads means re-granting later.
+3. Strip the quarantine flag AirDrop attached:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Vocal.app
+   ```
+
+4. Launch it from Applications. Onboarding asks for **Microphone**, then
+   **Accessibility** (one grant covers both the hotkey listener and text insertion —
+   Input Monitoring is never requested).
+5. The first dictation downloads Whisper large-v3-turbo (~626 MB, once, needs internet).
+   The HUD shows the progress. Everything after that is offline.
+
+### Why the quarantine step
+
+Vocal is signed with a personal **Apple Development** certificate, not a Developer ID
+certificate, and it is not notarized — deliberate, per docs/03 §3.4: this is a personal
+app, not a distributed product. Anything arriving by AirDrop gets tagged
+`com.apple.quarantine`, and Gatekeeper refuses to launch a quarantined app that is not
+notarized ("cannot be opened because the developer cannot be verified"). Removing the
+attribute takes the app out of Gatekeeper's scope entirely, which is why this works where
+right-click → Open sometimes still fights you.
+
+### What they get, and what stays yours
+
+- **Nothing is shared at runtime.** History, settings, dictionary, and profiles live in
+  each machine's own `~/Library/Application Support/Vocal/`. There is no sync (M8 is
+  unbuilt), so their dictation never touches your data.
+- **AI cleanup ships off.** They do not need Ollama. If they want it, they install Ollama
+  and pull a model on *their* Mac, then turn it on in Settings → Cleanup.
+- **Burmese is optional.** Pinning မြန်မာ triggers its own ~790 MB download on their
+  machine, only if they ask for it.
+
+### Updating their copy later
+
+Repeat the same flow: `make share`, AirDrop, replace the app in Applications, re-strip
+quarantine. Because the signing identity is unchanged, macOS keeps their existing
+Microphone and Accessibility grants — they will not be asked again.
