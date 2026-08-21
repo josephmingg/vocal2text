@@ -65,11 +65,18 @@ install:
 			-derivedDataPath build -allowProvisioningUpdates build; }
 	rm -rf /Applications/Vocal.app
 	ditto build/Build/Products/Release/VocalMac.app /Applications/Vocal.app
-	@# Xcode registers the build product with Launch Services, so Spotlight and
-	@# the Finder offer a second "Vocal" that lives in build/ — indistinguishable
-	@# from the installed one until you launch the wrong copy and wonder why your
-	@# settings are missing. Only /Applications/Vocal.app should be findable.
+	@# Xcode registers the build product with Launch Services, so the Finder and
+	@# Spotlight offer a second app — "VocalMac", beside the installed "Vocal" —
+	@# indistinguishable until you launch the wrong copy and wonder why your
+	@# settings and history are missing.
+	@#
+	@# Unregistering is not enough on its own: Launch Services and Spotlight are
+	@# separate indexes, and Spotlight indexes the bundle sitting on disk no
+	@# matter what Launch Services thinks. So do both — drop the registration,
+	@# then delete the bundle. ditto has already copied it to /Applications, and
+	@# the next build recreates it from the intermediates, which stay put.
 	@$(LSREGISTER) -u build/Build/Products/Release/VocalMac.app 2>/dev/null || true
+	rm -rf build/Build/Products/Release/VocalMac.app
 	@echo "✅ Installed /Applications/Vocal.app — grant mic + Accessibility once for this copy."
 
 # Zip the installed app for sharing to another Mac (AirDrop the zip).
