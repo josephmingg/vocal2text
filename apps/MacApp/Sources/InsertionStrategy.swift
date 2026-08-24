@@ -49,11 +49,11 @@ struct InsertionStrategyTable {
     /// snapshot restore. Electron/Chromium targets read the pasteboard late,
     /// so they get extended delays (docs/03 §3.2; Handy's shipped values).
     func pasteDelayMillis(forBundleID bundleID: String?) -> (prePaste: Int, preRestore: Int) {
-        guard let bundleID else { return (prePaste: 100, preRestore: 250) }
+        guard let bundleID else { return Self.defaultDelays }
         if Self.electronBundleIDs.contains(bundleID) {
             return (prePaste: 250, preRestore: 400)
         }
-        return (prePaste: 100, preRestore: 250)
+        return Self.defaultDelays
     }
 
     // MARK: - Built-in defaults (docs/03 §3.2)
@@ -77,5 +77,25 @@ struct InsertionStrategyTable {
         "com.microsoft.VSCode",
         "com.todesktop.230313mzl4w4u92",
         "com.hnc.Discord",
+        // Field-reported (2026-08-24): a take delivered to Claude or Brave
+        // landed in History with nothing pasted, exactly the restore-too-early
+        // failure this table exists to prevent.
+        "com.anthropic.claudefordesktop",
+        "com.brave.Browser",
+        "com.google.Chrome",
+        "com.microsoft.edgemac",
+        "company.thebrowser.Browser",
+        "com.openai.chat",
+        "notion.id",
+        "md.obsidian",
     ]
+
+    /// Applied to every target not named above. `preRestore` is deliberately
+    /// generous: it runs *after* the ⌘V, so lengthening it costs the user no
+    /// perceived latency — the text has already landed — while a too-short
+    /// value is unrecoverable, since the app pastes whatever the pasteboard
+    /// holds when it finally reads it. An unlisted Electron/Chromium target is
+    /// the common case (there is no reliable way to enumerate them all), so
+    /// the default must survive one.
+    private static let defaultDelays = (prePaste: 100, preRestore: 400)
 }
