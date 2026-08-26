@@ -277,7 +277,7 @@ final class AppState: ObservableObject {
                     ),
                     clipboard: ClipboardManager()
                 ),
-                onOutcome: { outcome in relay.noteDelivery(outcome) }
+                onOutcome: { outcome, text in relay.noteDelivery(outcome, text: text) }
             ),
             store: DatabaseTranscriptStore(database: database),
             config: settings,
@@ -610,6 +610,54 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Auto-learned vocabulary (docs/15 step 27)
+
+    /// The pending "Add 'X' to your dictionary?" proposal, surfaced in the
+    /// menu bar. Replaced by newer proposals; cleared when accepted.
+    @Published private(set) var vocabularySuggestion: VocabularySuggestor.Suggestion?
+    private var lastDeliveryForLearning: (text: String, at: Date)?
+
+    private func noteDeliveredForLearning(_ text: String) {
+        defer { lastDeliveryForLearning = (text, Date()) }
+        guard let previous = lastDeliveryForLearning else { return }
+        guard
+            let suggestion = VocabularySuggestor.suggestion(
+                previousText: previous.text,
+                currentText: text,
+                gapSeconds: Date().timeIntervalSince(previous.at)
+            )
+        else { return }
+        // Skip proposals the dictionary already answers.
+        let existing = (try? database?.dictionaryEntries()) ?? []
+        guard !existing.contains(where: {
+            $0.spoken.lowercased() == suggestion.spoken.lowercased()
+        }) else { return }
+        vocabularySuggestion = suggestion
+        showNotice("New word? The menu bar can add “\(suggestion.written)” to your dictionary")
+    }
+
+    /// The user accepted the proposal: it becomes an ordinary dictionary
+    /// entry, applied by stage 2 from the next take on.
+    func acceptVocabularySuggestion() {
+        guard let suggestion = vocabularySuggestion, let database else { return }
+        let entry = DictionaryEntry(
+            spoken: suggestion.spoken,
+            written: suggestion.written,
+            createdAt: Date()
+        )
+        do {
+            try database.save(entry)
+            vocabularySuggestion = nil
+            showNotice("Added “\(suggestion.written)” to your dictionary")
+        } catch {
+            showNotice("Could not save the entry: \(error.localizedDescription)")
+        }
+    }
+
+    func dismissVocabularySuggestion() {
+        vocabularySuggestion = nil
+    }
+
     // MARK: - Re-paste + undo (docs/15 step 28)
 
     /// The newest delivered dictation, or nil when history has none — what
@@ -800,12 +848,24 @@ final class AppState: ObservableObject {
 
     /// Delivery outcomes the user must hear about (FR-3.2/3.4/3.6) — invoked
     /// by the deliverer seam before the session finishes the take.
-    func showDelivery(outcome: DeliveryOutcome) {
+    func showDelivery(outcome: DeliveryOutcome, text: String = "") {
         // Reaching delivery means transcription ran, so the model is on disk
         // and loaded — record that, so future launches may preload silently
         // even if onboarding's "Warm up now" was skipped (docs/15 step 13).
         if !settings.modelWarmedOnce {
             settings.modelWarmedOnce = true
+        }
+        // docs/15 step 27: a quick re-dictation that differs by one respelled
+        // span is the user fixing a mis-hearing — propose (never auto-apply)
+        // the dictionary entry. Secure-field takes leave no trace, so they
+        // don't participate.
+        switch outcome {
+        case .blockedSecureField:
+            break
+        case .inserted, .copiedToClipboard:
+            if !text.isEmpty {
+                noteDeliveredForLearning(text)
+            }
         }
         switch outcome {
         case .inserted:
@@ -981,8 +1041,8 @@ private final class ResolutionRelay {
         appState?.showPreview(text)
     }
 
-    func noteDelivery(_ outcome: DeliveryOutcome) {
-        appState?.showDelivery(outcome: outcome)
+    func noteDelivery(_ outcome: DeliveryOutcome, text: String) {
+        appState?.showDelivery(outcome: outcome, text: text)
     }
 
     func noteLowDisk() {
@@ -1014,11 +1074,11 @@ private struct MicrophoneCaptureAdapter: AudioCapturing {
 /// + CGEvent synthesis) must run.
 private struct MacTextDelivering: TextDelivering {
     let deliverer: TextDeliverer
-    let onOutcome: @MainActor (DeliveryOutcome) -> Void
+    let onOutcome: @MainActor (DeliveryOutcome, String) -> Void
 
     func deliver(_ text: String, context: DeliveryContext) async -> DeliveryOutcome {
         let outcome = await deliverer.deliver(text, context: context)
-        await onOutcome(outcome)
+        await onOutcome(outcome, text)
         return outcome
     }
 }

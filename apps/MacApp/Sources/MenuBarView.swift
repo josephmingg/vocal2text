@@ -94,6 +94,23 @@ struct MenuBarView: View {
                 )
             }
 
+            // docs/15 step 27: propose, never auto-apply — the entry the last
+            // re-dictation implied, one click away.
+            if let suggestion = appState.vocabularySuggestion {
+                HStack(spacing: 6) {
+                    Button("Add “\(suggestion.written)” to Dictionary") {
+                        appState.acceptVocabularySuggestion()
+                    }
+                    Button {
+                        appState.dismissVocabularySuggestion()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Dismiss this suggestion")
+                }
+            }
+
             // docs/15 step 28: cheap, loved, and the safety net that makes
             // aggressive cleanup acceptable.
             Button("Paste Last Transcript Again") {
