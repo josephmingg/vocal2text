@@ -10,6 +10,21 @@
 > failure surfacing, W10 provisional short-taps, latency surfacing, structured logging,
 > diagnostics counters, the benchmark harness, and the lint gate — are implemented on
 > this branch, adapted to the v1.1 architecture. Phase 2+ recommendations stand.
+>
+> **Phase 2 status (2026-08-26, this branch):** implemented — step 13 (launch/mode-change
+> preload, gated so it never surprise-downloads), step 14 (Parakeet TDT v2 via FluidAudio
+> 0.9.1, pinned-EN route behind a Settings toggle that ships OFF pending vocal-bench
+> numbers), step 15 (Settings → Models pane; primary model is a live setting, not a
+> hardcoded name), step 16 (Silero VAD via the existing sherpa-onnx dep: silence delivers
+> nothing, the engine decodes only the padded speech envelope; hands-free auto-stop
+> deferred to the Phase 3 streaming work), step 17 in its superseded AX-first form
+> (verified Accessibility insertion, paste as fallback), step 18 (pinned ComputeOptions;
+> quantized-variant comparison remains a vocal-bench exercise), step 19 (real-prompt
+> prewarm, keep_alive, shared URLSession, no press-path probe), step 20 (deterministic
+> skip heuristic, eval-guarded), and adopted steps 48 (dictionary cache), 49 (post-settle
+> archive/history write), 50 (preheated capture engine, hoisted start-path I/O).
+> Step 13's optional idle-unload setting is not built (keep-resident is the default);
+> steps 47 and 51–54 remain open.
 
 **Scope**: a full product + engineering review of Vocal v0.1.1 against the 2026 dictation
 market (Wispr Flow, superwhisper, VoiceInk, Aqua Voice, Handy, MacWhisper), followed by a
