@@ -1,4 +1,5 @@
 import ASRKit
+import ASREngineParakeet
 import ASREngineSherpaOnnx
 import ASREngineWhisperKit
 import AppKit
@@ -86,6 +87,9 @@ final class AppState: ObservableObject {
     /// The docs/15 step 16 VAD; retained so the launch preload can fetch its
     /// (~0.6 MB) model before the first take needs it.
     private let speechDetector: SileroVoiceActivityDetector
+    /// Parakeet fast path (docs/15 step 14); retained for the first-run
+    /// download hint when the pinned-English toggle is on.
+    private let parakeetEngine: ParakeetEngine
 
     /// Whether the configured cleanup provider sends text off-device — drives
     /// the HUD privacy badge (FR-7.4). Ollama at localhost: false. Computed
@@ -140,9 +144,20 @@ final class AppState: ObservableObject {
         // including auto mode, stays on WhisperKit. The routing contract is
         // documented on LanguageRoutingEngine.
         let burmeseEngine = SherpaOnnxEngine(variant: .omnilingual1B)
+        // docs/15 step 14: pinned-English can route to Parakeet TDT v2 on
+        // the Neural Engine (~100× real time). Behind a live toggle read
+        // straight from defaults so a Settings flip applies to the next
+        // dictation; auto mode and pinned ZH stay on WhisperKit, so
+        // code-switching accuracy is untouched.
+        let parakeetEngine = ParakeetEngine()
+        let englishRoute = SwitchedEngine(
+            isOn: { UserDefaults.standard.bool(forKey: SettingsStore.parakeetEnglishDefaultsKey) },
+            on: parakeetEngine,
+            off: engine
+        )
         let routedEngine = LanguageRoutingEngine(
             primary: engine,
-            overrides: [.burmese: burmeseEngine]
+            overrides: [.burmese: burmeseEngine, .english: englishRoute]
         )
         let microphone = MicrophoneCapture()
         // docs/15 step 16: Silero VAD gates and trims each finished take —
@@ -264,6 +279,7 @@ final class AppState: ObservableObject {
         self.burmeseEngine = burmeseEngine
         self.routedEngine = routedEngine
         self.speechDetector = speechDetector
+        self.parakeetEngine = parakeetEngine
         self.profileStore = profileStore
         self.hudState = HUDState(
             mode: .hidden,
@@ -312,6 +328,23 @@ final class AppState: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] mode in
                 self?.preloadEngineIfWarmedBefore(mode: mode)
+            }
+            .store(in: &settingsSinks)
+        // Turning the Parakeet route on warms it right away (docs/15 step
+        // 14) so the first pinned-English dictation after the flip doesn't
+        // pay the download inside the take. Gated on modelWarmedOnce like
+        // every background load.
+        settings.$parakeetEnglishEnabled
+            .dropFirst()
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
+                // Deferred one main-actor turn: @Published emits on willSet,
+                // and the router reads the defaults key that didSet writes.
+                Task { @MainActor [weak self] in
+                    guard let self, self.settings.languageMode == .pinned(.english) else { return }
+                    self.preloadEngineIfWarmedBefore()
+                }
             }
             .store(in: &settingsSinks)
         // Settings → Models switches the primary model live (docs/15 step
@@ -405,11 +438,19 @@ final class AppState: ObservableObject {
         // with this take's generation and dropped when stale (docs/11 G16).
         let engine = engine
         let burmeseEngine = burmeseEngine
+        let parakeetEngine = parakeetEngine
+        let parakeetOn = settings.parakeetEnglishEnabled
         let mode = settings.languageMode
         hintGeneration += 1
         let generation = hintGeneration
         Task { [weak self] in
-            if mode == .pinned(.burmese) {
+            if mode == .pinned(.english), parakeetOn {
+                let loaded = await parakeetEngine.isModelLoaded
+                guard !loaded else { return }
+                guard let self, self.hintGeneration == generation else { return }
+                self.hudState.partialText =
+                    "First Parakeet run: downloading the fast English model (~600 MB) and preparing it — later dictations are instant."
+            } else if mode == .pinned(.burmese) {
                 let loaded = await burmeseEngine.isModelLoaded
                 guard !loaded else { return }
                 let availability = await burmeseEngine.availability(for: .burmese)

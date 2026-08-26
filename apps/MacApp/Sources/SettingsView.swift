@@ -144,6 +144,23 @@ private struct ModelsPane: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+            Section("English fast path") {
+                Toggle(
+                    "Use Parakeet v2 for pinned English",
+                    isOn: $settings.parakeetEnglishEnabled
+                )
+                Text(
+                    """
+                    Parakeet TDT runs on the Neural Engine at roughly 100× \
+                    real time — the docs/15 raw-speed lever. Applies to the \
+                    next dictation with the language pinned to English; Auto, \
+                    中文, and မြန်မာ keep their engines. First use downloads \
+                    ~600 MB (FluidAudio manages its own files).
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
             Section("Downloaded models") {
                 if localRows.isEmpty {
                     Text("No locally managed models are installed yet.")

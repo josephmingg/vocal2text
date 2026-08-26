@@ -75,6 +75,18 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(whisperKitModel, forKey: Keys.whisperKitModel) }
     }
 
+    /// docs/15 step 14: route pinned-English dictations to Parakeet TDT v2
+    /// on the Neural Engine. Ships OFF until the owner benchmarks it with
+    /// vocal-bench; the routing seam reads the defaults key directly (see
+    /// `parakeetEnglishDefaultsKey`) so a flip applies to the next dictation.
+    @Published var parakeetEnglishEnabled: Bool {
+        didSet { Self.defaults.set(parakeetEnglishEnabled, forKey: Keys.parakeetEnglish) }
+    }
+
+    /// The raw defaults key behind `parakeetEnglishEnabled`, read by the
+    /// engine router off the main actor (UserDefaults is thread-safe).
+    nonisolated static var parakeetEnglishDefaultsKey: String { Keys.parakeetEnglish }
+
     /// Set by the composition root once the database opens; dictionary lookups
     /// degrade to empty when the store is unavailable.
     var database: DatabaseStore?
@@ -106,6 +118,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
         whisperKitModel =
             defaults.string(forKey: Keys.whisperKitModel) ?? WhisperKitEngine.defaultModelName
+        parakeetEnglishEnabled = defaults.object(forKey: Keys.parakeetEnglish) as? Bool ?? false
 
         // Settle the legacy hotkey migration on first launch so later reads are
         // plain decodes. `didSet` does not fire from `init`, hence the explicit
@@ -198,6 +211,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
         static let whisperKitModel = "settings.whisperKitModel"
+        static let parakeetEnglish = "settings.parakeetEnglish"
         static let modelWarmedOnce = "settings.modelWarmedOnce"
     }
 }

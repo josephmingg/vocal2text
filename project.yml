@@ -226,6 +226,7 @@ targets:
           - ASREngineWhisperKit
           - ASREngineAppleSpeech
           - ASREngineSherpaOnnx
+          - ASREngineParakeet
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vocal.mac

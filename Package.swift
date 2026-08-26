@@ -28,6 +28,22 @@ let sherpaOnnxDependencies: [Package.Dependency] = []
 let sherpaOnnxProducts: [Target.Dependency] = []
 #endif
 
+// FluidAudio (the Parakeet TDT fast path, docs/15 step 14) is Apple-only —
+// CoreML models on the Neural Engine — so it gets the same host-conditioned
+// treatment as sherpa-onnx, and the same deliberate exact pin: the adapter is
+// written against v0.9.1's AsrModels/AsrManager signatures.
+#if canImport(Darwin)
+let fluidAudioDependencies: [Package.Dependency] = [
+    .package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.9.1")
+]
+let fluidAudioProducts: [Target.Dependency] = [
+    .product(name: "FluidAudio", package: "FluidAudio", condition: .when(platforms: [.macOS, .iOS]))
+]
+#else
+let fluidAudioDependencies: [Package.Dependency] = []
+let fluidAudioProducts: [Target.Dependency] = []
+#endif
+
 let package = Package(
     name: "DictationCore",
     platforms: [
@@ -52,12 +68,13 @@ let package = Package(
         .library(name: "ASREngineWhisperKit", targets: ["ASREngineWhisperKit"]),
         .library(name: "ASREngineAppleSpeech", targets: ["ASREngineAppleSpeech"]),
         .library(name: "ASREngineSherpaOnnx", targets: ["ASREngineSherpaOnnx"]),
+        .library(name: "ASREngineParakeet", targets: ["ASREngineParakeet"]),
         .executable(name: "vocal-bench", targets: ["VocalBench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.0.0"),
-    ] + sherpaOnnxDependencies,
+    ] + sherpaOnnxDependencies + fluidAudioDependencies,
     targets: [
         // ── Pure targets (Linux + Apple) ────────────────────────────────
         .target(name: "CoreModels"),
@@ -102,6 +119,12 @@ let package = Package(
         .target(
             name: "ASREngineSherpaOnnx",
             dependencies: ["CoreModels", "ASRKit", "ModelStore"] + sherpaOnnxProducts
+        ),
+        // Parakeet TDT fast path (docs/15 step 14): FluidAudio's CoreML
+        // models on the Neural Engine, routed for pinned-English takes.
+        .target(
+            name: "ASREngineParakeet",
+            dependencies: ["CoreModels", "ASRKit"] + fluidAudioProducts
         ),
 
         // ── Eval tooling (pure; the CLI needs a live model, the core does not)
