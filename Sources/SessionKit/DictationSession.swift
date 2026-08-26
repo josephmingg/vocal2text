@@ -74,6 +74,14 @@ public actor DictationSession {
     /// never cost the user the transcript.
     public typealias AudioArchiving = @Sendable (PCMChunk, UUID) async -> String?
 
+    /// Locates the speech inside a finished take (docs/15 step 16, FR-1.5):
+    /// returns the padded sample range worth transcribing, or nil when the
+    /// take contains no speech at all — the session then delivers nothing
+    /// rather than let the engine hallucinate text for silence. An analyzer
+    /// that cannot run (model missing, download failed) must return the full
+    /// range, never nil: losing VAD must not lose takes.
+    public typealias SpeechAnalyzing = @Sendable (PCMChunk) async -> Range<Int>?
+
     /// Everything a session needs, injected by the composition root.
     public struct Dependencies: Sendable {
         public var audio: any AudioCapturing
@@ -82,6 +90,8 @@ public actor DictationSession {
         public var selectCleanup: CleanupSelecting
         /// Retains the take's audio after delivery; nil keeps nothing.
         public var archiveAudio: AudioArchiving?
+        /// VAD gate + trim (docs/15 step 16); nil transcribes the whole take.
+        public var analyzeSpeech: SpeechAnalyzing?
         /// Fired fire-and-forget at hotkey press so the model is hot at
         /// release (docs/03 §2). Wire to `CleanupProvider.prewarm`; defaults
         /// to a no-op.
@@ -109,6 +119,7 @@ public actor DictationSession {
             cleanup: CleanupPipeline? = nil,
             cleanupProviderID: CleanupProviderID = .openAICompatible(name: "unconfigured"),
             archiveAudio: AudioArchiving? = nil,
+            analyzeSpeech: SpeechAnalyzing? = nil,
             prewarmCleanup: @escaping @Sendable () async -> Void = {},
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
@@ -127,6 +138,7 @@ public actor DictationSession {
                     cleanup.map { CleanupSelection(pipeline: $0, providerID: cleanupProviderID) }
                 },
                 archiveAudio: archiveAudio,
+                analyzeSpeech: analyzeSpeech,
                 prewarmCleanup: prewarmCleanup,
                 deliverer: deliverer,
                 store: store,
@@ -141,6 +153,7 @@ public actor DictationSession {
             engine: any TranscriptionEngine,
             selectCleanup: @escaping CleanupSelecting,
             archiveAudio: AudioArchiving? = nil,
+            analyzeSpeech: SpeechAnalyzing? = nil,
             prewarmCleanup: @escaping @Sendable () async -> Void = {},
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
@@ -156,6 +169,7 @@ public actor DictationSession {
             self.engine = engine
             self.selectCleanup = selectCleanup
             self.archiveAudio = archiveAudio
+            self.analyzeSpeech = analyzeSpeech
             self.prewarmCleanup = prewarmCleanup
             self.deliverer = deliverer
             self.store = store
@@ -557,11 +571,32 @@ public actor DictationSession {
         let entries = await deps.config.enabledDictionaryEntries()
         let writtenForms = entries.map(\.written)
 
+        // docs/15 step 16: the VAD gate runs inside the transcription timing
+        // window — it is part of release-to-text, not free. The engine only
+        // hears the padded speech envelope: leading/trailing silence is where
+        // decode time is wasted and hallucinations come from. History and the
+        // audio archive keep the full take; only the engine's input shrinks.
         let transcriptionStart = clock.now
+        var engineAudio = audio
+        if let analyze = deps.analyzeSpeech {
+            guard let span = await analyze(audio) else {
+                // FR-1.5's real answer: no speech in the take, nothing to
+                // deliver, and transcribing silence can only invent text.
+                // Consumed on purpose — a silent recording is not worth
+                // re-offering through recovery.
+                finishPipeline()
+                return true
+            }
+            let clamped = span.clamped(to: audio.samples.startIndex..<audio.samples.endIndex)
+            if !clamped.isEmpty, clamped.count < audio.samples.count {
+                engineAudio = PCMChunk(samples: Array(audio.samples[clamped]))
+            }
+        }
+
         let result: TranscriptionResult
         do {
             result = try await deps.engine.transcribe(
-                audio, languageMode: languageMode, dictionaryTerms: writtenForms
+                engineAudio, languageMode: languageMode, dictionaryTerms: writtenForms
             )
         } catch {
             lastError =

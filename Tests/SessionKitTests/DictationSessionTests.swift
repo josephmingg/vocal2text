@@ -140,7 +140,8 @@ private func makeHarness(
     selectCleanup: DictationSession.CleanupSelecting? = nil,
     prewarm: @escaping @Sendable () async -> Void = {},
     deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes"),
-    profileResolution: (@Sendable () async -> DictationSession.ResolvedRoute)? = nil
+    profileResolution: (@Sendable () async -> DictationSession.ResolvedRoute)? = nil,
+    analyzeSpeech: DictationSession.SpeechAnalyzing? = nil
 ) -> Harness {
     let captureLog = CaptureLog()
     let sampleCount = max(0, Int(audioSeconds * Double(PCMChunk.sampleRate)))
@@ -164,6 +165,7 @@ private func makeHarness(
                     )
                 }
             },
+        analyzeSpeech: analyzeSpeech,
         prewarmCleanup: prewarm,
         deliverer: deliverer,
         store: store,
@@ -563,6 +565,62 @@ struct DictationSessionTests {
 
         let cleanupCallCount = await provider.cleanupCallCount
         #expect(cleanupCallCount == 1)
+    }
+
+    // MARK: - VAD gate + trim (docs/15 step 16)
+
+    @Test func aSilentTakeDeliversAndSavesNothing() async throws {
+        // FR-1.5's real has-speech answer: the analyzer found no speech, so
+        // the engine never runs — transcribing silence can only hallucinate.
+        let harness = makeHarness(analyzeSpeech: { _ in nil })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let transcribeCount = await harness.engine.transcribeCount
+        #expect(transcribeCount == 0)
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.isEmpty)
+        let records = await harness.store.records
+        #expect(records.isEmpty)
+        // Not an error: nothing was said, so nothing happening is correct.
+        let error = await harness.session.lastError
+        #expect(error == nil)
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+    }
+
+    @Test func theEngineOnlyHearsTheSpeechSpan() async throws {
+        // 2 s take, speech span covering the middle half: the engine's input
+        // shrinks, the delivered text and history are untouched, and history
+        // still records the full take's duration.
+        let totalSamples = 2 * PCMChunk.sampleRate
+        let span = (totalSamples / 4)..<(3 * totalSamples / 4)
+        let harness = makeHarness(analyzeSpeech: { _ in span })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let heard = await harness.engine.lastAudioSampleCount
+        #expect(heard == span.count)
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday."])
+        let record = try #require(await harness.store.records.first)
+        #expect(abs(record.durationSeconds - 2.0) < 0.01)
+    }
+
+    @Test func anUnavailableAnalyzerFallsBackToTheFullTake() async throws {
+        // The analyzer's "cannot run" contract is the full range — the take
+        // must be transcribed whole, never dropped.
+        let harness = makeHarness(analyzeSpeech: { audio in audio.samples.indices })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let heard = await harness.engine.lastAudioSampleCount
+        #expect(heard == 2 * PCMChunk.sampleRate)
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday."])
     }
 
     @Test func dictionaryEntryAppearsInDeliveredText() async {

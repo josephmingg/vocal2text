@@ -83,6 +83,9 @@ final class AppState: ObservableObject {
     /// overrides. Warm-up goes through this too, so it prepares whichever
     /// engine the current language mode routes to.
     private let routedEngine: LanguageRoutingEngine
+    /// The docs/15 step 16 VAD; retained so the launch preload can fetch its
+    /// (~0.6 MB) model before the first take needs it.
+    private let speechDetector: SileroVoiceActivityDetector
 
     /// Whether the configured cleanup provider sends text off-device — drives
     /// the HUD privacy badge (FR-7.4). Ollama at localhost: false. Computed
@@ -140,6 +143,10 @@ final class AppState: ObservableObject {
             overrides: [.burmese: burmeseEngine]
         )
         let microphone = MicrophoneCapture()
+        // docs/15 step 16: Silero VAD gates and trims each finished take —
+        // silence delivers nothing instead of hallucinated text, and the
+        // engine only decodes the speech envelope.
+        let speechDetector = SileroVoiceActivityDetector()
         let dependencies = DictationSession.Dependencies(
             audio: MicrophoneCaptureAdapter(microphone: microphone),
             engine: routedEngine,
@@ -174,6 +181,9 @@ final class AppState: ObservableObject {
                 return AudioArchive.write(
                     audio.samples, forTranscript: transcriptID, in: directory
                 )
+            },
+            analyzeSpeech: { audio in
+                await speechDetector.analyze(audio)
             },
             prewarmCleanup: {
                 // Fired at press (docs/03 §2); skip the network touch entirely
@@ -251,6 +261,7 @@ final class AppState: ObservableObject {
         self.engine = engine
         self.burmeseEngine = burmeseEngine
         self.routedEngine = routedEngine
+        self.speechDetector = speechDetector
         self.profileStore = profileStore
         self.hudState = HUDState(
             mode: .hidden,
@@ -348,7 +359,11 @@ final class AppState: ObservableObject {
         guard settings.modelWarmedOnce else { return }
         let engine = routedEngine
         let languageMode = mode ?? settings.languageMode
+        let detector = speechDetector
         Task.detached(priority: .utility) {
+            // The VAD's ~0.6 MB model first, so the very next take is gated;
+            // then the big ASR load.
+            await detector.prepare()
             do {
                 try await engine.prepare(languageMode: languageMode)
             } catch {

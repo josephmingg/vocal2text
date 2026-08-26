@@ -21,6 +21,9 @@ public actor FakeTranscriptionEngine: TranscriptionEngine {
     public private(set) var streamCount = 0
     /// The biasing terms passed to the most recent `transcribe` call.
     public private(set) var lastDictionaryTerms: [String]?
+    /// Sample count of the most recent `transcribe` call's audio — lets tests
+    /// observe the docs/15 step 16 VAD trim without decoding anything.
+    public private(set) var lastAudioSampleCount: Int?
 
     public init(
         result: TranscriptionResult,
@@ -51,6 +54,7 @@ public actor FakeTranscriptionEngine: TranscriptionEngine {
     ) async throws -> TranscriptionResult {
         transcribeCount += 1
         lastDictionaryTerms = dictionaryTerms
+        lastAudioSampleCount = audio.samples.count
         do {
             try await waitIfNeeded()
         } catch {
