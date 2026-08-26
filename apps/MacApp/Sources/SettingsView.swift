@@ -337,11 +337,27 @@ private struct DictionaryPane: View {
                         }
                     }
                 }
-                HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
                     TextField("Heard (spoken form)", text: $spoken)
-                    TextField("Should appear (written form)", text: $written)
+                    // Multi-line written forms are snippets (docs/15 step 26):
+                    // "sign off" → a whole closing block.
+                    TextField(
+                        "Should appear (written form — snippets may span lines)",
+                        text: $written,
+                        axis: .vertical
+                    )
+                    .lineLimit(1...5)
                     Button("Add") { add() }
                         .disabled(!canAdd)
+                }
+                HStack(spacing: 8) {
+                    Button("Import CSV…") { importCSV() }
+                    Button("Export CSV…") { exportCSV() }
+                        .disabled(entries.isEmpty)
+                    Spacer()
+                    Text("Columns: spoken, written, enabled")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 if let errorText {
                     Text(errorText)
@@ -395,6 +411,68 @@ private struct DictionaryPane: View {
             reload()
         } catch {
             errorText = "Could not delete entry: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - CSV import/export (docs/15 step 26)
+
+    private func exportCSV() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "vocal-dictionary.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try DictionaryCSV.export(entries).write(to: url, atomically: true, encoding: .utf8)
+            errorText = nil
+        } catch {
+            errorText = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Merge semantics: an imported row whose spoken form matches an existing
+    /// entry (case-insensitively) updates that entry in place; new spoken
+    /// forms become new entries. Nothing is deleted by an import.
+    private func importCSV() {
+        guard let database else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let imported = DictionaryCSV.parse(text)
+            guard !imported.isEmpty else {
+                errorText = "Nothing imported — expected columns: spoken, written, enabled"
+                return
+            }
+            var existingBySpoken: [String: DictionaryEntry] = [:]
+            for entry in entries {
+                existingBySpoken[entry.spoken.lowercased()] = entry
+            }
+            var updated = 0
+            var added = 0
+            for row in imported {
+                if var existing = existingBySpoken[row.spoken.lowercased()] {
+                    existing.written = row.written
+                    existing.isEnabled = row.isEnabled
+                    try database.save(existing)
+                    updated += 1
+                } else {
+                    try database.save(
+                        DictionaryEntry(
+                            spoken: row.spoken,
+                            written: row.written,
+                            isEnabled: row.isEnabled,
+                            createdAt: Date()
+                        )
+                    )
+                    added += 1
+                }
+            }
+            errorText = nil
+            reload()
+            errorText = "Imported \(added) new, updated \(updated)."
+        } catch {
+            errorText = "Import failed: \(error.localizedDescription)"
         }
     }
 }
