@@ -220,6 +220,7 @@ targets:
           - ProfileKit
           - ModelStore
           - ASRKit
+          - BenchKit
           - SessionKit
           - AudioPipeline
           - PersistenceKit

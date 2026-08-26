@@ -61,6 +61,9 @@ let package = Package(
         .library(name: "ProfileKit", targets: ["ProfileKit"]),
         .library(name: "ModelStore", targets: ["ModelStore"]),
         .library(name: "ASRKit", targets: ["ASRKit"]),
+        // Pure metrics (WER/CER, percentiles, usage stats) — exposed so the
+        // Mac app's About pane can render UsageStats (docs/15 step 54).
+        .library(name: "BenchKit", targets: ["BenchKit"]),
         .library(name: "SessionKit", targets: ["SessionKit"]),
         .library(name: "BridgeKit", targets: ["BridgeKit"]),
         .library(name: "AudioPipeline", targets: ["AudioPipeline"]),

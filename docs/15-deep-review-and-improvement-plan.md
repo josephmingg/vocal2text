@@ -25,6 +25,63 @@
 > archive/history write), 50 (preheated capture engine, hoisted start-path I/O).
 > Step 13's optional idle-unload setting is not built (keep-resident is the default);
 > steps 47 and 51–54 remain open.
+>
+> **Phase 3–7 + adopted-steps status (2026-08-26, this branch, later the same day):**
+>
+> *Phase 3*: step 21 needed no new code — v1.1's HUD already renders live mic levels
+> (verified; a stale comment claiming otherwise was corrected). Step 22 is built: the
+> capture chunk stream feeds an interval decoder whose hypotheses pass through a
+> LocalAgreement prefix commit (`PrefixCommitter`) before the HUD shows them, so partial
+> text never visibly retracts; hands-free auto-stop-on-silence remains open (it wants
+> this streaming loop plus the VAD, but the wiring is not done). Step 23 is built
+> (staged Transcribing/Cleaning up/Inserting HUD, delivered + error sounds; the latency
+> toast shipped with Phase 0).
+>
+> *Phase 4*: step 24 built — enabled dictionary terms bias WhisperKit's decoder as
+> prompt tokens (verified against WhisperKit's source: `promptTokens` is honored only
+> with `usePrefillPrompt`). Step 25 built as *repair*: a cleanup that mutated protected
+> terms is repaired and re-verified, falling back only if repair still fails. Step 26
+> is served by dictionary entries as expansions plus multi-line written forms — no
+> separate snippet subsystem. Step 27 built, propose-only. Step 28 built (paste-again,
+> undo last insertion, replace-with-raw). Step 29 built in its privacy-shaped cut: AX
+> read of the text before the caret (falling back to the session's own last insertion,
+> same app, ≤120 s) feeds smart spacing/capitalization — no screenshots, no clipboard
+> mining, nothing leaves the process. Step 30 scoped to spoken layout commands ("new
+> paragraph", "new line"); a general command grammar is still parked. Step 31 built
+> (per-profile code mode: spoken symbols, camel/snake/pascal/kebab casing). Step 32
+> needed no new code (v1.1 ProfilesPane CRUD verified). Step 33 built (lock cap
+> setting 5/15/30/60 min; Escape-in-lock verified on v1.1).
+>
+> *Phase 5*: steps 34/35 built — a failed transcription preserves the take's audio in
+> the ordinary 24 h recovery window and offers it back from the menu immediately
+> (failure history rows beyond the HUD/log surface are not built). Step 36 built for
+> the dangerous half: a mid-take device change ends the take cleanly with the audio
+> captured so far, and the converter's tail frames are flushed at stop; an input-device
+> picker is not built (AVAudioEngine follows the system default). Step 37 built
+> (mic-permission probe surfaced in the menu). Step 38: no floor was raised — that is
+> open owner decision 1; the two macOS-26 adapters now carry STATUS headers saying
+> exactly that instead of implying they ship.
+>
+> *Phase 6*: step 39 needs the Apple Developer enrollment and signing identities only
+> the owner can create — not doable from this environment. Step 40 not built. Step 41
+> needed no new code (custom hotkeys shipped in v1.1 via `HotkeySpec`; verified).
+>
+> *Phase 7*: step 42 needed no new code (v1.1 keyboard extension verified; CI's
+> keyboard-offline-guard job holds the line). Step 43 not built (iCloud entitlements
+> blocked on the same enrollment as step 39). Step 44 built in a scoped cut: menu-bar
+> import → decode (4 h cap) → transcribe with dictionary biasing → stages 1/2/4 →
+> History row with filename and timing; no delivery, no LLM cleanup, no timestamped
+> segments yet. Steps 45–46 untouched: 45 needs real hardware and 46 hangs on open
+> owner decisions 2/4.
+>
+> *Adopted steps*: 47 built (`make bench-latency` renders stage percentiles from real
+> history; the missing arm/delivery marks now recorded). 51 built (deterministic
+> times/years/percents in stage 4, EN only, anchor-worded to stay out of ordinary
+> prose). 52 deferred: gating CI on the cleanup eval needs a live Ollama model on the
+> runner — an infra/owner decision, not a code change. 53 built (G6 fixed; separators
+> outside a collapsed run survive verbatim). 54 built in the modest cut: an About-pane
+> Usage box (takes, words, speaking time, WPM, day streak, median felt latency) computed
+> in pure `UsageStats` — no charts, no invented "hours saved".
 
 **Scope**: a full product + engineering review of Vocal v0.1.1 against the 2026 dictation
 market (Wispr Flow, superwhisper, VoiceInk, Aqua Voice, Handy, MacWhisper), followed by a

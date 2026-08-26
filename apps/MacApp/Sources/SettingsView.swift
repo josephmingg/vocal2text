@@ -1,5 +1,6 @@
 import AppKit
 import AudioPipeline
+import BenchKit
 import CoreModels
 import ModelStore
 import PersistenceKit
@@ -33,7 +34,7 @@ struct SettingsView: View {
                 .tabItem { Label("Dictionary", systemImage: "character.book.closed") }
             HistoryPrivacyPane(settings: settings, database: appState.database)
                 .tabItem { Label("History & Privacy", systemImage: "clock.arrow.circlepath") }
-            AboutPane()
+            AboutPane(database: appState.database)
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
         // Sized for the Profiles master–detail pane; the Form panes are
@@ -564,7 +565,9 @@ private struct HistoryPrivacyPane: View {
 
 @MainActor
 private struct AboutPane: View {
+    let database: DatabaseStore?
     @State private var counters: [(counter: Diagnostics.Counter, count: Int)] = []
+    @State private var usage = UsageStats()
 
     var body: some View {
         VStack(spacing: 10) {
@@ -587,6 +590,28 @@ private struct AboutPane: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 400)
+
+            // docs/15 step 54, the modest cut: numbers the stored history
+            // already supports — no charts, no "hours saved" guesswork.
+            if usage.takeCount > 0 {
+                GroupBox("Usage") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        usageRow("Dictations", "\(usage.takeCount)")
+                        usageRow("Words dictated", "\(usage.wordCount)")
+                        usageRow("Time speaking", Self.durationLabel(usage.speakingSeconds))
+                        usageRow("Average pace", "\(Int(usage.wordsPerMinute.rounded())) WPM")
+                        usageRow("Day streak", "\(usage.streakDays)")
+                        if usage.medianFeltLatencySeconds > 0 {
+                            usageRow(
+                                "Median wait after release",
+                                String(format: "%.1f s", usage.medianFeltLatencySeconds)
+                            )
+                        }
+                    }
+                    .padding(4)
+                }
+                .frame(maxWidth: 340)
+            }
 
             GroupBox("Diagnostics") {
                 VStack(alignment: .leading, spacing: 3) {
@@ -615,7 +640,31 @@ private struct AboutPane: View {
             .frame(maxWidth: 340)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { counters = Diagnostics.shared.snapshot() }
+        .onAppear {
+            counters = Diagnostics.shared.snapshot()
+            if let database {
+                usage = UsageStats.compute(records: (try? database.allTranscripts()) ?? [])
+            }
+        }
+    }
+
+    private func usageRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.caption)
+                .monospacedDigit()
+        }
+    }
+
+    /// "42 s" / "18 min" / "3.4 h" — the size of the number is the message.
+    static func durationLabel(_ seconds: Double) -> String {
+        if seconds < 60 { return "\(Int(seconds.rounded())) s" }
+        if seconds < 3600 { return "\(Int((seconds / 60).rounded())) min" }
+        return String(format: "%.1f h", seconds / 3600)
     }
 
     private static var versionString: String {
