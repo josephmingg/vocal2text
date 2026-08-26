@@ -46,7 +46,7 @@ public struct UsageStats: Equatable, Sendable {
         let takes = records.filter { $0.source != .fileImport && !$0.isCancelled }
         guard !takes.isEmpty else { return UsageStats() }
 
-        let words = takes.reduce(0) { $0 + wordCount(of: $1.deliveredText, language: $1.language) }
+        let words = takes.reduce(0) { $0 + Self.words(in: $1.deliveredText, language: $1.language) }
         let seconds = takes.reduce(0) { $0 + max(0, $1.durationSeconds) }
 
         let latencies = takes
@@ -68,7 +68,7 @@ public struct UsageStats: Equatable, Sendable {
     /// word delimiters, so one grapheme counts as one "word" — the same
     /// per-character convention `WordErrorRate` switches to for Han text;
     /// splitting on whitespace would count a whole Burmese phrase as one word.
-    static func wordCount(of text: String, language: Language) -> Int {
+    static func words(in text: String, language: Language) -> Int {
         switch language {
         case .chinese, .burmese:
             return text.filter { !$0.isWhitespace }.count

@@ -75,10 +75,10 @@ import Testing
     }
 
     @Test func unspacedScriptsCountCharactersNotWhitespaceTokens() {
-        #expect(UsageStats.wordCount(of: "你好 世界", language: .chinese) == 4)
-        #expect(UsageStats.wordCount(of: "hello world", language: .english) == 2)
+        #expect(UsageStats.words(in: "你好 世界", language: .chinese) == 4)
+        #expect(UsageStats.words(in: "hello world", language: .english) == 2)
         // One Burmese phrase, no spaces — must not count as a single word.
-        #expect(UsageStats.wordCount(of: "မင်္ဂလာပါ", language: .burmese) > 1)
+        #expect(UsageStats.words(in: "မင်္ဂလာပါ", language: .burmese) > 1)
     }
 
     @Test func streakCountsBackFromLatestTakeDay() {
