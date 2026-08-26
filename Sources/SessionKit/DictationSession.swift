@@ -9,14 +9,21 @@ import TextPipeline
 /// delivery, persistence, configuration) is injected via `Dependencies`, so
 /// the whole machine runs on Linux under test.
 ///
-/// Flow per take: press resolves and pins the profile (FR-3.6), starts audio,
-/// and fires the cleanup prewarm; release stops audio and runs
-/// transcribe → stage 1 → stage 2 (dictionary) → stage 3 (cleanup, optional)
-/// → stage 4 → deliver → save, measuring each stage with `ContinuousClock`.
+/// Flow per take: press starts audio capture immediately and kicks off profile
+/// resolution + cleanup prewarm concurrently (FR-3.6 pins at press because the
+/// resolution task snapshots the frontmost context at spawn; only the await
+/// moves to release, so a slow browser AppleScript can never delay the
+/// microphone). Release stops audio and hands the take to a processing
+/// pipeline — transcribe → stage 1 → stage 2 (dictionary) → stage 3 (cleanup,
+/// optional) → stage 4 → deliver → save — measured per stage with
+/// `ContinuousClock`. Pipelines are chained in take order but run detached
+/// from capture, so a new press is accepted while the previous take is still
+/// transcribing or cleaning.
 public actor DictationSession {
 
     /// Lifecycle phases, in normal order. `cancelled` is a transient phase on
-    /// the way back to `idle` after `cancel()`.
+    /// the way back to `idle` after `cancel()`. While a new take records over
+    /// a still-processing previous take, the capture phases win the display.
     public enum Phase: Sendable, Equatable {
         case idle
         case arming
@@ -26,6 +33,13 @@ public actor DictationSession {
         case delivering
         case cancelled
     }
+
+    /// What press-time routing resolves to; awaited at release, never at press.
+    public typealias ResolvedRoute = (
+        profile: Profile,
+        routeKind: TranscriptRecord.RouteKind,
+        pressTimeBundleID: String?
+    )
 
     /// Everything a session needs, injected by the composition root.
     public struct Dependencies: Sendable {
@@ -45,13 +59,10 @@ public actor DictationSession {
         public var deliverer: any TextDelivering
         public var store: any TranscriptStoring
         public var config: any SessionConfiguring
-        /// Resolved once at press and pinned for the whole take (FR-3.6).
-        public var profileResolution:
-            @Sendable () async -> (
-                profile: Profile,
-                routeKind: TranscriptRecord.RouteKind,
-                pressTimeBundleID: String?
-            )
+        /// Spawned at press so the snapshot happens at press time (FR-3.6),
+        /// awaited only at release so it can never delay audio start (a
+        /// browser-URL fetch may block up to ~1.5 s).
+        public var profileResolution: @Sendable () async -> ResolvedRoute
         /// Wall-clock source for `TranscriptRecord.createdAt`; injectable so
         /// tests pin timestamps.
         public var now: @Sendable () -> Date
@@ -65,11 +76,7 @@ public actor DictationSession {
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
             config: any SessionConfiguring,
-            profileResolution: @escaping @Sendable () async -> (
-                profile: Profile,
-                routeKind: TranscriptRecord.RouteKind,
-                pressTimeBundleID: String?
-            ),
+            profileResolution: @escaping @Sendable () async -> ResolvedRoute,
             now: @escaping @Sendable () -> Date = { Date() }
         ) {
             self.audio = audio
@@ -88,11 +95,17 @@ public actor DictationSession {
     // MARK: - State
 
     private struct ActiveTake {
-        var profile: Profile
-        var routeKind: TranscriptRecord.RouteKind
-        var pressTimeBundleID: String?
+        var resolution: Task<ResolvedRoute, Never>
         var capture: CaptureSession
         var pressedAt: ContinuousClock.Instant
+    }
+
+    /// Everything the detached processing pipeline needs once capture ended.
+    private struct PendingTake {
+        var resolution: Task<ResolvedRoute, Never>
+        var audio: PCMChunk
+        var captureSeconds: Double
+        var isLockMode: Bool
     }
 
     private let deps: Dependencies
@@ -106,6 +119,10 @@ public actor DictationSession {
     /// leave the mic running — NFR-1).
     private var pendingRelease: Bool?
     private var pendingCancel = false
+    /// Pipelines queued or running. Capture phases always win the display;
+    /// this only decides whether an ended capture settles to `.transcribing`
+    /// (work still in flight) or `.idle`.
+    private var queuedPipelines = 0
 
     /// The most recent transcription (or capture) failure. Documented v1
     /// choice: a failed transcription produces no text worth a history row —
@@ -117,6 +134,11 @@ public actor DictationSession {
     /// The fire-and-forget prewarm task from the latest press; kept so tests
     /// can await its completion deterministically.
     private(set) var prewarmTask: Task<Void, Never>?
+    /// The chained processing pipeline for the most recent released take.
+    /// Awaiting it drains every queued pipeline (each chains on the previous);
+    /// kept so tests — and any caller that must observe delivery — can wait
+    /// deterministically.
+    private(set) var pipelineTask: Task<Void, Never>?
 
     public init(dependencies: Dependencies) {
         self.deps = dependencies
@@ -156,38 +178,56 @@ public actor DictationSession {
         }
     }
 
+    /// Where the phase lands when no capture is active: `.transcribing` while
+    /// pipelines are still in flight, `.idle` otherwise. Callers guarantee no
+    /// capture is active (or arming) when they call this.
+    private func settleAfterCaptureEnd() {
+        transition(to: queuedPipelines > 0 ? .transcribing : .idle)
+    }
+
+    /// Pipeline-driven transitions must never stomp a newer capture's phase:
+    /// while a press is arming or recording, the capture phases win.
+    private func transitionIfNoCaptureActive(_ newPhase: Phase) {
+        guard take == nil, phaseValue != .arming else { return }
+        transition(to: newPhase)
+    }
+
     // MARK: - Press lifecycle
 
-    /// Hotkey press: resolve and pin the profile (FR-3.6), fire the cleanup
-    /// prewarm, and start audio capture. No-op unless idle. If audio fails to
-    /// start there is nothing to persist; the error lands in `lastError` and
-    /// the session returns to idle.
+    /// Hotkey press: start audio capture immediately; profile resolution
+    /// (pinned at press, FR-3.6) and the cleanup prewarm run concurrently.
+    /// Accepted whenever no capture is active — a previous take may still be
+    /// processing (its pipeline runs detached). If audio fails to start there
+    /// is nothing to persist; the error lands in `lastError`.
     public func pressBegan() async {
-        guard phaseValue == .idle else { return }
+        switch phaseValue {
+        case .arming, .recording:
+            return
+        default:
+            break
+        }
         lastError = nil
         pendingRelease = nil
         pendingCancel = false
         transition(to: .arming)
 
-        let resolved = await deps.profileResolution()
-
         let prewarm = deps.prewarmCleanup
         prewarmTask = Task { await prewarm() }
+
+        // The resolution task starts now, so the frontmost-context snapshot
+        // happens at press time; only the await moves to release (docs/03 §2:
+        // the microphone must never wait on a browser AppleScript).
+        let resolve = deps.profileResolution
+        let resolution = Task { await resolve() }
 
         let pressedAt = clock.now
         do {
             let capture = try await deps.audio.start()
-            take = ActiveTake(
-                profile: resolved.profile,
-                routeKind: resolved.routeKind,
-                pressTimeBundleID: resolved.pressTimeBundleID,
-                capture: capture,
-                pressedAt: pressedAt
-            )
+            take = ActiveTake(resolution: resolution, capture: capture, pressedAt: pressedAt)
             transition(to: .recording(startedAt: pressedAt))
             // A release or Escape that arrived while we were suspended in
-            // profile resolution / audio start (the .arming window) must not
-            // be lost — the mic would run until the next full press cycle.
+            // audio start (the .arming window) must not be lost — the mic
+            // would run until the next full press cycle.
             if pendingCancel {
                 pendingCancel = false
                 pendingRelease = nil
@@ -201,13 +241,14 @@ public actor DictationSession {
             pendingRelease = nil
             pendingCancel = false
             lastError = .audioUnreadable("capture failed to start: \(error)")
-            transition(to: .idle)
+            settleAfterCaptureEnd()
         }
     }
 
-    /// Hotkey release: stop capture and run the full pipeline through delivery
-    /// and history. A release during `.arming` is latched and honored the
-    /// moment recording starts.
+    /// Hotkey release: stop capture and hand the take to the processing
+    /// pipeline (transcribe → clean → deliver → save), which runs detached so
+    /// the next press is accepted immediately. A release during `.arming` is
+    /// latched and honored the moment recording starts.
     public func pressEnded(isLockMode: Bool = false) async {
         if phaseValue == .arming {
             pendingRelease = isLockMode
@@ -229,11 +270,15 @@ public actor DictationSession {
         take = nil
         await active.capture.cancel()
         transition(to: .cancelled)
-        transition(to: .idle)
+        settleAfterCaptureEnd()
     }
 
     // MARK: - Release pipeline
 
+    /// Stops capture and queues the processing pipeline. Pipelines chain on
+    /// each other so takes deliver in press order even when a new recording
+    /// starts before the previous take finished processing.
+    ///
     /// `heldDurationOverride` is a test seam substituting the measured hold
     /// time in the FR-1.5 accidental-tap check; production always passes nil.
     func finishPress(isLockMode: Bool, heldDurationOverride: Duration?) async {
@@ -249,12 +294,32 @@ public actor DictationSession {
         // stands in for "speech detected" — a sub-500 ms hold is discarded
         // silently only when the audio is also shorter than 500 ms.
         if held < .milliseconds(500), audio.durationSeconds < 0.5 {
-            transition(to: .idle)
+            settleAfterCaptureEnd()
             return
         }
 
+        let pending = PendingTake(
+            resolution: active.resolution,
+            audio: audio,
+            captureSeconds: captureSeconds,
+            isLockMode: isLockMode
+        )
+        queuedPipelines += 1
+        let previous = pipelineTask
+        pipelineTask = Task {
+            await previous?.value
+            await self.runPipeline(pending)
+        }
+    }
+
+    private func runPipeline(_ pending: PendingTake) async {
+        // Usually resolved long before release; worst case (hung browser) the
+        // ~1.5 s fetch overlaps recording instead of delaying the microphone.
+        let resolved = await pending.resolution.value
+        let profile = resolved.profile
+
         let languageMode: LanguageMode
-        if let override = active.profile.languageOverride {
+        if let override = profile.languageOverride {
             languageMode = override
         } else {
             languageMode = await deps.config.globalLanguageMode
@@ -266,18 +331,18 @@ public actor DictationSession {
         let result: TranscriptionResult
         do {
             result = try await deps.engine.transcribe(
-                audio, languageMode: languageMode, dictionaryTerms: writtenForms
+                pending.audio, languageMode: languageMode, dictionaryTerms: writtenForms
             )
         } catch {
             lastError =
                 (error as? TranscriptionError) ?? .engineUnavailable(String(describing: error))
-            transition(to: .idle)
+            finishPipeline()
             return
         }
         let transcriptionSeconds = Self.seconds(transcriptionStart.duration(to: clock.now))
 
         let language = result.detectedLanguage
-        let formatting = active.profile.formatting
+        let formatting = profile.formatting
 
         let dictionaryStart = clock.now
         let normalized = Stage1Normalizer.normalize(
@@ -296,17 +361,17 @@ public actor DictationSession {
         let masterSwitch = await deps.config.cleanupMasterSwitch
         if !masterSwitch {
             cleanupOutcome = .skipped(reason: .masterSwitchOff)
-        } else if !active.profile.cleanupEnabled {
+        } else if !profile.cleanupEnabled {
             cleanupOutcome = .skipped(reason: .profileDisabled)
         } else if let pipeline = deps.cleanup {
-            transition(to: .cleaning)
+            transitionIfNoCaptureActive(.cleaning)
             // History must record what actually ran (FR-5.1). Only one pipeline
             // is injected today, so a profile's providerOverride is routing
             // intent, not reality — runtime provider selection is a known gap
             // (docs/11).
             let providerID = deps.cleanupProviderID
             let stylePrompt: String
-            if active.profile.ignoresGlobalStyle {
+            if profile.ignoresGlobalStyle {
                 stylePrompt = ""
             } else {
                 stylePrompt = await deps.config.globalStylePrompt
@@ -315,7 +380,7 @@ public actor DictationSession {
             let request = CleanupRequest(
                 text: stage2Text,
                 language: language,
-                profilePrompt: active.profile.promptText,
+                profilePrompt: profile.promptText,
                 stylePrompt: stylePrompt,
                 protectedTerms: writtenForms
             )
@@ -341,10 +406,10 @@ public actor DictationSession {
             deliveryText, language: language, formatting: formatting, precedingContext: nil
         )
 
-        transition(to: .delivering)
+        transitionIfNoCaptureActive(.delivering)
         let context = DeliveryContext(
-            pressTimeAppBundleID: active.pressTimeBundleID,
-            isLockMode: isLockMode,
+            pressTimeAppBundleID: resolved.pressTimeBundleID,
+            isLockMode: pending.isLockMode,
             formatting: formatting
         )
         let deliveryStart = clock.now
@@ -354,11 +419,11 @@ public actor DictationSession {
         // FR-3.2: secure input means nothing was inserted and nothing may be
         // persisted — no history row for this take.
         if case .blockedSecureField = delivery {
-            transition(to: .idle)
+            finishPipeline()
             return
         }
 
-        var targetBundleID = active.pressTimeBundleID
+        var targetBundleID = resolved.pressTimeBundleID
         if case .inserted(_, let appBundleID) = delivery, let appBundleID {
             targetBundleID = appBundleID
         }
@@ -369,13 +434,13 @@ public actor DictationSession {
             language: language,
             rawText: result.text,
             deliveredText: formatted,
-            durationSeconds: audio.durationSeconds,
+            durationSeconds: pending.audio.durationSeconds,
             targetAppBundleID: targetBundleID,
-            profileName: active.profile.name,
-            routeKind: active.routeKind,
+            profileName: profile.name,
+            routeKind: resolved.routeKind,
             cleanup: cleanupOutcome,
             timings: TimingBreakdown(
-                captureSeconds: captureSeconds,
+                captureSeconds: pending.captureSeconds,
                 transcriptionSeconds: transcriptionSeconds,
                 dictionarySeconds: dictionarySeconds,
                 cleanupSeconds: cleanupSeconds,
@@ -386,7 +451,15 @@ public actor DictationSession {
         // session still returns to idle (history write errors surface via
         // PersistenceKit, not here).
         try? await deps.store.save(record)
-        transition(to: .idle)
+        finishPipeline()
+    }
+
+    /// Pipeline epilogue: settle the display phase unless a newer capture is
+    /// active (its phases win until its own release re-queues a pipeline).
+    private func finishPipeline() {
+        queuedPipelines -= 1
+        guard take == nil, phaseValue != .arming else { return }
+        settleAfterCaptureEnd()
     }
 
     // MARK: - Helpers

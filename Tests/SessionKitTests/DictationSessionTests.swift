@@ -44,12 +44,39 @@ private actor ScriptedCleanupProvider: CleanupProvider {
 
 private let fixedNow = Date(timeIntervalSince1970: 1_723_000_000)
 
+/// One-shot latch for scripting suspension points (e.g. a profile resolution
+/// that must not have completed before the microphone started).
+private actor Gate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        isOpen = true
+        let waiting = waiters
+        waiters = []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
 private struct Harness {
     let session: DictationSession
     let engine: FakeTranscriptionEngine
     let deliverer: RecordingTextDeliverer
     let store: InMemoryStore
     let captureLog: CaptureLog
+
+    /// Delivery/save now happen on the detached pipeline (chained per take);
+    /// awaiting the latest pipeline task drains every queued take.
+    func drainPipeline() async {
+        if let task = await session.pipelineTask {
+            await task.value
+        }
+    }
 }
 
 private func makeHarness(
@@ -57,13 +84,15 @@ private func makeHarness(
         text: "let's meet on saturday", detectedLanguage: .english
     ),
     engineFailure: TranscriptionError? = nil,
+    engineDelay: Duration = .zero,
     audioSeconds: Double = 2.0,
     profile: Profile = Profile(name: "Default"),
     config: StaticConfig = StaticConfig(),
     cleanup: CleanupPipeline? = nil,
     cleanupProviderID: CleanupProviderID = .ollama(model: "qwen2.5"),
     prewarm: @escaping @Sendable () async -> Void = {},
-    deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes")
+    deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes"),
+    profileResolution: (@Sendable () async -> DictationSession.ResolvedRoute)? = nil
 ) -> Harness {
     let captureLog = CaptureLog()
     let sampleCount = max(0, Int(audioSeconds * Double(PCMChunk.sampleRate)))
@@ -71,7 +100,9 @@ private func makeHarness(
         chunk: PCMChunk(samples: [Float](repeating: 0, count: sampleCount)),
         log: captureLog
     )
-    let engine = FakeTranscriptionEngine(result: engineResult, failure: engineFailure)
+    let engine = FakeTranscriptionEngine(
+        result: engineResult, delay: engineDelay, failure: engineFailure
+    )
     let deliverer = RecordingTextDeliverer(outcome: deliveryOutcome)
     let store = InMemoryStore()
     let dependencies = DictationSession.Dependencies(
@@ -83,7 +114,7 @@ private func makeHarness(
         deliverer: deliverer,
         store: store,
         config: config,
-        profileResolution: { (profile, .app, "com.example.pressapp") },
+        profileResolution: profileResolution ?? { (profile, .app, "com.example.pressapp") },
         now: { fixedNow }
     )
     return Harness(
@@ -124,6 +155,7 @@ struct DictationSessionTests {
         let harness = makeHarness()
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         // Stage 1 capitalizes and adds the terminal period; stages 2/4 are
         // no-ops here (no entries, fresh insertion point).
@@ -173,6 +205,7 @@ struct DictationSessionTests {
         await harness.session.finishPress(
             isLockMode: false, heldDurationOverride: .milliseconds(200)
         )
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered.isEmpty)
@@ -191,6 +224,7 @@ struct DictationSessionTests {
         await harness.session.finishPress(
             isLockMode: false, heldDurationOverride: .milliseconds(200)
         )
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Let's meet on saturday."])
@@ -224,6 +258,7 @@ struct DictationSessionTests {
         let harness = makeHarness(engineFailure: .modelNotInstalled)
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered.isEmpty)
@@ -250,6 +285,7 @@ struct DictationSessionTests {
             await task.value
         }
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let prewarmCount = await provider.prewarmCount
         #expect(prewarmCount == 1)
@@ -286,6 +322,7 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Meet on saturday."])
@@ -308,6 +345,7 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let cleanupCallCount = await provider.cleanupCallCount
         #expect(cleanupCallCount == 0)
@@ -330,6 +368,7 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let cleanupCallCount = await provider.cleanupCallCount
         #expect(cleanupCallCount == 0)
@@ -349,6 +388,7 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Use Claude Code to review."])
@@ -364,12 +404,70 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         // The deliverer ran (and blocked), and per FR-3.2 nothing is persisted.
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Let's meet on saturday."])
         let records = await harness.store.records
         #expect(records.isEmpty)
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+    }
+
+    @Test func microphoneStartsBeforeProfileResolutionCompletes() async throws {
+        // W1 regression: a hung browser AppleScript (up to 1.5 s inside
+        // profile resolution) must never delay audio start. The gate keeps
+        // resolution suspended; recording must begin anyway.
+        let gate = Gate()
+        let profile = Profile(name: "Default")
+        let harness = makeHarness(profileResolution: {
+            await gate.wait()
+            return (profile, .app, "com.example.pressapp")
+        })
+
+        await harness.session.pressBegan()
+        guard case .recording = await harness.session.phase else {
+            Issue.record("expected recording while resolution is still blocked")
+            return
+        }
+
+        // Release with resolution still pending: capture stops, the pipeline
+        // waits on the resolution instead of the microphone having waited.
+        await harness.session.pressEnded()
+        await gate.open()
+        await harness.drainPipeline()
+
+        let deliveredTexts = await harness.deliverer.deliveredTexts
+        #expect(deliveredTexts == ["Let's meet on saturday."])
+        let records = await harness.store.records
+        #expect(records.first?.profileName == "Default")
+    }
+
+    @Test func newPressAcceptedWhilePreviousTakeStillProcessing() async {
+        // W3 regression: rapid-fire dictation — the second press must start
+        // recording while the first take's pipeline (slowed engine) is still
+        // transcribing, and both takes must deliver.
+        let harness = makeHarness(engineDelay: .milliseconds(300))
+
+        await harness.session.pressBegan()
+        await harness.session.finishPress(isLockMode: false, heldDurationOverride: .seconds(1))
+
+        // Pipeline 1 is in flight; the next press is accepted immediately.
+        await harness.session.pressBegan()
+        guard case .recording = await harness.session.phase else {
+            Issue.record("expected recording while the first take is processing")
+            return
+        }
+        await harness.session.finishPress(isLockMode: false, heldDurationOverride: .seconds(1))
+        await harness.drainPipeline()
+
+        let deliveredTexts = await harness.deliverer.deliveredTexts
+        #expect(deliveredTexts.count == 2)
+        let records = await harness.store.records
+        #expect(records.count == 2)
+        let transcribeCount = await harness.engine.transcribeCount
+        #expect(transcribeCount == 2)
         let phase = await harness.session.phase
         #expect(phase == .idle)
     }

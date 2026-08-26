@@ -98,7 +98,12 @@ public actor MicrophoneCapture {
         let handle = try FileHandle(forWritingTo: recoveryURL)
 
         let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: [Float].self)
-        let (chunkStream, chunkContinuation) = AsyncStream.makeStream(of: PCMChunk.self)
+        // The live-chunk stream is observation-only (future partials/VAD); the
+        // take itself is `accumulated`. Cap the buffer so an unconsumed stream
+        // (today's shipping shape) never retains the whole take a second time.
+        let (chunkStream, chunkContinuation) = AsyncStream.makeStream(
+            of: PCMChunk.self, bufferingPolicy: .bufferingNewest(1)
+        )
 
         self.engine = engine
         self.converter = converter
