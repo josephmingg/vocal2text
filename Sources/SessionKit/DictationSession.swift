@@ -81,6 +81,12 @@ public actor DictationSession {
     /// release landing mid-call waits a fraction of a second at worst.
     public typealias PreviewTranscribing = @Sendable (PCMChunk) async -> String?
 
+    /// Reads the text immediately before the insertion point at release time
+    /// (docs/15 step 29) — the AX caret read on macOS. nil means the platform
+    /// cannot see it for this target; the session then falls back to its own
+    /// last-insert record, and to fresh-insertion formatting.
+    public typealias PrecedingContextReading = @Sendable () async -> String?
+
     /// Locates the speech inside a finished take (docs/15 step 16, FR-1.5):
     /// returns the padded sample range worth transcribing, or nil when the
     /// take contains no speech at all — the session then delivers nothing
@@ -99,6 +105,9 @@ public actor DictationSession {
         public var archiveAudio: AudioArchiving?
         /// VAD gate + trim (docs/15 step 16); nil transcribes the whole take.
         public var analyzeSpeech: SpeechAnalyzing?
+        /// Preceding-context read for smart spacing (docs/15 step 29); nil
+        /// keeps fresh-insertion formatting everywhere.
+        public var readPrecedingContext: PrecedingContextReading?
         /// Streaming preview decode (docs/15 step 22); nil disables preview.
         public var previewTranscribe: PreviewTranscribing?
         /// Receives the prefix-committed preview line for display (FR-4.1:
@@ -134,6 +143,7 @@ public actor DictationSession {
             cleanupProviderID: CleanupProviderID = .openAICompatible(name: "unconfigured"),
             archiveAudio: AudioArchiving? = nil,
             analyzeSpeech: SpeechAnalyzing? = nil,
+            readPrecedingContext: PrecedingContextReading? = nil,
             previewTranscribe: PreviewTranscribing? = nil,
             onPartial: (@Sendable (String) -> Void)? = nil,
             previewInterval: Duration = .milliseconds(400),
@@ -156,6 +166,7 @@ public actor DictationSession {
                 },
                 archiveAudio: archiveAudio,
                 analyzeSpeech: analyzeSpeech,
+                readPrecedingContext: readPrecedingContext,
                 previewTranscribe: previewTranscribe,
                 onPartial: onPartial,
                 previewInterval: previewInterval,
@@ -174,6 +185,7 @@ public actor DictationSession {
             selectCleanup: @escaping CleanupSelecting,
             archiveAudio: AudioArchiving? = nil,
             analyzeSpeech: SpeechAnalyzing? = nil,
+            readPrecedingContext: PrecedingContextReading? = nil,
             previewTranscribe: PreviewTranscribing? = nil,
             onPartial: (@Sendable (String) -> Void)? = nil,
             previewInterval: Duration = .milliseconds(400),
@@ -193,6 +205,7 @@ public actor DictationSession {
             self.selectCleanup = selectCleanup
             self.archiveAudio = archiveAudio
             self.analyzeSpeech = analyzeSpeech
+            self.readPrecedingContext = readPrecedingContext
             self.previewTranscribe = previewTranscribe
             self.onPartial = onPartial
             self.previewInterval = previewInterval
@@ -257,6 +270,10 @@ public actor DictationSession {
     /// whether an ended capture settles to `.transcribing` (work still in
     /// flight) or `.idle`.
     private var queuedPipelines = 0
+    /// What this session last inserted, where, and when (docs/15 step 29):
+    /// the fallback preceding context for targets AX cannot read.
+    private var lastInsertion: (suffix: String, bundleID: String?, at: Date)?
+
     /// A speech-bearing short-tap take held while the double-tap window is
     /// open (FR-1.5 × FR-1.3, docs/15 W10): the mic is already stopped; the
     /// take is committed if no second tap arrives, discarded if the pair
@@ -780,10 +797,27 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .providerUnavailable)
         }
 
-        // v1 delivers into a fresh insertion point; the preceding-context seam
-        // (session-tracked last insert / AX read) arrives with the macOS app.
+        // docs/15 step 29 (FR-3.3): smart spacing formats against what is
+        // actually before the caret. The AX read is ground truth; when it
+        // cannot see the target, the session's own last-insert record stands
+        // in — same app, within two minutes. Platforms that provide neither
+        // keep fresh-insertion formatting.
+        var precedingContext: String?
+        if formatting.smartSpacing, let read = deps.readPrecedingContext {
+            precedingContext = await read()
+            if precedingContext == nil,
+                let last = lastInsertion,
+                last.bundleID != nil,
+                last.bundleID == resolved.pressTimeBundleID,
+                deps.now().timeIntervalSince(last.at) <= 120 {
+                precedingContext = last.suffix
+            }
+        }
         let formatted = Stage4Formatter.format(
-            deliveryText, language: language, formatting: formatting, precedingContext: nil
+            deliveryText,
+            language: language,
+            formatting: formatting,
+            precedingContext: precedingContext
         )
 
         transitionIfNoCaptureActive(.delivering)
@@ -807,6 +841,15 @@ public actor DictationSession {
         var targetBundleID = resolved.pressTimeBundleID
         if case .inserted(_, let appBundleID) = delivery, let appBundleID {
             targetBundleID = appBundleID
+        }
+
+        // Remember what landed for the next take's fallback context; a
+        // clipboard fallback lands wherever the user pastes, so it clears
+        // the record instead of poisoning it.
+        if case .inserted = delivery {
+            lastInsertion = (String(formatted.suffix(64)), targetBundleID, deps.now())
+        } else {
+            lastInsertion = nil
         }
 
         // FR-5.1 (docs/11 G9): retain the audio only for a take that actually

@@ -53,6 +53,13 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(showTimingsToast, forKey: Keys.showTimingsToast) }
     }
 
+    /// FR-1.3 hands-free cap, configurable (docs/15 step 33): a forgotten
+    /// locked take auto-stops after this many minutes instead of recording
+    /// until the disk fills.
+    @Published var lockCapMinutes: Int {
+        didSet { Self.defaults.set(lockCapMinutes, forKey: Keys.lockCapMinutes) }
+    }
+
     /// Per-bundle-ID insertion strategy overrides (docs/03 §3.2: tier choice is
     /// configuration-driven, not failure-driven). Keys are bundle IDs, values
     /// are strategy names owned by the insertion layer.
@@ -113,6 +120,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         hudEnabled = defaults.object(forKey: Keys.hudEnabled) as? Bool ?? true
         soundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
         showTimingsToast = defaults.object(forKey: Keys.showTimingsToast) as? Bool ?? false
+        lockCapMinutes = defaults.object(forKey: Keys.lockCapMinutes) as? Int ?? 15
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
@@ -208,6 +216,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let hudEnabled = "settings.hudEnabled"
         static let soundsEnabled = "settings.soundsEnabled"
         static let showTimingsToast = "settings.showTimingsToast"
+        static let lockCapMinutes = "settings.lockCapMinutes"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
         static let whisperKitModel = "settings.whisperKitModel"

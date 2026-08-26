@@ -211,6 +211,11 @@ final class AppState: ObservableObject {
             analyzeSpeech: { audio in
                 await speechDetector.analyze(audio)
             },
+            // docs/15 step 29: the AX caret read that makes smart spacing
+            // format against what is really before the insertion point.
+            readPrecedingContext: {
+                await MainActor.run { AXInserter.precedingContext() }
+            },
             // Streaming preview (docs/15 step 22), display-only per FR-4.1.
             // Gated to the Parakeet route on purpose: its decode is fast
             // enough that a release landing mid-preview waits a fraction of a

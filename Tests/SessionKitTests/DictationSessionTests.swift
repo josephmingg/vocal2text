@@ -141,7 +141,8 @@ private func makeHarness(
     prewarm: @escaping @Sendable () async -> Void = {},
     deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes"),
     profileResolution: (@Sendable () async -> DictationSession.ResolvedRoute)? = nil,
-    analyzeSpeech: DictationSession.SpeechAnalyzing? = nil
+    analyzeSpeech: DictationSession.SpeechAnalyzing? = nil,
+    readPrecedingContext: DictationSession.PrecedingContextReading? = nil
 ) -> Harness {
     let captureLog = CaptureLog()
     let sampleCount = max(0, Int(audioSeconds * Double(PCMChunk.sampleRate)))
@@ -166,6 +167,7 @@ private func makeHarness(
                 }
             },
         analyzeSpeech: analyzeSpeech,
+        readPrecedingContext: readPrecedingContext,
         prewarmCleanup: prewarm,
         deliverer: deliverer,
         store: store,
@@ -565,6 +567,56 @@ struct DictationSessionTests {
 
         let cleanupCallCount = await provider.cleanupCallCount
         #expect(cleanupCallCount == 1)
+    }
+
+    // MARK: - Preceding context (docs/15 step 29, FR-3.3)
+
+    @Test func smartSpacingFormatsAgainstTheReadContext() async throws {
+        // The platform can see "Done." before the caret: the new sentence
+        // arrives space-prefixed instead of gluing onto the period.
+        let harness = makeHarness(readPrecedingContext: { "Done." })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == [" Let's meet on saturday."])
+    }
+
+    @Test func theLastInsertRecordStandsInWhenAXCannotSee() async throws {
+        // Same app, seconds apart, AX blind: the session's own record of what
+        // it just inserted provides the context. The delivery target must
+        // match the next press's frontmost app for the record to apply.
+        let harness = makeHarness(
+            deliveryOutcome: .inserted(method: .paste, appBundleID: "com.example.pressapp"),
+            readPrecedingContext: { nil }
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.count == 2)
+        #expect(delivered.first == "Let's meet on saturday.")
+        #expect(delivered.last == " Let's meet on saturday.")
+    }
+
+    @Test func noContextSeamMeansFreshInsertionFormatting() async throws {
+        // Platforms that provide no reader (iOS today, every existing test)
+        // keep the exact old behavior.
+        let harness = makeHarness()
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday.", "Let's meet on saturday."])
     }
 
     // MARK: - Streaming preview (docs/15 step 22)

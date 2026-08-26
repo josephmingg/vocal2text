@@ -156,12 +156,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startLockCapTimer() {
         lockCapTask?.cancel()
+        // Configurable (docs/15 step 33); clamped so a corrupted default can
+        // neither disable the cap nor make it fire instantly.
+        let minutes = min(120, max(1, appState.settings.lockCapMinutes))
         lockCapTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(15 * 60))
+            try? await Task.sleep(for: .seconds(minutes * 60))
             guard !Task.isCancelled, let self, self.isLockModeActive else { return }
             self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: true)
-            self.appState.showNotice("Hands-free capped at 15 min — take saved")
+            self.appState.showNotice("Hands-free capped at \(minutes) min — take saved")
         }
     }
 

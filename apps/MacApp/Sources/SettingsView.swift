@@ -67,6 +67,14 @@ private struct GeneralPane: View {
                 Toggle("Play sounds", isOn: $settings.soundsEnabled)
                 Toggle("Show HUD while dictating", isOn: $settings.hudEnabled)
                 Toggle("Show latency after each dictation", isOn: $settings.showTimingsToast)
+                // docs/15 step 33: the FR-1.3 hands-free cap, no longer
+                // hardcoded at 15 minutes.
+                Picker("Hands-free auto-stop after", selection: $settings.lockCapMinutes) {
+                    Text("5 minutes").tag(5)
+                    Text("15 minutes").tag(15)
+                    Text("30 minutes").tag(30)
+                    Text("60 minutes").tag(60)
+                }
             }
         }
         .formStyle(.grouped)

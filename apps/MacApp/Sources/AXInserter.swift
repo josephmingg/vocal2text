@@ -86,6 +86,35 @@ enum AXInserter {
     }
 }
 
+extension AXInserter {
+    /// The text immediately before the caret in the focused element (docs/15
+    /// step 29): the preceding-context read that finally makes smart spacing
+    /// and joining real (FR-3.3). nil where AX exposes no value or selection
+    /// — the caller falls back or formats for a fresh insertion point.
+    static func precedingContext(maxLength: Int = 64) -> String? {
+        guard
+            let element = focusedElement(),
+            let value = readableValue(of: element)
+        else { return nil }
+        var rangeRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, &rangeRef
+            ) == .success,
+            let rangeRef,
+            CFGetTypeID(rangeRef) == AXValueGetTypeID()
+        else { return nil }
+        var cfRange = CFRange()
+        // Layout-compatible reference; the type id is checked above.
+        guard AXValueGetValue(unsafeBitCast(rangeRef, to: AXValue.self), .cfRange, &cfRange)
+        else { return nil }
+        let haystack = value as NSString
+        let caret = min(max(0, cfRange.location), haystack.length)
+        let start = max(0, caret - maxLength)
+        return haystack.substring(with: NSRange(location: start, length: caret - start))
+    }
+}
+
 /// The undo half of docs/15 step 28: the safety net that makes aggressive
 /// cleanup acceptable. Selects the last occurrence of the delivered text in
 /// the focused element via the Accessibility API and replaces it — with the
