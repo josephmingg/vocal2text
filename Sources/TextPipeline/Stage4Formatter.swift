@@ -37,6 +37,10 @@ public enum Stage4Formatter: Sendable {
             }
         case .english:
             if formatting.autoPunctuation {
+                // docs/15 step 51: unambiguous spoken numbers become digits
+                // deterministically — no model involved, so it works with
+                // cleanup off and never hallucinates arithmetic.
+                result = SpokenNumberFormatter.apply(result)
                 result = collapseDuplicateTerminalPunctuation(result)
             }
             if formatting.smartSpacing, let context = precedingContext {
