@@ -3,6 +3,7 @@ import CoreModels
 import Foundation
 
 #if canImport(WhisperKit)
+import CoreML
 import WhisperKit
 
 /// Primary EN/ZH engine (docs/04 §1): Whisper large-v3-turbo via WhisperKit.
@@ -63,7 +64,11 @@ public actor WhisperKitEngine: TranscriptionEngine {
             VocalLog.engine.info(
                 "loading WhisperKit model \(self.modelName, privacy: .public) — first run downloads ~600 MB and compiles for the Neural Engine"
             )
-            let config = WhisperKitConfig(model: modelName, modelFolder: modelFolder?.path)
+            let config = WhisperKitConfig(
+                model: modelName,
+                modelFolder: modelFolder?.path,
+                computeOptions: Self.computeOptions
+            )
             let loaded = try await WhisperKit(config)
             VocalLog.engine.info("WhisperKit model ready")
             pipe = loaded
@@ -79,6 +84,29 @@ public actor WhisperKitEngine: TranscriptionEngine {
     /// True once the model is resident — the app uses this to explain
     /// first-run latency honestly in the HUD.
     public var isModelLoaded: Bool { pipe != nil }
+
+    /// Pinned compute units (docs/15 step 18): letting CoreML renegotiate
+    /// placement per load is how the same model lands on the ANE one launch
+    /// and the GPU the next, with visibly different latency. The encoder and
+    /// decoder belong on the Neural Engine on every Apple Silicon target; the
+    /// mel stage is tiny and runs wherever it costs least. iOS additionally
+    /// must never schedule onto the GPU: a Metal-scheduled model crashes when
+    /// the app is backgrounded mid-inference (docs/04).
+    nonisolated static var computeOptions: ModelComputeOptions {
+        #if os(iOS)
+        ModelComputeOptions(
+            melCompute: .cpuAndNeuralEngine,
+            audioEncoderCompute: .cpuAndNeuralEngine,
+            textDecoderCompute: .cpuAndNeuralEngine
+        )
+        #else
+        ModelComputeOptions(
+            melCompute: .cpuAndGPU,
+            audioEncoderCompute: .cpuAndNeuralEngine,
+            textDecoderCompute: .cpuAndNeuralEngine
+        )
+        #endif
+    }
 
     public func transcribe(
         _ audio: PCMChunk,
