@@ -2,6 +2,7 @@ import ASRKit
 import ASREngineParakeet
 import ASREngineSherpaOnnx
 import ASREngineWhisperKit
+import AVFoundation
 import AppKit
 import AudioPipeline
 import CleanupKit
@@ -124,6 +125,9 @@ final class AppState: ObservableObject {
     /// Set when the FR-1.3 low-disk guard finished a take early, so the notice
     /// shows after delivery instead of being overwritten by phase changes.
     private var pendingLowDiskNotice = false
+    /// Set when a mid-take audio-device change ended the take (docs/15
+    /// step 36), so the explanation lands once the HUD settles.
+    private var pendingDeviceChangeNotice = false
     /// Live profile set (docs/11 G17): persisted, seeded from the built-ins on
     /// first run, and edited by Settings → Profiles. One instance, so the
     /// resolver, the menu-bar pin picker, and the editor agree on UUIDs
@@ -354,6 +358,14 @@ final class AppState: ObservableObject {
                     relay.noteLevel(level)
                 }
             }
+            // docs/15 step 36: an AirPods connect or input switch mid-take
+            // reconfigures the engine under the tap; end the take through the
+            // normal stop path so the audio captured so far is delivered.
+            await microphone.setConfigurationChangeHandler {
+                Task { @MainActor in
+                    relay.noteDeviceChange()
+                }
+            }
             // Build and prepare the first take's audio engine now (docs/15
             // step 50), so the first press finds the allocation already paid.
             // Touches no microphone hardware — no permission prompt, no
@@ -440,6 +452,24 @@ final class AppState: ObservableObject {
     func lowDiskGuardTripped() {
         pendingLowDiskNotice = true
         stopDictation(isLockMode: false)
+    }
+
+    /// docs/15 step 36: the audio device changed under a live take.
+    func deviceChangedMidTake() {
+        guard case .listening = hudState.mode else { return }
+        pendingDeviceChangeNotice = true
+        stopDictation(isLockMode: false)
+    }
+
+    // MARK: - Permission health (docs/15 step 37)
+
+    /// True when microphone access is denied or was revoked (a TCC reset) —
+    /// the menu bar warns instead of the app sitting silently deaf.
+    @Published private(set) var microphonePermissionDenied = false
+
+    func refreshPermissionHealth() {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        microphonePermissionDenied = (status == .denied || status == .restricted)
     }
 
     /// Loads (downloading on first run) the ASR model so the first dictation
@@ -828,6 +858,9 @@ final class AppState: ObservableObject {
             if pendingLowDiskNotice {
                 pendingLowDiskNotice = false
                 showNotice("Disk almost full — take saved before recording stopped")
+            } else if pendingDeviceChangeNotice {
+                pendingDeviceChangeNotice = false
+                showNotice("Audio device changed — take saved")
             } else if case .notice = hudState.mode {
                 // A delivery notice (clipboard fallback / secure block) is
                 // already showing; let its own dismiss timer run.
@@ -1061,6 +1094,10 @@ private final class ResolutionRelay {
 
     func noteLowDisk() {
         appState?.lowDiskGuardTripped()
+    }
+
+    func noteDeviceChange() {
+        appState?.deviceChangedMidTake()
     }
 
     func noteLevel(_ level: Float) {

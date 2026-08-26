@@ -432,6 +432,12 @@ public actor MicrophoneCapture {
     private var lowDiskTripped = false
     /// Per-chunk microphone level for the HUD waveform (FR-4.1), ~12×/second.
     private var levelHandler: (@Sendable (Float) -> Void)?
+    /// docs/15 step 36: fired when the engine's configuration changes
+    /// mid-take (AirPods connect, input device switch). The composition root
+    /// finishes the take through the normal stop path — captured audio is
+    /// delivered, not lost to a silently dead tap.
+    private var configurationChangeHandler: (@Sendable () -> Void)?
+    private var configurationObserver: (any NSObjectProtocol)?
     /// An engine built and prepared ahead of the press (docs/15 step 50):
     /// instantiating the input audio unit is the expensive part of capture
     /// start, and every millisecond between key-down and mic-open is speech
@@ -474,6 +480,11 @@ public actor MicrophoneCapture {
     /// Installs the live-level callback (see `levelHandler`).
     public func setLevelHandler(_ handler: @escaping @Sendable (Float) -> Void) {
         levelHandler = handler
+    }
+
+    /// Installs the device-change callback (see `configurationChangeHandler`).
+    public func setConfigurationChangeHandler(_ handler: @escaping @Sendable () -> Void) {
+        configurationChangeHandler = handler
     }
 
     /// Begin capturing. The returned session's `chunks` yields converted audio
@@ -596,6 +607,19 @@ public actor MicrophoneCapture {
             }
         }
 
+        // docs/15 step 36: a route change (AirPods connecting, an interface
+        // unplugged) reconfigures the engine under the tap; the take must end
+        // gracefully instead of recording silence. Registered before start so
+        // an immediate change is not missed; removed in stopEngineAndDrain.
+        let changeHandler = configurationChangeHandler
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { _ in
+            changeHandler?()
+        }
+
         engine.prepare()
         do {
             try engine.start()
@@ -714,6 +738,10 @@ public actor MicrophoneCapture {
     private func stopEngineAndDrain() async {
         guard isCapturing else { return }
         isCapturing = false
+        if let observer = configurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configurationObserver = nil
+        }
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -724,6 +752,26 @@ public actor MicrophoneCapture {
             await task.value
         }
         processingTask = nil
+        // Converter tail flush (docs/15 step 36): resampling holds a few
+        // milliseconds of internal frames; hand them to the take instead of
+        // clipping the last syllable's edge. Harmless on cancel — the
+        // accumulated audio is discarded right after.
+        if let converter, let outputFormat = targetFormat,
+            let outBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 1_024) {
+            var conversionError: NSError?
+            let status = converter.convert(to: outBuffer, error: &conversionError) { _, inputStatus in
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            if status != .error, outBuffer.frameLength > 0,
+                let channels = outBuffer.floatChannelData {
+                accumulated.append(
+                    contentsOf: UnsafeBufferPointer(
+                        start: channels[0], count: Int(outBuffer.frameLength)
+                    )
+                )
+            }
+        }
         chunkContinuation?.finish()
         chunkContinuation = nil
         try? recoveryHandle?.close()

@@ -49,6 +49,17 @@ struct MenuBarView: View {
                 .foregroundStyle(.orange)
             }
 
+            // docs/15 step 37: a revoked microphone permission (TCC reset)
+            // must warn here, not surface as silent empty takes.
+            if appState.microphonePermissionDenied {
+                Label(
+                    "Microphone access is off — enable it in System Settings → Privacy",
+                    systemImage: "mic.slash.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
             Divider()
 
             VStack(alignment: .leading, spacing: 4) {
@@ -144,8 +155,12 @@ struct MenuBarView: View {
         .padding(12)
         .frame(width: 280)
         // The sidecar can appear or expire while the menu is closed — and a
-        // crash leaves one behind with no phase change to notice it.
-        .onAppear { appState.refreshRecoverableTake() }
+        // crash leaves one behind with no phase change to notice it. The
+        // permission probe rides the same moment (docs/15 step 37).
+        .onAppear {
+            appState.refreshRecoverableTake()
+            appState.refreshPermissionHealth()
+        }
     }
 
     /// "12s" / "1:24" — enough for the user to tell which take is on offer.

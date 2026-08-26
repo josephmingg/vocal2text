@@ -4,6 +4,12 @@ import Foundation
 // FoundationModels ships in the macOS 26 / iOS 26 SDKs (Xcode 26 / Swift 6.2+);
 // older toolchains compile the stub. [verify: M0 spike 0.5 exercises the real
 // path on-device — this adapter cannot be compile-checked by today's CI runner.]
+//
+// STATUS (docs/15 step 38): compiled but not wired into any composition root.
+// Whether it ships as a real provider (raise the deployment floor to 26, or
+// runtime-gate with #available) is open owner decision 1 in docs/15 Part 2b;
+// until that call is made, this file must not be presented as a shipping
+// provider.
 #if canImport(FoundationModels) && compiler(>=6.2)
 import FoundationModels
 

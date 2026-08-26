@@ -6,6 +6,12 @@ import Foundation
 // require the Swift 6.2+ compiler (Xcode 26). Older SDKs compile the stub, so
 // every CI runner and Linux build stays green while real hardware gets the
 // fast-path engine. [verify: M0 spike 0.2 exercises this adapter on-device.]
+//
+// STATUS (docs/15 step 38): compiled but not wired into any composition root.
+// Whether it ships as a real engine (raise the deployment floor to 26, or
+// runtime-gate with #available) is open owner decision 1 in docs/15 Part 2b;
+// until that call is made, this file must not be presented as a shipping
+// engine.
 #if canImport(Speech) && compiler(>=6.2)
 // AVFoundation supplies AVAudioFormat/AVAudioPCMBuffer below. Speech pulls it
 // in transitively today, but relying on that makes the build hostage to
