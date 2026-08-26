@@ -36,8 +36,8 @@ struct HUDView: View {
             EmptyView()
         case .listening(let startedAt):
             listening(startedAt: startedAt)
-        case .processing:
-            processing
+        case .processing(let stage):
+            processing(stage: stage)
         case .error(let message):
             errorContent(message)
         case .notice(let message):
@@ -86,24 +86,40 @@ struct HUDView: View {
         }
     }
 
-    private var processing: some View {
+    private func processing(stage: HUDState.ProcessingStage) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .controlSize(.small)
-                Text("Transcribing…")
+                // docs/15 step 23: the delivering beat is visibly distinct —
+                // the moment between "thinking" and "text landed" used to be
+                // one undifferentiated spinner.
+                if stage == .delivering {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                }
+                Text(Self.stageLabel(stage))
                     .font(.callout)
                     .foregroundStyle(.primary)
             }
-            // First-run honesty: the model download/compile hint arrives via
-            // partialText so a multi-minute first load never looks frozen.
+            // First-run honesty and the live preview both arrive via
+            // partialText, so a long stage never looks frozen.
             if !appState.hudState.partialText.isEmpty {
                 Text(appState.hudState.partialText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
+        }
+    }
+
+    private static func stageLabel(_ stage: HUDState.ProcessingStage) -> String {
+        switch stage {
+        case .transcribing: return "Transcribing…"
+        case .cleaning: return "Cleaning up…"
+        case .delivering: return "Inserting…"
         }
     }
 

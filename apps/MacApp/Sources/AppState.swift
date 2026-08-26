@@ -17,10 +17,19 @@ struct HUDState: Equatable {
     enum Mode: Equatable {
         case hidden
         case listening(startedAt: Date)
-        case processing
+        case processing(stage: ProcessingStage)
         case error(String)
         /// Non-error transient message (clipboard fallback, secure-field block).
         case notice(String)
+    }
+
+    /// Which pipeline stage the processing HUD is in (docs/15 step 23): the
+    /// delivering flash makes the paste moment visible instead of the whole
+    /// post-release stretch reading as one undifferentiated spinner.
+    enum ProcessingStage: Equatable {
+        case transcribing
+        case cleaning
+        case delivering
     }
 
     var mode: Mode
@@ -673,8 +682,12 @@ final class AppState: ObservableObject {
                 hudState.mode = .listening(startedAt: Date())
             }
             DeliverySounds.playStart(enabled: settings.soundsEnabled)
-        case .transcribing, .cleaning, .delivering:
-            hudState.mode = .processing
+        case .transcribing:
+            hudState.mode = .processing(stage: .transcribing)
+        case .cleaning:
+            hudState.mode = .processing(stage: .cleaning)
+        case .delivering:
+            hudState.mode = .processing(stage: .delivering)
         case .cancelled:
             hintGeneration += 1
             pendingLowDiskNotice = false
@@ -698,6 +711,7 @@ final class AppState: ObservableObject {
                 // A delivery notice (clipboard fallback / secure block) is
                 // already showing; let its own dismiss timer run.
             } else if let error = await session.lastError {
+                DeliverySounds.playError(enabled: settings.soundsEnabled)
                 hudState.mode = .error(Self.message(for: error))
                 scheduleErrorDismiss()
             } else if settings.showTimingsToast, let timings = await session.lastTimings {
@@ -733,7 +747,8 @@ final class AppState: ObservableObject {
         }
         switch outcome {
         case .inserted:
-            break
+            // docs/15 step 23: the paste landing gets its own sound.
+            DeliverySounds.playDelivered(enabled: settings.soundsEnabled)
         case .copiedToClipboard:
             Diagnostics.shared.increment(.clipboardFallbacks)
             showNotice("Copied — press ⌘V to paste")

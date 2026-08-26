@@ -16,4 +16,17 @@ enum DeliverySounds {
         guard enabled else { return }
         NSSound(named: "Pop")?.play()
     }
+
+    /// Text landed in the target app (docs/15 step 23): the paste moment gets
+    /// its own sound, distinct from the stop click that precedes it.
+    static func playDelivered(enabled: Bool) {
+        guard enabled else { return }
+        NSSound(named: "Bottle")?.play()
+    }
+
+    /// A take failed and the HUD is about to say so.
+    static func playError(enabled: Bool) {
+        guard enabled else { return }
+        NSSound(named: "Basso")?.play()
+    }
 }
