@@ -10,6 +10,9 @@ on:
     paths-ignore:
       - "docs/**"
       - "*.md"
+  # Manual escape hatch: pushes from some automation credentials do not
+  # generate push events, and a red PR must never be stuck waiting on one.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
