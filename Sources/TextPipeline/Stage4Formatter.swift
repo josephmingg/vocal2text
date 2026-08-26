@@ -52,7 +52,11 @@ public enum Stage4Formatter: Sendable {
                 result = CodeModeFormatter.apply(result)
             }
             if formatting.smartSpacing, let context = precedingContext {
-                result = smartSpaced(result, against: context)
+                // Code-mode output is identifiers — never sentence-capitalize
+                // it, or "user_name = five" becomes "User_name = five".
+                result = smartSpaced(
+                    result, against: context, capitalize: !formatting.codeMode
+                )
             }
         }
         return result
@@ -69,13 +73,19 @@ public enum Stage4Formatter: Sendable {
     // Capitalization keys off the last non-whitespace character so "Done. "
     // (space already present) still starts a new sentence; the space prefix keys
     // off the literal last character so an existing space is never doubled.
-    private static func smartSpaced(_ text: String, against context: String) -> String {
+    private static func smartSpaced(
+        _ text: String, against context: String, capitalize: Bool
+    ) -> String {
         var result = text
-        if let lastVisible = context.reversed().first(where: { !$0.isWhitespace }),
+        if capitalize,
+           let lastVisible = context.reversed().first(where: { !$0.isWhitespace }),
            sentenceTerminators.contains(lastVisible) {
             result = Stage1Normalizer.capitalizedFirstLetter(result)
         }
-        if let last = context.last, !last.isWhitespace {
+        // Text that opens with its own break ("\n\nnext topic" from a layout
+        // command) needs no separating space — prepending one would deposit
+        // a stray trailing space on the previous line.
+        if let last = context.last, !last.isWhitespace, result.first?.isNewline != true {
             result = " " + result
         }
         return result

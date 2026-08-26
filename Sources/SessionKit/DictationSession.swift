@@ -363,7 +363,11 @@ public actor DictationSession {
     /// pipelines are still in flight, `.idle` otherwise. Callers guarantee no
     /// capture is active (or arming) when they call this.
     private func settleAfterCaptureEnd() {
-        transition(to: queuedPipelines > 0 ? .transcribing : .idle)
+        // A held provisional take is in-flight work too: settling to .idle
+        // over it would show a false idle and let recover() deliver a
+        // recovered take ahead of the earlier-spoken held one.
+        let busy = queuedPipelines > 0 || provisionalTake != nil
+        transition(to: busy ? .transcribing : .idle)
     }
 
     /// Pipeline-driven transitions must never stomp a newer capture's phase:
@@ -486,8 +490,11 @@ public actor DictationSession {
 
     /// The tap pair was a lock gesture: the held take is dropped unseen.
     public func discardProvisionalTake() async {
-        guard provisionalTake != nil else { return }
+        guard let pending = provisionalTake else { return }
         provisionalTake = nil
+        // Every other death path cancels the press-time profile resolution;
+        // a discarded take must not leave its osascript fetch running.
+        pending.resolution.cancel()
         guard take == nil, phaseValue != .arming else { return }
         settleAfterCaptureEnd()
     }
@@ -587,7 +594,12 @@ public actor DictationSession {
 
         let held = heldDurationOverride ?? startedAt.duration(to: clock.now)
         let audio = await active.capture.finish()
-        let captureSeconds = Self.seconds(active.pressedAt.duration(to: clock.now))
+        // Mic-open → capture end. The arm window is armSeconds' own field;
+        // measuring capture from the press would count it twice in any
+        // consumer that sums the stages.
+        let captureSeconds = max(
+            0, Self.seconds(active.pressedAt.duration(to: clock.now)) - active.armSeconds
+        )
 
         // FR-1.5, v1 shape: the session has no VAD, so captured-audio duration
         // stands in for "speech detected" — a sub-500 ms hold is discarded

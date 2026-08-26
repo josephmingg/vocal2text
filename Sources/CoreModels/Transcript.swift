@@ -34,6 +34,8 @@ public struct TimingBreakdown: Codable, Sendable, Hashable {
     /// the user loses at the start of every take. 0 on rows written before
     /// the mark existed, and for recovered takes (no press).
     public var armSeconds: Double
+    /// Microphone open → capture end — disjoint from `armSeconds`, so the
+    /// stage fields sum without double-counting the arm window.
     public var captureSeconds: Double
     public var transcriptionSeconds: Double
     public var dictionarySeconds: Double

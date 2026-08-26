@@ -136,19 +136,44 @@ enum AXUndo {
         let range = haystack.range(of: needle, options: [.backwards])
         guard range.location != NSNotFound else { return false }
 
-        var settable = DarwinBoolean(false)
-        guard
-            AXUIElementIsAttributeSettable(
-                element, kAXSelectedTextRangeAttribute as CFString, &settable
-            ) == .success,
-            settable.boolValue
-        else { return false }
+        // Both attributes must be settable up front: a selectable-but-not-
+        // editable element (a read-only viewer) accepts the range set — which
+        // visibly moves the user's caret — and then rejects the text set,
+        // breaking this function's "nothing was changed on false" contract.
+        for attribute in [kAXSelectedTextRangeAttribute, kAXSelectedTextAttribute] {
+            var settable = DarwinBoolean(false)
+            guard
+                AXUIElementIsAttributeSettable(
+                    element, attribute as CFString, &settable
+                ) == .success,
+                settable.boolValue
+            else { return false }
+        }
         var cfRange = CFRange(location: range.location, length: range.length)
         guard let axRange = AXValueCreate(.cfRange, &cfRange) else { return false }
         guard
             AXUIElementSetAttributeValue(
                 element, kAXSelectedTextRangeAttribute as CFString, axRange
+            ) == .success
+        else { return false }
+        // Read the selection back before writing: some AX layers (Electron
+        // web areas) ACK a range set without applying it, and the text write
+        // would then land at the caret instead of over the found occurrence.
+        var verifyRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, &verifyRef
             ) == .success,
+            let verifyRef,
+            CFGetTypeID(verifyRef) == AXValueGetTypeID()
+        else { return false }
+        var appliedRange = CFRange()
+        guard
+            AXValueGetValue(unsafeBitCast(verifyRef, to: AXValue.self), .cfRange, &appliedRange),
+            appliedRange.location == cfRange.location,
+            appliedRange.length == cfRange.length
+        else { return false }
+        guard
             AXUIElementSetAttributeValue(
                 element, kAXSelectedTextAttribute as CFString, replacement as CFTypeRef
             ) == .success

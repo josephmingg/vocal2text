@@ -65,4 +65,21 @@ struct DictionaryCSVTests {
         let parsed = DictionaryCSV.parse("sig,\"line one\r\nline two\"\r\n")
         #expect(parsed.map(\.written) == ["line one\nline two"])
     }
+
+    @Test func excelUTF8BOMDoesNotBecomeADictionaryEntry() {
+        let parsed = DictionaryCSV.parse("\u{FEFF}spoken,written,enabled\na,b,true\n")
+        #expect(parsed.map(\.written) == ["b"])
+    }
+
+    @Test func bareCarriageReturnEndingsSeparateRows() {
+        let parsed = DictionaryCSV.parse("a,b\rc,d\r")
+        #expect(parsed.map(\.written) == ["b", "d"])
+    }
+
+    @Test func anUnterminatedQuoteKeepsItsRowInsteadOfVanishing() {
+        // A hand-edited file with a missing closing quote loses at most its
+        // quoting — never the data silently.
+        let parsed = DictionaryCSV.parse("alpha,\"bravo")
+        #expect(parsed.map(\.written) == ["bravo"])
+    }
 }

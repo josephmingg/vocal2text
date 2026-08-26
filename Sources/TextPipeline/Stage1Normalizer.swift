@@ -57,10 +57,13 @@ public enum Stage1Normalizer: Sendable {
     /// Uppercases the first character when it has a distinct uppercase form.
     /// Shared with stage 4's capitalize-after-sentence rule.
     static func capitalizedFirstLetter(_ text: String) -> String {
-        guard let first = text.first else { return text }
+        // Skip leading whitespace so text opening a new paragraph ("\n\nnext
+        // topic") still gets its sentence capital.
+        guard let index = text.firstIndex(where: { !$0.isWhitespace }) else { return text }
+        let first = text[index]
         let upper = String(first).uppercased()
         guard upper != String(first) else { return text }
-        return upper + text.dropFirst()
+        return String(text[..<index]) + upper + String(text[text.index(after: index)...])
     }
 
     // MARK: - Artifact stripping (always on)
@@ -165,10 +168,11 @@ public enum Stage1Normalizer: Sendable {
     /// occurrence; shorter runs stay (可以可以 is legitimate speech).
     private static func collapseUnspacedRepetitionLoops(_ text: String) -> String {
         guard
-            let regex = try? NSRegularExpression(
-                pattern: "(.{2,20}?)\\1{3,}",
-                options: [.dotMatchesLineSeparators]
-            )
+            // \S only: the unit must itself be unspaced, or this pass would
+            // also collapse legitimate spaced speech ("over and over and
+            // over…") and run across the newlines the token-based pass
+            // carefully treats as run breaks (G6).
+            let regex = try? NSRegularExpression(pattern: "(\\S{2,20}?)\\1{3,}")
         else { return text }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         return regex.stringByReplacingMatches(

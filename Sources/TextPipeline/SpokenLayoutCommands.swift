@@ -10,13 +10,16 @@ public enum SpokenLayoutCommands {
 
     public static func apply(_ text: String) -> String {
         var result = text
-        // Longest phrase first so "new paragraph" never half-matches. Any
-        // punctuation the recognizer attached to the command goes with it.
+        // Longest phrase first so "new paragraph" never half-matches. The
+        // comma the recognizer attaches to the command goes with it, but a
+        // period before the command belongs to the *previous sentence* and
+        // must survive; the trailing class still absorbs the punctuation the
+        // command phrase itself attracted.
         result = PipelineRegex.replacing(
-            pattern: "[ ,.]*\\bnew paragraph\\b[ ,.]*", in: result, with: "\n\n"
+            pattern: "[ ,]*\\bnew paragraph\\b[ ,.]*", in: result, with: "\n\n"
         )
         result = PipelineRegex.replacing(
-            pattern: "[ ,.]*\\bnew line\\b[ ,.]*", in: result, with: "\n"
+            pattern: "[ ,]*\\bnew line\\b[ ,.]*", in: result, with: "\n"
         )
         return result
     }

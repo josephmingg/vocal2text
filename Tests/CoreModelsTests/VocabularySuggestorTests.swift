@@ -73,6 +73,31 @@ struct VocabularySuggestorTests {
         )
     }
 
+    @Test func aCapitalizedContentSwapIsStillNotVocabulary() {
+        // "Sarah" being uppercase must not bypass the sounds-alike guard —
+        // otherwise every capitalized substitution becomes a proposed rule
+        // that would rewrite "john" forever.
+        #expect(
+            VocabularySuggestor.suggestion(
+                previousText: "email john about it",
+                currentText: "email Sarah about it",
+                gapSeconds: 5
+            ) == nil
+        )
+    }
+
+    @Test func aStopWordSpokenFormIsNeverProposed() {
+        // "the" → "three" is close in edit distance, but an entry keyed on
+        // "the" would corrupt every future dictation.
+        #expect(
+            VocabularySuggestor.suggestion(
+                previousText: "meet at the pm",
+                currentText: "meet at three pm",
+                gapSeconds: 5
+            ) == nil
+        )
+    }
+
     @Test func scatteredDifferencesAreNotOneCorrection() {
         #expect(
             VocabularySuggestor.suggestion(

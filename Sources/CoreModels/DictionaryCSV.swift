@@ -65,16 +65,24 @@ public enum DictionaryCSV {
     }
 
     /// RFC-4180 row splitter: handles quoted fields (with embedded commas,
-    /// escaped quotes, and newlines) and both \n and \r\n row endings.
+    /// escaped quotes, and newlines), \n, \r\n, and bare-\r row endings, and
+    /// a UTF-8 BOM (Excel's "CSV UTF-8" prepends one).
     static func parseRows(_ text: String) -> [[String]] {
         var rows: [[String]] = []
         var row: [String] = []
         var field = ""
         var inQuotes = false
-        var characters = Array(text)
+        var characters = Array(text.hasPrefix("\u{FEFF}") ? String(text.dropFirst()) : text)
         var index = 0
-        // A trailing newline closes the last row cleanly.
-        if characters.last != "\n" { characters.append("\n") }
+        // A trailing newline closes the last row cleanly — but only when the
+        // parser will actually see it as one: appended inside an unterminated
+        // quote it would be swallowed into the field, so that case is handled
+        // by the explicit flush after the loop instead.
+        var syntheticNewline = false
+        if characters.last != "\n" {
+            characters.append("\n")
+            syntheticNewline = true
+        }
         while index < characters.count {
             let character = characters[index]
             if inQuotes {
@@ -85,27 +93,27 @@ public enum DictionaryCSV {
                     } else {
                         inQuotes = false
                     }
-                } else if character == "\r\n" {
-                    // Quoted multi-line fields from CRLF files normalize to
-                    // \n — written forms should never paste carriage returns.
+                } else if character == "\r\n" || character == "\r" {
+                    // Quoted multi-line fields normalize to \n — written
+                    // forms should never paste carriage returns.
                     field.append("\n")
                 } else {
                     field.append(character)
                 }
             } else {
                 switch character {
+                // "\r\n" is a single Character (one grapheme cluster) in
+                // Swift, so a CRLF row ending never matches "\r" or "\n"
+                // alone — it must be listed itself or it lands in `default`
+                // and corrupts the field (the exact bug CI caught). A bare
+                // \r (classic-Mac endings) also terminates the row; dropping
+                // it would concatenate adjacent rows' fields.
                 case "\"":
                     inQuotes = true
                 case ",":
                     row.append(field)
                     field = ""
-                case "\r":
-                    break
-                // "\r\n" is a single Character (one grapheme cluster) in
-                // Swift, so a CRLF row ending never matches "\r" or "\n"
-                // alone — it must be its own case or it lands in `default`
-                // and corrupts the field (the exact bug CI caught).
-                case "\n", "\r\n":
+                case "\n", "\r", "\r\n":
                     row.append(field)
                     field = ""
                     if !(row.count == 1 && row[0].isEmpty) {
@@ -117,6 +125,15 @@ public enum DictionaryCSV {
                 }
             }
             index += 1
+        }
+        // An unterminated quote at EOF must not silently discard what was
+        // read into it — flush the pending row so a one-character typo in a
+        // hand-edited file loses at most its quoting, not its data.
+        if !field.isEmpty || !row.isEmpty {
+            // The newline this parser appended itself is not user data.
+            if inQuotes, syntheticNewline, field.hasSuffix("\n") { field.removeLast() }
+            row.append(field)
+            if !(row.count == 1 && row[0].isEmpty) { rows.append(row) }
         }
         return rows
     }

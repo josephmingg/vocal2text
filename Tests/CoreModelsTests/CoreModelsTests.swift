@@ -270,6 +270,16 @@ func myanmarScriptDetection(text: String, expected: Bool) {
     #expect(decoded == FormattingOptions())
 }
 
+@Test func aValueFromANewerAppVersionFallsBackInsteadOfFailingTheDecode() throws {
+    // Forward compatibility: a *present but unknown* value (written by a
+    // newer build) must degrade to the default like an absent key — a
+    // Profile decode failure silently costs the user their customizations.
+    let foreign = #"{"myanmarDigits":"future-mode","codeMode":"not-a-bool"}"#
+    let decoded = try JSONDecoder().decode(FormattingOptions.self, from: Data(foreign.utf8))
+    #expect(decoded.myanmarDigits == FormattingOptions().myanmarDigits)
+    #expect(decoded.codeMode == FormattingOptions().codeMode)
+}
+
 @Test func profileWithBurmeseOverrideRoundTrips() throws {
     let profile = Profile(
         name: "Burmese notes",

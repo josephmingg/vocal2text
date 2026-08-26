@@ -64,7 +64,21 @@ public enum CodeModeFormatter {
         }
     }
 
+    /// Casing commands consume at most this many identifier words — a
+    /// trigger phrase in ordinary prose ("camel case is a naming convention")
+    /// must not swallow the rest of the sentence.
+    static let maximumIdentifierWords = 5
+
     public static func apply(_ text: String) -> String {
+        // Per line: the layout breaks inserted upstream (docs/15 step 30) and
+        // any newlines already in the text must survive code mode — the
+        // whitespace tokenizer below would otherwise flatten them to spaces.
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { applyToLine(String($0)) }
+            .joined(separator: "\n")
+    }
+
+    static func applyToLine(_ text: String) -> String {
         let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !tokens.isEmpty else { return text }
 
@@ -79,7 +93,8 @@ public enum CodeModeFormatter {
                 let casing = Casing(rawValue: word) {
                 var identifier: [String] = []
                 var next = index + 2
-                while next < tokens.count, isIdentifierWord(tokens[next]),
+                while next < tokens.count, identifier.count < Self.maximumIdentifierWords,
+                    isIdentifierWord(tokens[next]),
                     !isSymbolKeyword(at: next, in: tokens) {
                     identifier.append(tokens[next])
                     next += 1
@@ -142,12 +157,21 @@ public enum CodeModeFormatter {
     /// after openers, openers glue to the identifier they follow (calls and
     /// indexing), dots and underscores glue their neighbors. An opener after
     /// an operator keeps its space — "-> (value)".
+    ///
+    /// Angle brackets are deliberately left alone: "open angle" can mean a
+    /// comparison ("a < b") or a generic ("list<string>"), and either
+    /// tightening corrupts the other — spoken spacing stands.
+    ///
+    /// The dot/underscore glue requires a space *before* the mark: a spoken
+    /// symbol always arrives space-separated ("user . name"), while the
+    /// period Whisper punctuates a sentence with does not ("It works. Then")
+    /// — gluing that one would weld prose sentences together.
     static func tightened(_ text: String) -> String {
         var result = text
-        result = PipelineRegex.replacing(pattern: " +([)\\]}>,;:])", in: result, with: "$1")
-        result = PipelineRegex.replacing(pattern: "([(\\[{<]) +", in: result, with: "$1")
+        result = PipelineRegex.replacing(pattern: " +([)\\]},;:])", in: result, with: "$1")
+        result = PipelineRegex.replacing(pattern: "([(\\[{]) +", in: result, with: "$1")
         result = PipelineRegex.replacing(pattern: "(\\w) +([(\\[])", in: result, with: "$1$2")
-        result = PipelineRegex.replacing(pattern: " *([._]) *", in: result, with: "$1")
+        result = PipelineRegex.replacing(pattern: " +([._]) *", in: result, with: "$1")
         return result
     }
 }

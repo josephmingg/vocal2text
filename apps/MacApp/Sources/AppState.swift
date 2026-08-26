@@ -449,18 +449,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Set by AppDelegate. A mid-take guard that force-ends a take must ask
+    /// it whether hands-free lock was active (so `isLockMode` reaches the
+    /// deliverer truthfully and the FR-3.6 wandering-focus guard holds) and
+    /// have it clear its lock bookkeeping — otherwise `isLockModeActive`
+    /// dangles and swallows the next press, while the cap timer later fires
+    /// a bogus notice.
+    var endLockModeForForcedStop: (() -> Bool)?
+
     /// The FR-1.3 mid-take low-disk guard fired: end the take normally and
     /// queue the explanation for when the HUD returns to idle.
     func lowDiskGuardTripped() {
         pendingLowDiskNotice = true
-        stopDictation(isLockMode: false)
+        stopDictation(isLockMode: endLockModeForForcedStop?() ?? false)
     }
 
     /// docs/15 step 36: the audio device changed under a live take.
     func deviceChangedMidTake() {
         guard case .listening = hudState.mode else { return }
         pendingDeviceChangeNotice = true
-        stopDictation(isLockMode: false)
+        stopDictation(isLockMode: endLockModeForForcedStop?() ?? false)
     }
 
     // MARK: - Permission health (docs/15 step 37)
@@ -660,11 +668,21 @@ final class AppState: ObservableObject {
     /// cleanup (the prompt is tuned for dictation, and an import has no
     /// profile). Timestamped segments and the quadratic-pipeline hardening
     /// FR-6 also calls for remain open in the plan.
+    ///
+    /// Known bound: the import transcribes on the same engine the live
+    /// pipeline uses, and engines are actors — a dictation released while a
+    /// long import is decoding queues behind it. A second engine instance
+    /// would double model memory; until FR-6 gets its own progress/cancel
+    /// UI, the trade is documented rather than half-solved.
     func importAudioFile() {
         guard let database else {
             showNotice("History is unavailable — cannot import")
             return
         }
+        // An LSUIElement app opening a modal panel from the menu-bar popover
+        // must activate first, or the panel can appear behind the frontmost
+        // app without key focus.
+        NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.audio]
         panel.allowsMultipleSelection = false
@@ -781,7 +799,10 @@ final class AppState: ObservableObject {
     /// the menu bar's re-paste and undo act on.
     private func latestDeliveredRecord() -> TranscriptRecord? {
         guard let database else { return nil }
-        let records = (try? database.allTranscripts()) ?? []
+        // A bounded fetch: decoding the whole history (imports included) on
+        // the main thread to find one row is a beachball. 50 covers any
+        // plausible run of cancelled takes and imports at the top.
+        let records = (try? database.recentTranscripts(limit: 50)) ?? []
         return records.first { !$0.isCancelled && $0.source != .fileImport }
     }
 
@@ -918,6 +939,9 @@ final class AppState: ObservableObject {
         case .cancelled:
             hintGeneration += 1
             pendingLowDiskNotice = false
+            // A device change queued its notice for a take the user then
+            // cancelled — the flag must not survive to caption the next take.
+            pendingDeviceChangeNotice = false
             hudState.mode = .hidden
             hudState.partialText = ""
             hudState.levels = []
@@ -930,8 +954,19 @@ final class AppState: ObservableObject {
             // (docs/11 G16).
             hintGeneration += 1
             // The session clears lastError at every pressBegan, so any error
-            // visible when it returns to idle belongs to this take.
-            if pendingLowDiskNotice {
+            // visible when it returns to idle belongs to this take. The error
+            // outranks the guards' pending notices — a take a guard ended
+            // whose transcription then failed must not claim "take saved".
+            if let error = await session.lastError {
+                pendingLowDiskNotice = false
+                pendingDeviceChangeNotice = false
+                DeliverySounds.playError(enabled: settings.soundsEnabled)
+                hudState.mode = .error(Self.message(for: error))
+                scheduleErrorDismiss()
+                // docs/15 step 35: a failed take just preserved its audio;
+                // surface the recovery offer without waiting for a relaunch.
+                refreshRecoverableTake()
+            } else if pendingLowDiskNotice {
                 pendingLowDiskNotice = false
                 showNotice("Disk almost full — take saved before recording stopped")
             } else if pendingDeviceChangeNotice {
@@ -940,13 +975,6 @@ final class AppState: ObservableObject {
             } else if case .notice = hudState.mode {
                 // A delivery notice (clipboard fallback / secure block) is
                 // already showing; let its own dismiss timer run.
-            } else if let error = await session.lastError {
-                DeliverySounds.playError(enabled: settings.soundsEnabled)
-                hudState.mode = .error(Self.message(for: error))
-                scheduleErrorDismiss()
-                // docs/15 step 35: a failed take just preserved its audio;
-                // surface the recovery offer without waiting for a relaunch.
-                refreshRecoverableTake()
             } else if settings.showTimingsToast, let timings = await session.lastTimings {
                 // FR-11.4 opt-in: show where the time went after each take.
                 showNotice(Self.timingsSummary(timings))
@@ -1015,13 +1043,24 @@ final class AppState: ObservableObject {
         scheduleErrorDismiss()
     }
 
+    private var dismissGeneration = 0
+
     private func scheduleErrorDismiss() {
-        let shown = hudState.mode
+        // Generation-tokened: comparing modes by value would let take N's
+        // timer dismiss take N+1's *identical* notice almost immediately
+        // (HUDState.Mode is Equatable, and repeated clipboard fallbacks
+        // produce the same string). Only the newest timer may dismiss, and
+        // only while an error/notice is still what's showing.
+        dismissGeneration += 1
+        let generation = dismissGeneration
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
-            guard let self else { return }
-            if self.hudState.mode == shown {
+            guard let self, self.dismissGeneration == generation else { return }
+            switch self.hudState.mode {
+            case .error, .notice:
                 self.hudState.mode = .hidden
+            case .hidden, .listening, .processing:
+                break
             }
         }
     }

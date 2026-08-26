@@ -98,8 +98,13 @@ struct VocalBench {
         }
         do {
             let store = try DatabaseStore(path: path)
+            // Spoken takes with recorded timings only: imports are not the
+            // user waiting on a release, and rows from before the timing
+            // marks existed decode as all-zero — folding either in drags
+            // every percentile toward 0.00 s.
             let samples = try store.allTranscripts()
-                .filter { !$0.isCancelled }
+                .filter { !$0.isCancelled && $0.source != .fileImport }
+                .filter { $0.timings.totalPostReleaseSeconds > 0 }
                 .map {
                     LatencyReport.Sample(
                         durationSeconds: $0.durationSeconds, timings: $0.timings

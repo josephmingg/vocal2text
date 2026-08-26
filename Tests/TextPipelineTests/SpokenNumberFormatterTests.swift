@@ -44,6 +44,7 @@ struct SpokenNumberFormatterTests {
             ("since nineteen ninety five", "since 1995"),
             ("in two thousand and five it changed", "in 2005 it changed"),
             ("by two thousand thirty", "by 2030"),
+            ("in twenty twenty it started", "in 2020 it started"),
         ]
     )
     func yearsConvert(input: String, expected: String) {
@@ -54,6 +55,8 @@ struct SpokenNumberFormatterTests {
         "year look-alikes stay words",
         arguments: [
             "she has twenty twenty vision",
+            "hindsight is twenty twenty",
+            "the benefit of twenty twenty vision",
             "twenty one people came",
             "two thousand five hundred units",
             "two thousand people attended",

@@ -82,23 +82,28 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = FormattingOptions()
-        func flag(_ key: CodingKeys, _ fallback: Bool) throws -> Bool {
-            try container.decodeIfPresent(Bool.self, forKey: key) ?? fallback
+        // try? throughout: a present-but-unreadable value (a raw value or
+        // type written by a newer app version) falls back to the default the
+        // same way an absent key does — a partially foreign profile must
+        // never fail the whole decode and cost the user their profiles.
+        func flag(_ key: CodingKeys, _ fallback: Bool) -> Bool {
+            (try? container.decodeIfPresent(Bool.self, forKey: key))
+                .flatMap { $0 } ?? fallback
         }
-        self.autoPunctuation = try flag(.autoPunctuation, defaults.autoPunctuation)
-        self.smartSpacing = try flag(.smartSpacing, defaults.smartSpacing)
-        self.structureAllowed = try flag(.structureAllowed, defaults.structureAllowed)
-        self.enforceFullWidthZhPunctuation = try flag(
+        self.autoPunctuation = flag(.autoPunctuation, defaults.autoPunctuation)
+        self.smartSpacing = flag(.smartSpacing, defaults.smartSpacing)
+        self.structureAllowed = flag(.structureAllowed, defaults.structureAllowed)
+        self.enforceFullWidthZhPunctuation = flag(
             .enforceFullWidthZhPunctuation, defaults.enforceFullWidthZhPunctuation
         )
-        self.panguSpacing = try flag(.panguSpacing, defaults.panguSpacing)
+        self.panguSpacing = flag(.panguSpacing, defaults.panguSpacing)
         self.myanmarDigits =
-            try container.decodeIfPresent(MyanmarDigits.self, forKey: .myanmarDigits)
-            ?? defaults.myanmarDigits
-        self.myanmarSpokenPunctuation = try flag(
+            (try? container.decodeIfPresent(MyanmarDigits.self, forKey: .myanmarDigits))
+            .flatMap { $0 } ?? defaults.myanmarDigits
+        self.myanmarSpokenPunctuation = flag(
             .myanmarSpokenPunctuation, defaults.myanmarSpokenPunctuation
         )
-        self.codeMode = try flag(.codeMode, defaults.codeMode)
+        self.codeMode = flag(.codeMode, defaults.codeMode)
     }
 
     /// Verbatim mode: nothing is reshaped; only artifacts + dictionary apply.

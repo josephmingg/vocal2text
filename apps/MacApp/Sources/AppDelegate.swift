@@ -52,6 +52,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // step 13). Skipped until the model has downloaded once.
         appState.preloadEngineIfWarmedBefore()
 
+        // A mid-take guard (low disk, device change) that force-ends a locked
+        // take must end lock mode with it: report the truthful isLockMode to
+        // the deliverer and clear the bookkeeping — a dangling
+        // `isLockModeActive` would swallow the next press and let the cap
+        // timer fire a bogus notice later.
+        appState.endLockModeForForcedStop = { [weak self] in
+            guard let self, self.isLockModeActive else { return false }
+            self.endLockMode(stopping: false)
+            return true
+        }
+
         let monitor = HotkeyMonitor(spec: appState.settings.hotkeySpec)
         monitor.onPressBegan = { [weak self] in
             guard let self else { return }

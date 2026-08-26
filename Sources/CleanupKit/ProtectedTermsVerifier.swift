@@ -121,7 +121,23 @@ public enum ProtectedTermsVerifier {
     private static func repairing(term: [Character], in output: [Character]) -> [Character] {
         let lowered = lowercasedCharacters(output[...])
         let aligned = lowered.count == output.count ? lowered : nil
+        // Repair is held to a stricter standard than detection: rewriting a
+        // window that is glued to adjacent letters/digits corrupts the
+        // neighboring word ("ai" inside "Wait" → "WAIt"; "Claud " repaired
+        // against a following word glues them together) and the corrupted
+        // text then *passes* re-verification. Such windows stay flagged by
+        // verify() — the pipeline falls back instead, which is never worse
+        // than what shipped before repair existed. This also means a term
+        // embedded in contiguous CJK prose is not repaired, only rejected.
         let candidates = mutationCandidates(of: term, in: output, loweredOutput: aligned)
+            .filter { range in
+                let before = range.lowerBound > 0 ? output[range.lowerBound - 1] : nil
+                let after = range.upperBound < output.count ? output[range.upperBound] : nil
+                func isWordCharacter(_ character: Character?) -> Bool {
+                    character.map { $0.isLetter || $0.isNumber } ?? false
+                }
+                return !isWordCharacter(before) && !isWordCharacter(after)
+            }
         guard !candidates.isEmpty else { return output }
 
         // Cluster overlapping windows (the n−1/n/n+1 scans flag the same

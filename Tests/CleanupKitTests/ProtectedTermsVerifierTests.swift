@@ -155,6 +155,32 @@ struct ProtectedTermsVerifierTests {
         #expect(repaired == output)
     }
 
+    @Test func aTermEmbeddedInAnotherWordIsNeverRepairedIntoIt() {
+        // "ai" occurs inside "Wait" at distance 0 — repair must not produce
+        // "WAIt"; the window is glued to letters, so it is left for verify()
+        // to reject (fallback), never rewritten.
+        let output = "Wait, the AI is ready"
+        let repaired = ProtectedTermsVerifier.repaired(
+            output: output,
+            input: "Wait, the AI is ready",
+            protectedTerms: ["AI"]
+        )
+        #expect(repaired == output)
+    }
+
+    @Test func repairNeverGluesTheTermToTheNextWord() {
+        // The flagged window for "Claud " includes the separating space; a
+        // naive repair yields "Claudepushed". The neighbor guard leaves it
+        // to the fallback instead.
+        let output = "Claud pushed the fix"
+        let repaired = ProtectedTermsVerifier.repaired(
+            output: output,
+            input: "Claude pushed the fix",
+            protectedTerms: ["Claude"]
+        )
+        #expect(repaired == output)
+    }
+
     @Test func repairedOutputPassesVerification() {
         let repaired = ProtectedTermsVerifier.repaired(
             output: "open Cluade Code now",

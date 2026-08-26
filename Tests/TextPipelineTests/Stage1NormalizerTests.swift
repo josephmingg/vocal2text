@@ -284,3 +284,16 @@ struct Stage1NormalizerTests {
     )
     #expect(result == "ဒီနေ့ရာသီဥတုကောင်းတယ်")
 }
+
+@Test func spacedEmphaticRepetitionSurvivesTheUnspacedLoopPass() {
+    // The unspaced-loop regex must not treat "over and " as a repeating
+    // unit — legitimate spaced emphasis is the token pass's jurisdiction,
+    // and it deliberately leaves alternating tokens alone.
+    let input = "she called me over and over and over and over and over"
+    let result = Stage1Normalizer.normalize(
+        input,
+        language: .english,
+        formatting: .init(autoPunctuation: false)
+    )
+    #expect(result == input)
+}

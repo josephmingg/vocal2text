@@ -53,9 +53,11 @@ struct CodeModeFormatterTests {
             SpokenLayoutCommands.apply("first item new line second item")
                 == "first item\nsecond item"
         )
+        // The previous sentence keeps its period — only punctuation the
+        // command itself attracted is absorbed.
         #expect(
             SpokenLayoutCommands.apply("Intro done. New paragraph Next topic")
-                == "Intro done\n\nNext topic"
+                == "Intro done.\n\nNext topic"
         )
     }
 

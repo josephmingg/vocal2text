@@ -272,6 +272,23 @@ public final class DatabaseStore: @unchecked Sendable {
         }
     }
 
+    /// The newest rows only — for callers that need "the latest take", not
+    /// the whole history decoded (a 4 h import's transcript is hundreds of
+    /// KB; `allTranscripts()` on the main thread is a beachball).
+    public func recentTranscripts(limit: Int) throws -> [TranscriptRecord] {
+        try dbQueue.read { db -> [TranscriptRecord] in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT \(Self.transcriptColumns) FROM transcript
+                    ORDER BY createdAt DESC LIMIT ?
+                    """,
+                arguments: [limit]
+            )
+            return Self.decodedRecords(from: rows)
+        }
+    }
+
     public func deleteTranscript(id: UUID) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM transcript WHERE id = ?", arguments: [id.uuidString])

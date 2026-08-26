@@ -45,7 +45,11 @@ public struct PrefixCommitter: Sendable {
             agreed += 1
         }
         if agreed > committedWords.count {
-            committedWords = Array(words.prefix(agreed))
+            // Append only the extension: replacing the whole prefix with
+            // words.prefix(agreed) would let two consecutive hypotheses that
+            // agree with *each other* — but not with the commitment — rewrite
+            // words already on screen, the exact flicker this type forbids.
+            committedWords.append(contentsOf: words[committedWords.count..<agreed])
         }
         previousWords = words
 

@@ -153,18 +153,35 @@ public actor WhisperKitEngine: TranscriptionEngine {
         // terms ride in as Whisper's initial prompt, so the model *hears*
         // "Kubernetes" instead of stage 2 correcting it after the fact.
         // Prompt biasing requires the prefill path; WhisperKit only reads
-        // promptTokens when usePrefillPrompt is on, and its language-detect
-        // loop re-prefills after detection, so auto mode keeps working. The
-        // prompt is only attached when terms exist — term-less takes keep the
+        // promptTokens when usePrefillPrompt is on. The prompt is only
+        // attached when bias-shaped terms exist — term-less takes keep the
         // prefill-free anti-hallucination shape above. Accuracy is measured
         // with vocal-bench planted-term fixtures, per the plan.
-        if !dictionaryTerms.isEmpty, let tokenizer = pipe.tokenizer {
-            let prompt = " " + dictionaryTerms.joined(separator: ", ")
+        //
+        // Bias terms only: a snippet (multi-line or long written form —
+        // DictionaryCSV's definition of one) would flood Whisper's ~223
+        // prompt-token window with template text, evicting the real terms
+        // and conditioning the decoder on unrelated "context" — a known
+        // repetition trigger. WhisperKit keeps the *suffix* when trimming,
+        // so the cap here also makes which terms survive deterministic.
+        let biasTerms = dictionaryTerms
+            .filter { !$0.contains(where: \.isNewline) && $0.count <= 40 }
+            .prefix(24)
+        if !biasTerms.isEmpty, let tokenizer = pipe.tokenizer {
+            let prompt = " " + biasTerms.joined(separator: ", ")
             let tokens = tokenizer.encode(text: prompt)
                 .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
             if !tokens.isEmpty {
                 options.promptTokens = tokens
                 options.usePrefillPrompt = true
+                // DecodingOptions() derives detectLanguage from the *initial*
+                // usePrefillPrompt (false above), so flipping prefill on here
+                // leaves detection off and the prefill would force <|en|>.
+                // Auto mode must detect explicitly; the detect loop then
+                // re-prefills with the detected language.
+                if case .auto = languageMode {
+                    options.detectLanguage = true
+                }
             }
         }
 

@@ -108,14 +108,25 @@ public enum SpokenNumberFormatter {
 
     private static func replacingYears(_ text: String) -> String {
         var result = replacing(
-            // "twenty ten" … "twenty nineteen", "twenty twenty" …
-            // "twenty twenty nine". "twenty twenty vision" stays words.
+            // "twenty ten" … "twenty nineteen", "twenty twenty one" …
+            // "twenty twenty nine": the third word makes these unambiguous.
             pattern:
-                "\\btwenty (\(teenPattern)|twenty(?:[ -](?:\(unitPattern)))?)\\b(?! vision)",
+                "\\btwenty (\(teenPattern)|twenty[ -](?:\(unitPattern)))\\b",
             in: text
         ) { groups in
             guard let part = groups[1].flatMap(smallNumber) else { return nil }
             return String(2000 + part)
+        }
+        result = replacing(
+            // The bare pair is ambiguous — "hindsight is twenty twenty",
+            // "twenty twenty vision" — so 2020 alone requires a year-shaped
+            // anchor in front, and even then never before "vision".
+            pattern:
+                "\\b(in|since|by|from|until|till|during|before|after) twenty twenty\\b(?! vision)",
+            in: result
+        ) { groups in
+            guard let anchor = groups[1] else { return nil }
+            return "\(anchor) 2020"
         }
         result = replacing(
             // "nineteen ninety five" → 1995; the two-part shape is the anchor.

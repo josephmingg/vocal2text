@@ -64,19 +64,23 @@ public enum VocabularySuggestor {
         let spoken = differing.map { previous[$0] }.joined(separator: " ")
         let written = differing.map { current[$0] }.joined(separator: " ")
         guard spoken.count >= 3, !spoken.isEmpty, !written.isEmpty else { return nil }
-        guard !differing.allSatisfy({ stopWords.contains(current[$0].lowercased()) }) else {
-            return nil
-        }
+        // Either side being pure stop words marks content editing: a swapped
+        // article ("a" → "the") is not vocabulary, and neither is a stop word
+        // being replaced by real content ("the" → "three" is the user editing
+        // what was said, and an entry for "the" would corrupt every take).
+        let spokenIsStopWords = differing.allSatisfy { stopWords.contains(previous[$0].lowercased()) }
+        let writtenIsStopWords = differing.allSatisfy { stopWords.contains(current[$0].lowercased()) }
+        guard !spokenIsStopWords, !writtenIsStopWords else { return nil }
 
-        // Case-only differences are valid entries (casing is authoritative in
-        // the dictionary). Otherwise the spans must sound alike: a large edit
-        // distance on an all-lowercase replacement is a content change
-        // ("tuesday" → "wednesday"), not a respelling.
+        // The spans must sound alike — a case-only change is distance 0, a
+        // respelling ("cloud" → "Claude") is small, and anything distant is a
+        // content change ("tuesday" → "wednesday", "john" → "Sarah") no
+        // matter how it is cased. Casing alone must never bypass this guard:
+        // any capitalized substitution would slip through it.
         let looksLikeRespelling =
             editDistance(spoken.lowercased(), written.lowercased())
             <= max(2, spoken.count / 2)
-        let introducesProperNoun = written.contains(where: \.isUppercase)
-        guard looksLikeRespelling || introducesProperNoun else { return nil }
+        guard looksLikeRespelling else { return nil }
 
         return Suggestion(spoken: spoken, written: written)
     }

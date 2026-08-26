@@ -464,16 +464,20 @@ private struct DictionaryPane: View {
                     existing.written = row.written
                     existing.isEnabled = row.isEnabled
                     try database.save(existing)
+                    existingBySpoken[row.spoken.lowercased()] = existing
                     updated += 1
                 } else {
-                    try database.save(
-                        DictionaryEntry(
-                            spoken: row.spoken,
-                            written: row.written,
-                            isEnabled: row.isEnabled,
-                            createdAt: Date()
-                        )
+                    let entry = DictionaryEntry(
+                        spoken: row.spoken,
+                        written: row.written,
+                        isEnabled: row.isEnabled,
+                        createdAt: Date()
                     )
+                    try database.save(entry)
+                    // Registered immediately: a file with the same spoken
+                    // form twice (merged exports) must update the row it
+                    // just created, not insert a competing duplicate.
+                    existingBySpoken[row.spoken.lowercased()] = entry
                     added += 1
                 }
             }
@@ -642,10 +646,17 @@ private struct AboutPane: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             counters = Diagnostics.shared.snapshot()
+            // The decode runs off the main actor (nonisolated async), because
+            // computing over the whole history decodes every row, including
+            // multi-hundred-KB import transcripts.
             if let database {
-                usage = UsageStats.compute(records: (try? database.allTranscripts()) ?? [])
+                Task { usage = await Self.computeUsage(database: database) }
             }
         }
+    }
+
+    private static nonisolated func computeUsage(database: DatabaseStore) async -> UsageStats {
+        UsageStats.compute(records: (try? database.allTranscripts()) ?? [])
     }
 
     private func usageRow(_ label: String, _ value: String) -> some View {
