@@ -675,46 +675,51 @@ final class AppState: ObservableObject {
         let settings = settings
         Task { [weak self] in
             do {
-                let decoded = try await Task.detached(priority: .userInitiated) {
-                    try AudioFileDecoder.decode(url: url)
-                }.value
                 let entries = await settings.enabledDictionaryEntries()
-                let clock = ContinuousClock()
-                let start = clock.now
-                let result = try await engine.transcribe(
-                    decoded.audio, languageMode: mode, dictionaryTerms: entries.map(\.written)
-                )
-                let elapsed = start.duration(to: clock.now)
-                let language = result.detectedLanguage
-                let formatting = FormattingOptions()
-                let normalized = Stage1Normalizer.normalize(
-                    result.text, language: language, formatting: formatting
-                )
-                let stage2 = DictionaryEngine.apply(
-                    normalized, entries: entries, language: language
-                ).text
-                let formatted = Stage4Formatter.format(
-                    stage2, language: language, formatting: formatting, precedingContext: nil
-                )
-                let record = TranscriptRecord(
-                    createdAt: Date(),
-                    source: .fileImport,
-                    language: language,
-                    rawText: result.text,
-                    deliveredText: formatted,
-                    durationSeconds: decoded.audio.durationSeconds,
-                    profileName: "Import",
-                    routeKind: .defaultRoute,
-                    // Imports run without a profile, so stage 3 never applies.
-                    cleanup: .skipped(reason: .profileDisabled),
-                    timings: TimingBreakdown(
-                        transcriptionSeconds: Double(elapsed.components.seconds)
-                            + Double(elapsed.components.attoseconds) / 1e18
-                    ),
-                    importedFilename: url.lastPathComponent
-                )
+                // Everything heavy — decode, transcription, and the text
+                // stages over what may be hours of transcript — stays off the
+                // main actor; only the save and the notice come back to it.
+                let (record, wasTruncated) = try await Task.detached(priority: .userInitiated) {
+                    () -> (TranscriptRecord, Bool) in
+                    let decoded = try AudioFileDecoder.decode(url: url)
+                    let clock = ContinuousClock()
+                    let start = clock.now
+                    let result = try await engine.transcribe(
+                        decoded.audio, languageMode: mode, dictionaryTerms: entries.map(\.written)
+                    )
+                    let elapsed = start.duration(to: clock.now)
+                    let language = result.detectedLanguage
+                    let formatting = FormattingOptions()
+                    let normalized = Stage1Normalizer.normalize(
+                        result.text, language: language, formatting: formatting
+                    )
+                    let stage2 = DictionaryEngine.apply(
+                        normalized, entries: entries, language: language
+                    ).text
+                    let formatted = Stage4Formatter.format(
+                        stage2, language: language, formatting: formatting, precedingContext: nil
+                    )
+                    let record = TranscriptRecord(
+                        createdAt: Date(),
+                        source: .fileImport,
+                        language: language,
+                        rawText: result.text,
+                        deliveredText: formatted,
+                        durationSeconds: decoded.audio.durationSeconds,
+                        profileName: "Import",
+                        routeKind: .defaultRoute,
+                        // Imports run without a profile, so stage 3 never applies.
+                        cleanup: .skipped(reason: .profileDisabled),
+                        timings: TimingBreakdown(
+                            transcriptionSeconds: Double(elapsed.components.seconds)
+                                + Double(elapsed.components.attoseconds) / 1e18
+                        ),
+                        importedFilename: url.lastPathComponent
+                    )
+                    return (record, decoded.wasTruncated)
+                }.value
                 try database.save(record)
-                let suffix = decoded.wasTruncated ? " (truncated at the 4 h cap)" : ""
+                let suffix = wasTruncated ? " (truncated at the 4 h cap)" : ""
                 self?.showNotice("Imported \(url.lastPathComponent)\(suffix) — see History")
             } catch {
                 self?.showNotice("Import failed: \(error.localizedDescription)")
