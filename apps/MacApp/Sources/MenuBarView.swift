@@ -94,6 +94,23 @@ struct MenuBarView: View {
                 )
             }
 
+            // docs/15 step 28: cheap, loved, and the safety net that makes
+            // aggressive cleanup acceptable.
+            Button("Paste Last Transcript Again") {
+                appState.pasteLastTranscriptAgain()
+            }
+            .help("Insert the most recent transcript where you are typing now.")
+            Button("Undo Last Insertion") {
+                appState.undoLastInsertion(replaceWithRaw: false)
+            }
+            .help("Remove the text the last dictation inserted (where the app allows it).")
+            Button("Replace Last with Raw Transcription") {
+                appState.undoLastInsertion(replaceWithRaw: true)
+            }
+            .help("Swap the cleaned-up text for exactly what was transcribed.")
+
+            Divider()
+
             Button("Open History") {
                 WindowManager.shared.showHistory(appState: appState)
             }

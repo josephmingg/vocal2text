@@ -59,7 +59,7 @@ enum AXInserter {
 
     // MARK: - Helpers
 
-    private static func focusedElement() -> AXUIElement? {
+    static func focusedElement() -> AXUIElement? {
         var focusedRef: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(
             AXUIElementCreateSystemWide(),
@@ -75,7 +75,7 @@ enum AXInserter {
     }
 
     /// The element's string value, when it exposes one.
-    private static func readableValue(of element: AXUIElement) -> String? {
+    static func readableValue(of element: AXUIElement) -> String? {
         var valueRef: CFTypeRef?
         guard
             AXUIElementCopyAttributeValue(
@@ -83,5 +83,47 @@ enum AXInserter {
             ) == .success
         else { return nil }
         return valueRef as? String
+    }
+}
+
+/// The undo half of docs/15 step 28: the safety net that makes aggressive
+/// cleanup acceptable. Selects the last occurrence of the delivered text in
+/// the focused element via the Accessibility API and replaces it — with the
+/// raw transcription, or with nothing. Only where AX exposes a readable
+/// value and a settable selection; anywhere else the caller reports that
+/// undo isn't available rather than guessing with synthesized keystrokes.
+@MainActor
+enum AXUndo {
+
+    /// Replaces the last occurrence of `needle` in the focused element with
+    /// `replacement` ("" removes it). Returns false when the element cannot
+    /// be read, the text is not found, or the selection is not settable —
+    /// nothing was changed in that case.
+    static func replaceLastOccurrence(of needle: String, with replacement: String) -> Bool {
+        guard !needle.isEmpty, let element = AXInserter.focusedElement() else { return false }
+        guard let value = AXInserter.readableValue(of: element) else { return false }
+        // AX text ranges are UTF-16 offsets, exactly NSString's currency.
+        let haystack = value as NSString
+        let range = haystack.range(of: needle, options: [.backwards])
+        guard range.location != NSNotFound else { return false }
+
+        var settable = DarwinBoolean(false)
+        guard
+            AXUIElementIsAttributeSettable(
+                element, kAXSelectedTextRangeAttribute as CFString, &settable
+            ) == .success,
+            settable.boolValue
+        else { return false }
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard let axRange = AXValueCreate(.cfRange, &cfRange) else { return false }
+        guard
+            AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, axRange
+            ) == .success,
+            AXUIElementSetAttributeValue(
+                element, kAXSelectedTextAttribute as CFString, replacement as CFTypeRef
+            ) == .success
+        else { return false }
+        return true
     }
 }

@@ -610,6 +610,68 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Re-paste + undo (docs/15 step 28)
+
+    /// The newest delivered dictation, or nil when history has none — what
+    /// the menu bar's re-paste and undo act on.
+    private func latestDeliveredRecord() -> TranscriptRecord? {
+        guard let database else { return nil }
+        let records = (try? database.allTranscripts()) ?? []
+        return records.first { !$0.isCancelled && $0.source != .fileImport }
+    }
+
+    /// Menu-bar "Paste Last Transcript Again" (Wispr's ⌘⌃V, docs/15 step 28):
+    /// re-delivers the newest transcript into whatever is frontmost, through
+    /// the same insertion ladder as a live take.
+    func pasteLastTranscriptAgain() {
+        guard let record = latestDeliveredRecord() else {
+            showNotice("Nothing to paste yet")
+            return
+        }
+        NSApp.deactivate()
+        let overrides = settings.insertionStrategyOverrides
+        Task { @MainActor in
+            await Self.yieldFocusToPreviousApp()
+            let deliverer = TextDeliverer(
+                strategies: InsertionStrategyTable(overrides: overrides)
+            )
+            // The text is already fully formatted; the deliverer only routes
+            // by app and mode, so default formatting metadata is fine here.
+            let context = DeliveryContext(
+                pressTimeAppBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                isLockMode: false,
+                formatting: FormattingOptions(),
+                language: record.language
+            )
+            let outcome = await deliverer.deliver(record.deliveredText, context: context)
+            self.showDelivery(outcome: outcome)
+        }
+    }
+
+    /// The undo safety net (docs/15 step 28, Part 2b form): replace the last
+    /// insertion with the raw transcription, or remove it entirely. AX-only —
+    /// where the focused element can't be read and edited, nothing changes
+    /// and the HUD says so, which beats guessing with synthesized keystrokes.
+    func undoLastInsertion(replaceWithRaw: Bool) {
+        guard let record = latestDeliveredRecord() else {
+            showNotice("Nothing to undo yet")
+            return
+        }
+        NSApp.deactivate()
+        Task { @MainActor in
+            await Self.yieldFocusToPreviousApp()
+            let replacement = replaceWithRaw ? record.rawText : ""
+            if AXUndo.replaceLastOccurrence(of: record.deliveredText, with: replacement) {
+                self.showNotice(
+                    replaceWithRaw
+                        ? "Replaced with the raw transcription" : "Last insertion removed"
+                )
+            } else {
+                self.showNotice("Undo isn't available in this app")
+            }
+        }
+    }
+
     /// Hands focus back to the app the user was working in, and waits for the
     /// handoff to actually land.
     ///
