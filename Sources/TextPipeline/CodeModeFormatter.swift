@@ -40,11 +40,11 @@ public enum CodeModeFormatter {
     /// Casing commands consume the identifier words that follow, up to the
     /// next symbol keyword or non-letter token.
     enum Casing: String {
-        case camel = "camel"
-        case pascal = "pascal"
-        case snake = "snake"
-        case constant = "constant"
-        case kebab = "kebab"
+        case camel
+        case pascal
+        case snake
+        case constant
+        case kebab
 
         func join(_ words: [String]) -> String {
             let lowered = words.map { $0.lowercased() }
