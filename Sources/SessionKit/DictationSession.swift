@@ -81,6 +81,11 @@ public actor DictationSession {
     /// release landing mid-call waits a fraction of a second at worst.
     public typealias PreviewTranscribing = @Sendable (PCMChunk) async -> String?
 
+    /// Preserves a failed take's audio for later recovery (docs/15 step 35):
+    /// invoked only when transcription fails, with the exact samples the take
+    /// captured — the platform writes them wherever its recovery offer looks.
+    public typealias FailedAudioPreserving = @Sendable (PCMChunk) async -> Void
+
     /// Reads the text immediately before the insertion point at release time
     /// (docs/15 step 29) — the AX caret read on macOS. nil means the platform
     /// cannot see it for this target; the session then falls back to its own
@@ -108,6 +113,8 @@ public actor DictationSession {
         /// Preceding-context read for smart spacing (docs/15 step 29); nil
         /// keeps fresh-insertion formatting everywhere.
         public var readPrecedingContext: PrecedingContextReading?
+        /// Failed-take audio preservation (docs/15 step 35); nil discards.
+        public var preserveFailedAudio: FailedAudioPreserving?
         /// Streaming preview decode (docs/15 step 22); nil disables preview.
         public var previewTranscribe: PreviewTranscribing?
         /// Receives the prefix-committed preview line for display (FR-4.1:
@@ -144,6 +151,7 @@ public actor DictationSession {
             archiveAudio: AudioArchiving? = nil,
             analyzeSpeech: SpeechAnalyzing? = nil,
             readPrecedingContext: PrecedingContextReading? = nil,
+            preserveFailedAudio: FailedAudioPreserving? = nil,
             previewTranscribe: PreviewTranscribing? = nil,
             onPartial: (@Sendable (String) -> Void)? = nil,
             previewInterval: Duration = .milliseconds(400),
@@ -167,6 +175,7 @@ public actor DictationSession {
                 archiveAudio: archiveAudio,
                 analyzeSpeech: analyzeSpeech,
                 readPrecedingContext: readPrecedingContext,
+                preserveFailedAudio: preserveFailedAudio,
                 previewTranscribe: previewTranscribe,
                 onPartial: onPartial,
                 previewInterval: previewInterval,
@@ -186,6 +195,7 @@ public actor DictationSession {
             archiveAudio: AudioArchiving? = nil,
             analyzeSpeech: SpeechAnalyzing? = nil,
             readPrecedingContext: PrecedingContextReading? = nil,
+            preserveFailedAudio: FailedAudioPreserving? = nil,
             previewTranscribe: PreviewTranscribing? = nil,
             onPartial: (@Sendable (String) -> Void)? = nil,
             previewInterval: Duration = .milliseconds(400),
@@ -206,6 +216,7 @@ public actor DictationSession {
             self.archiveAudio = archiveAudio
             self.analyzeSpeech = analyzeSpeech
             self.readPrecedingContext = readPrecedingContext
+            self.preserveFailedAudio = preserveFailedAudio
             self.previewTranscribe = previewTranscribe
             self.onPartial = onPartial
             self.previewInterval = previewInterval
@@ -717,6 +728,15 @@ public actor DictationSession {
             lastError =
                 (error as? TranscriptionError) ?? .engineUnavailable(String(describing: error))
             Diagnostics.shared.increment(.transcriptionFailures)
+            // docs/15 step 35: a failure must leave the recording behind.
+            // The capture layer's crash sidecar died with the successful
+            // finish(), but the samples are right here — hand them to the
+            // platform's recovery store so the menu can offer them back.
+            // Recovery re-runs (source == .recovered) skip this: the caller
+            // still holds the original file and keeps it on a false return.
+            if source == .dictation, let preserve = deps.preserveFailedAudio {
+                await preserve(audio)
+            }
             finishPipeline()
             return false
         }

@@ -131,6 +131,29 @@ public enum RecoveryStore {
     public static func discard(at url: URL) {
         try? FileManager.default.removeItem(at: url)
     }
+
+    /// Writes a failed take's samples back as a recovery sidecar (docs/15
+    /// step 35): transcription failed after capture already deleted its
+    /// crash-recovery copy, and these samples are the only copy left. The
+    /// file joins the ordinary 24-hour recovery window and shows up through
+    /// the same menu offer as a cancelled take.
+    @discardableResult
+    public static func preserve(
+        samples: [Float],
+        in directory: URL = FileManager.default.temporaryDirectory
+    ) -> URL? {
+        guard !samples.isEmpty else { return nil }
+        let url = directory.appendingPathComponent(
+            RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32"
+        )
+        let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
 }
 
 /// Converts captured audio into the 0…1 levels the HUD waveform draws

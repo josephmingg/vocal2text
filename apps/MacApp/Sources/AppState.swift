@@ -216,6 +216,12 @@ final class AppState: ObservableObject {
             readPrecedingContext: {
                 await MainActor.run { AXInserter.precedingContext() }
             },
+            // docs/15 step 35: a failed transcription leaves its audio in the
+            // ordinary 24-hour recovery window — the same menu offer as a
+            // cancelled take, so zero silent losses.
+            preserveFailedAudio: { audio in
+                RecoveryStore.preserve(samples: audio.samples)
+            },
             // Streaming preview (docs/15 step 22), display-only per FR-4.1.
             // Gated to the Parakeet route on purpose: its decode is fast
             // enough that a release landing mid-preview waits a fraction of a
@@ -829,6 +835,9 @@ final class AppState: ObservableObject {
                 DeliverySounds.playError(enabled: settings.soundsEnabled)
                 hudState.mode = .error(Self.message(for: error))
                 scheduleErrorDismiss()
+                // docs/15 step 35: a failed take just preserved its audio;
+                // surface the recovery offer without waiting for a relaunch.
+                refreshRecoverableTake()
             } else if settings.showTimingsToast, let timings = await session.lastTimings {
                 // FR-11.4 opt-in: show where the time went after each take.
                 showNotice(Self.timingsSummary(timings))

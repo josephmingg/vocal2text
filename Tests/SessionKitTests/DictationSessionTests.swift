@@ -142,7 +142,8 @@ private func makeHarness(
     deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes"),
     profileResolution: (@Sendable () async -> DictationSession.ResolvedRoute)? = nil,
     analyzeSpeech: DictationSession.SpeechAnalyzing? = nil,
-    readPrecedingContext: DictationSession.PrecedingContextReading? = nil
+    readPrecedingContext: DictationSession.PrecedingContextReading? = nil,
+    preserveFailedAudio: DictationSession.FailedAudioPreserving? = nil
 ) -> Harness {
     let captureLog = CaptureLog()
     let sampleCount = max(0, Int(audioSeconds * Double(PCMChunk.sampleRate)))
@@ -168,6 +169,7 @@ private func makeHarness(
             },
         analyzeSpeech: analyzeSpeech,
         readPrecedingContext: readPrecedingContext,
+        preserveFailedAudio: preserveFailedAudio,
         prewarmCleanup: prewarm,
         deliverer: deliverer,
         store: store,
@@ -567,6 +569,38 @@ struct DictationSessionTests {
 
         let cleanupCallCount = await provider.cleanupCallCount
         #expect(cleanupCallCount == 1)
+    }
+
+    // MARK: - Failed-take audio preservation (docs/15 step 35)
+
+    @Test func aTranscriptionFailurePreservesTheAudio() async throws {
+        let preserved = LockedStrings()
+        let harness = makeHarness(
+            engineFailure: .engineUnavailable("model missing"),
+            preserveFailedAudio: { audio in
+                preserved.append("\(audio.samples.count)")
+            }
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        // The 2 s take's exact samples reached the preservation seam.
+        #expect(preserved.snapshot() == ["\(2 * PCMChunk.sampleRate)"])
+        let error = await harness.session.lastError
+        #expect(error != nil)
+    }
+
+    @Test func aSuccessfulTakePreservesNothing() async throws {
+        let preserved = LockedStrings()
+        let harness = makeHarness(
+            preserveFailedAudio: { _ in preserved.append("called") }
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        #expect(preserved.snapshot().isEmpty)
     }
 
     // MARK: - Preceding context (docs/15 step 29, FR-3.3)
