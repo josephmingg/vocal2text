@@ -11,11 +11,24 @@ public enum ProtectedTermsVerifier {
     public static func verify(output: String, input: String, protectedTerms: [String]) -> Bool {
         guard !protectedTerms.isEmpty else { return true }
         let outputCharacters = Array(output)
+        // Lowercased once here rather than per candidate window: the scan is
+        // O(terms × output × window) and this used to allocate a String for
+        // every single window, on the delivery path, with the user waiting.
+        let loweredOutput = lowercasedCharacters(outputCharacters[...])
+        // Folding is not expected to change the Character count — the classic
+        // expanders are red herrings here (ß → SS is an UPPERCASE mapping;
+        // İ lowercases to i+combining-dot, which is still one grapheme) — but
+        // the equivalence is subtle enough that the aligned fast path stays
+        // guarded, with the per-window fold as the fallback.
+        let isIndexAligned = loweredOutput.count == outputCharacters.count
         for term in protectedTerms {
             guard !term.isEmpty, input.contains(term) else { continue }
-            if containsMutatedVariant(of: Array(term), in: outputCharacters) {
-                return false
-            }
+            let found = containsMutatedVariant(
+                of: Array(term),
+                in: outputCharacters,
+                loweredOutput: isIndexAligned ? loweredOutput : nil
+            )
+            if found { return false }
         }
         return true
     }
@@ -26,7 +39,15 @@ public enum ProtectedTermsVerifier {
     /// and are skipped; any remaining window within edit distance 1 of the
     /// term (case-insensitively, so distance 0 = pure case mutation) is a
     /// mutation.
-    static func containsMutatedVariant(of term: [Character], in output: [Character]) -> Bool {
+    ///
+    /// `loweredOutput` is `output` case-folded once by the caller, passed in
+    /// only when folding preserved the character count so windows can be
+    /// sliced straight out of it; nil falls back to folding each window.
+    static func containsMutatedVariant(
+        of term: [Character],
+        in output: [Character],
+        loweredOutput: [Character]? = nil
+    ) -> Bool {
         guard !term.isEmpty, !output.isEmpty else { return false }
         let exactRanges = exactOccurrenceRanges(of: term, in: output)
         let loweredTerm = lowercasedCharacters(term[...])
@@ -46,7 +67,9 @@ public enum ProtectedTermsVerifier {
             for start in 0...(output.count - length) {
                 let windowRange = start..<(start + length)
                 if exactRanges.contains(where: { $0.overlaps(windowRange) }) { continue }
-                let window = lowercasedCharacters(output[windowRange])
+                let window =
+                    loweredOutput.map { Array($0[windowRange]) }
+                    ?? lowercasedCharacters(output[windowRange])
                 // A proper substring of the term itself (e.g. 微 from 微信, "ob"
                 // from "Bob") is ordinary language reuse, not the term in
                 // altered spelling — deletion-variant windows that the term

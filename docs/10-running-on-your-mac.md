@@ -18,6 +18,21 @@ open Vocal.xcodeproj
 > and re-pick your team (30 seconds), or the build fails with a signing error.
 > You only need `make generate` when `project.yml` changed — a plain `git pull`
 > of source-code changes needs no regeneration.
+> A build log that says `Signing Identity: "Sign to Run Locally"` means the
+> Team was NOT set — the app builds ad-hoc-signed and Accessibility will not
+> stick across rebuilds (docs/03 §3.4).
+
+> **Build fails at the final `CodeSign VocalMac.app` step** with *"code object
+> is not signed at all — In subcomponent: onnxruntime.framework"*, alongside a
+> *"Couldn't resolve framework symlink … Versions/Current"* warning: SwiftPM
+> sometimes mangles the symlinks inside the onnxruntime binary xcframework
+> while extracting the artifact, and the broken framework then fails the
+> app-wide signing pass. `make mac` and `make install` repair this
+> automatically (and `install` retries once, since the first-ever build is the
+> one that extracts the artifact). Building straight from Xcode? Run
+> `sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts`
+> against your DerivedData's `SourcePackages/artifacts` path and rebuild. CI
+> never sees this failure — its builds run with `CODE_SIGNING_ALLOWED=NO`.
 
 In Xcode:
 
@@ -37,20 +52,63 @@ Onboarding walks the permissions in order:
 2. **Accessibility** — System Settings toggle (the app detects the grant live). This one
    permission covers both the hotkey listener and text insertion; Input Monitoring is never
    requested.
-3. **Fn key setup** (only if the Fn hotkey is selected): set System Settings → Keyboard →
-   "Press 🌐 key to" = **Do Nothing**, via the provided button. Also disable the "press Fn
-   twice for Dictation" shortcut if enabled. Prefer skipping this? Pick **Right ⌘** in
-   settings — same behavior, no system setting needed.
-4. **Warm up** — downloads Whisper large-v3-turbo (~626 MB, one time, from Hugging Face)
+3. **Your dictation key** — pick it from the same dropdown Settings uses, then hit
+   **Test Your Key** and press it: Vocal confirms it saw the key without recording
+   anything. If nothing registers, the page says what usually causes that.
+4. **Fn key setup** (only if your push-to-talk key uses Fn / 🌐): set System Settings →
+   Keyboard → "Press 🌐 key to" = **Do Nothing**, via the provided button. Also disable the
+   "press Fn twice for Dictation" shortcut if enabled. Prefer skipping this? Pick
+   **Right ⌘** on the previous page — same behavior, no system setting needed.
+5. **Warm up** — downloads Whisper large-v3-turbo (~626 MB, one time, from Hugging Face)
    and loads it. Skippable; the first dictation triggers it otherwise.
 
-Then: focus any text field anywhere, **hold Fn, speak, release**. Text lands at the cursor.
+Then: focus any text field anywhere, **hold your push-to-talk key (Fn by default), speak,
+release**. Text lands at the cursor.
 
 - Double-tap the hotkey = hands-free lock (auto-stops at 15 min); tap to finish.
 - Esc while holding = cancel.
-- Menu-bar icon → language pin (Auto/EN/中文), profile pin, History, Settings.
+- Menu-bar icon → language pin (Auto/EN/中文/မြန်မာ), profile pin, History, Settings.
 - AI cleanup is **off** until you flip the master switch in Settings → Cleanup (then pick
   Ollama/a custom endpoint; Apple Foundation Models arrives on the macOS 26 SDK build).
+
+## Choosing your push-to-talk key
+
+Settings → General → **Push-to-talk key**, the same control onboarding shows. Changes apply
+immediately — no relaunch. **Test Your Key** confirms the key reaches Vocal without starting
+a recording, and the row turns red if the hotkey is inactive because Accessibility was
+revoked.
+
+| Group | Options |
+|---|---|
+| Recommended | 🌐 Fn (default) · Right ⌘ |
+| Modifiers | Left ⌘ · Right ⌥ · Left ⌥ · Right ⌃ · Left ⌃ · Right ⇧ · Left ⇧ |
+| Function keys | F13 · F14 · F15 — for external keyboards |
+| Custom… | Records whatever you press |
+
+Every option behaves identically: hold to talk, double-tap to lock hands-free, Esc to
+cancel.
+
+**Custom…** opens a recorder — hold a single modifier and release it, or press a key
+together with the modifiers you want to hold. It refuses combinations that would break
+ordinary use, and says why: a bare letter, digit, punctuation, Space, Tab, Return or
+Delete (you would no longer be able to type it), Escape (reserved for cancelling a take),
+and Caps Lock (it toggles instead of reporting hold and release — and since that toggle
+happens below Vocal's event tap, the recorder also reminds you to press it again to turn it
+back off). The sheet shows your current key throughout, so you always know what you are
+replacing, and ⏎ commits while esc closes without changing anything.
+
+Two caveats the picker surfaces for you:
+
+- **Single modifier keys keep working in password fields; key combinations do not.** While
+  a password field is focused, macOS secure input withholds key events from every app, but
+  modifier flag changes keep flowing (docs/03 §3.1). That is why 🌐 Fn and Right ⌘ are the
+  recommended pair, and why a recorded chord like ⌥Space is shown with an amber warning.
+- **Known system shortcuts are flagged when you record them** — ⌘Space (Spotlight),
+  ⌃Space (input source), ⌥Space (used by some apps), F11/F12 (system actions on many
+  keyboards).
+
+Updating from an earlier build keeps your key: the old Fn / Right-⌘ / Right-⌥ setting
+migrates to the matching preset on first launch, with nothing to do.
 
 ## What is verified vs. what awaits your hardware
 
@@ -60,14 +118,111 @@ Then: focus any text field anywhere, **hold Fn, speak, release**. Text lands at 
 | Full package incl. GRDB persistence + WhisperKit adapter | Compiles + tests on CI's macOS runner |
 | VocalMac app target | Compiles unsigned on CI's macOS runner |
 | Hotkey capture, paste insertion, mic quality, real latency, Apple-engine/FM adapters | **Cannot be verified in any cloud** — first run on your Mac is milestone M0's spike checklist (docs/06). File issues for anything that misbehaves; each spike has a fallback documented in docs/03/04 |
+| Burmese (မြန်မာ) **recognition accuracy** | **Verified on hardware (2026-08-17), with two rules.** Pinning မြန်မာ (menu bar, or a per-profile language pin in Settings → Profiles — docs/11 G17) routes to the dedicated Burmese engine (docs/11 G13); auto-detect still falls to Whisper at 80–100% WER, not a bug to file. **Use the built-in mic for Burmese**: a Bluetooth/AirPods mic drops to the narrowband call profile and the engine emits wrong-script garbage. Built-in-mic accuracy trails the clean-speech benchmark (~10.8% CER) — names miss most; add dictionary entries for them. Formatting options (digits, spoken punctuation) are per profile in the same pane |
 
 ## Known v1 seams (deliberate, documented)
 
-- HUD waveform shows a synthesized ripple until live mic levels are plumbed.
-- Streaming partial text in the HUD arrives with the WhisperKit streaming pass (v1
-  transcribes on release; preview field exists).
-- Audio files are not yet retained in history (text + metadata are); the retention
-  setting is wired for when capture persistence lands.
-- Profiles live in memory (built-ins) until first saved to the database; the pin picker
-  re-lists them per launch.
-- iOS app: next build phase (docs/02 is the spec).
+- The HUD waveform shows the real microphone level (Mac stabilization, #19). Still open:
+  streaming partial text — no words appear while you speak until `transcribeStream`
+  partials are wired into the HUD (docs/11 G2; v1 transcribes on release, which is the
+  correctness path).
+- Audio retention shipped in #19: delivered takes are kept as AAC when Settings → "Keep
+  audio" is on, History plays them back, and a cancelled take can be recovered from the
+  menu bar for 24 h — unverified on hardware yet (docs/12 A3).
+- Profiles persist and are edited in Settings → Profiles (docs/11 G17); the built-ins are
+  seeded into the database on first launch, so pins and edits survive relaunch.
+- iOS app: main-app dictation with auto-copy delivery, the keyboard extension, share-sheet
+  import, and the Live Activity are all built and compile in CI — none of it has run on a
+  physical iPhone yet (docs/11 G10).
+
+## One-time cleanup: a second "Vocal" in Spotlight
+
+Installs made before 2026-08-19 left the freshly-built copy under `build/` registered
+with Launch Services, so Spotlight and the Finder offered two identical "Vocal" apps —
+and launching the wrong one runs with empty settings and history. `make install` now
+unregisters the build product automatically, but a Mac that installed earlier needs one
+manual pass:
+
+```bash
+cd ~/path/to/vocal2text     # wherever you cloned the repo
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
+  -u build/Build/Products/Release/VocalMac.app 2>/dev/null
+rm -rf build/Build/Products/Release/VocalMac.app   # optional: delete the copy outright
+```
+
+Then confirm Spotlight finds exactly one Vocal, at `/Applications/Vocal.app`:
+
+```bash
+mdfind "kMDItemKind == 'Application'" -name Vocal
+```
+
+If any other path shows up (an old Xcode DerivedData build, a copy on the Desktop from
+an AirDrop zip), delete it — the only copy that should exist is `/Applications/Vocal.app`,
+because macOS keys Microphone and Accessibility permissions to that installed copy.
+
+## Sharing Vocal with another Mac
+
+Field-verified: this is how the second machine got its copy. Vocal is personally signed
+rather than notarized, so the recipient does one extra step Apple would otherwise do for
+you — see *why the quarantine step* below.
+
+**Their Mac needs:** Apple Silicon (M1 or later) and **macOS 14 Sonoma or later**. The
+Release build links `arm64` only, so an Intel Mac will refuse to launch it. Confirm what
+you built with:
+
+```bash
+lipo -archs /Applications/Vocal.app/Contents/MacOS/VocalMac
+```
+
+### On your Mac
+
+```bash
+cd ~/vocal2text
+make share
+```
+
+`share` depends on `install`, so it rebuilds and reinstalls your own copy first, then
+writes `~/Desktop/Vocal.zip`. AirDrop that zip.
+
+### On their Mac
+
+1. Double-click the zip to unpack `Vocal.app`.
+2. Drag `Vocal.app` into **Applications**. It has to live there — permissions are keyed
+   to the installed copy, so running it from Downloads means re-granting later.
+3. Strip the quarantine flag AirDrop attached:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Vocal.app
+   ```
+
+4. Launch it from Applications. Onboarding asks for **Microphone**, then
+   **Accessibility** (one grant covers both the hotkey listener and text insertion —
+   Input Monitoring is never requested).
+5. The first dictation downloads Whisper large-v3-turbo (~626 MB, once, needs internet).
+   The HUD shows the progress. Everything after that is offline.
+
+### Why the quarantine step
+
+Vocal is signed with a personal **Apple Development** certificate, not a Developer ID
+certificate, and it is not notarized — deliberate, per docs/03 §3.4: this is a personal
+app, not a distributed product. Anything arriving by AirDrop gets tagged
+`com.apple.quarantine`, and Gatekeeper refuses to launch a quarantined app that is not
+notarized ("cannot be opened because the developer cannot be verified"). Removing the
+attribute takes the app out of Gatekeeper's scope entirely, which is why this works where
+right-click → Open sometimes still fights you.
+
+### What they get, and what stays yours
+
+- **Nothing is shared at runtime.** History, settings, dictionary, and profiles live in
+  each machine's own `~/Library/Application Support/Vocal/`. There is no sync (M8 is
+  unbuilt), so their dictation never touches your data.
+- **AI cleanup ships off.** They do not need Ollama. If they want it, they install Ollama
+  and pull a model on *their* Mac, then turn it on in Settings → Cleanup.
+- **Burmese is optional.** Pinning မြန်မာ triggers its own ~790 MB download on their
+  machine, only if they ask for it.
+
+### Updating their copy later
+
+Repeat the same flow: `make share`, AirDrop, replace the app in Applications, re-strip
+quarantine. Because the signing identity is unchanged, macOS keeps their existing
+Microphone and Accessibility grants — they will not be asked again.

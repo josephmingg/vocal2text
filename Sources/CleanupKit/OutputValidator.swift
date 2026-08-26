@@ -33,34 +33,105 @@ public enum OutputValidator {
             return .rejected(rule: "meta-text")
         }
 
+        // A marker is only evidence of a preamble when the model *introduced*
+        // it. "Sure, sounds good." and 「好的，我明天过去。」 are ordinary things
+        // to dictate, and rejecting them made cleanup permanently useless for
+        // anyone who opens a sentence that way. But the license is one word,
+        // not the whole output: skip the marker the input itself opens with on
+        // BOTH sides and re-apply the rule to what follows, so
+        // "Sure! Here is the cleaned text: …" is still caught when the
+        // dictation merely began with "sure".
         let lowered = cleaned.lowercased()
-        if metaMarkers.contains(where: { lowered.hasPrefix($0) }) {
+        let loweredInput = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var candidate = Substring(lowered)
+        if let shared = metaMarkers.first(where: {
+            loweredInput.hasPrefix($0) && lowered.hasPrefix($0)
+        }) {
+            candidate = lowered.dropFirst(shared.count)
+            while let first = candidate.first, first.isWhitespace || first.isPunctuation {
+                candidate = candidate.dropFirst()
+            }
+        }
+        if metaMarkers.contains(where: { candidate.hasPrefix($0) }) {
             return .rejected(rule: "meta-text")
         }
 
         let inputCount = input.count
         let ratio =
             inputCount > 0 ? Double(cleaned.count) / Double(inputCount) : Double.infinity
-        let longInputThreshold = language == .chinese ? 20 : 60
-        if inputCount > longInputThreshold {
-            if ratio < 0.4 || ratio > 2.5 {
-                return .rejected(rule: "ratio")
-            }
-        } else if ratio > 4.0 {
+        // Unspaced scripts pack far more meaning per character, so the
+        // "long enough for ratio bounds to be meaningful" line sits lower.
+        // Burmese reaches it sooner still, since a Myanmar syllable spans two
+        // to four Swift Characters — which errs toward applying the tighter
+        // [0.4, 2.5] bounds, and that is the safe direction for the language
+        // most at risk of a model mangling it.
+        let longInputThreshold = language.isUnspacedScript ? 20 : 60
+
+        // The lower bound catches truncation, but a self-correction
+        // legitimately discards everything before the cue — "call her on
+        // Tuesday scratch that she's away call her Thursday" → "call her
+        // Thursday" is 0.30 of the input, and no correct answer to that
+        // dictation could clear 0.4. Measure the floor against the content
+        // *after* the last cue instead, which keeps the truncation guard
+        // (a two-word answer still fails) while letting the abandoned half go.
+        //
+        // The floor applies at every length. It used to be inside the
+        // long-input branch, which left short dictations with no lower bound
+        // at all — so the single most damaging failure in the pipeline walked
+        // straight through it: "what's the capital of France" came back as
+        // "Paris", 0.18 of its input, and the app typed the model's answer in
+        // place of the user's words. Nothing about a short dictation makes
+        // that acceptable; shortness only ever justified a looser *ceiling*.
+        //
+        // 0.4 is calibrated against the 62 curated cases: the tightest correct
+        // answer in the set sits at 0.50 of this basis, the answer-instead-of-
+        // clean failures at 0.18. The two mistakes are not symmetric — a false
+        // rejection delivers the stage-2 transcript, which is what the user
+        // actually said (FR-7.3), while a false acceptance replaces their
+        // words with the model's. The bound sits where the cheaper mistake is
+        // the one we make.
+        let floorBasis = SelfCorrectionCues.contentAfterLastCue(in: input).map(\.count)
+            ?? inputCount
+        let floorRatio =
+            floorBasis > 0 ? Double(cleaned.count) / Double(floorBasis) : Double.infinity
+        if floorRatio < 0.4 {
+            return .rejected(rule: "ratio")
+        }
+        // The ceiling stays length-aware and measured against the whole input:
+        // a short dictation may legitimately gain punctuation, capitalisation
+        // and a spelled-out word where a long one cannot, and nothing about a
+        // correction licenses expansion.
+        if ratio > (inputCount > longInputThreshold ? 2.5 : 4.0) {
             return .rejected(rule: "ratio")
         }
 
         if input.containsHanCharacters, !cleaned.containsHanCharacters {
             return .rejected(rule: "language-mismatch")
         }
+        // Burmese is the language most at risk here: small local models are
+        // prone to answering it in English or transliterating it rather than
+        // cleaning it (docs/04 Appendix A), and either would replace the
+        // user's dictation with something they never said.
+        if input.containsMyanmarCharacters, !cleaned.containsMyanmarCharacters {
+            return .rejected(rule: "language-mismatch")
+        }
         // Mirror direction: an English dictation must not come back translated
         // into Chinese (answer/translation failure class). Code-switched Han in
         // a mostly-Latin output is tolerated up to a third of its length.
         if !input.containsHanCharacters, cleaned.containsHanCharacters {
-            let hanCount = cleaned.unicodeScalars.filter {
-                (0x4E00...0x9FFF).contains($0.value)
-            }.count
+            let hanCount = cleaned.unicodeScalars.filter(Unicode.isHanScalar).count
             if hanCount * 3 > cleaned.count {
+                return .rejected(rule: "language-mismatch")
+            }
+        }
+        if !input.containsMyanmarCharacters, cleaned.containsMyanmarCharacters {
+            // Scalars on BOTH sides of the ratio. Myanmar syllables span 2–4
+            // scalars per Character, so a scalar count over a grapheme count
+            // silently tightened "a third of its length" to roughly a ninth.
+            // (The Han rule above is safe with graphemes — Han is 1:1.)
+            let scalars = cleaned.unicodeScalars
+            let myanmarCount = scalars.filter(Unicode.isMyanmarScalar).count
+            if myanmarCount * 3 > scalars.count {
                 return .rejected(rule: "language-mismatch")
             }
         }

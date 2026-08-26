@@ -64,7 +64,7 @@ struct HUDView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 10) {
                     recordingDot(elapsed: elapsed)
-                    WaveformView(levels: placeholderLevels(elapsed: elapsed))
+                    WaveformView(levels: waveformLevels)
                         .frame(width: 140, height: 26)
                     Text(Self.timerString(elapsed: elapsed))
                         .font(.callout.monospacedDigit())
@@ -161,16 +161,12 @@ struct HUDView: View {
 
     // MARK: - Helpers
 
-    /// Placeholder waveform levels until AppState publishes live microphone
-    /// levels (follow-up): a gentle deterministic ripple, frozen to the idle
-    /// baseline when Reduce Motion is on.
-    private func placeholderLevels(elapsed: TimeInterval) -> [Float] {
+    /// Live microphone levels (FR-4.1). Reduce Motion freezes the bars at the
+    /// idle baseline rather than animating with the voice; the level itself is
+    /// still captured, it is simply not drawn as movement.
+    private var waveformLevels: [Float] {
         guard !reduceMotion else { return [] }
-        return (0..<WaveformView.barCount).map { index in
-            let phase = elapsed * 2.4 + Double(index) * 0.55
-            let wave = (sin(phase) + 1) / 2
-            return Float(0.12 + 0.18 * wave)
-        }
+        return appState.hudState.levels
     }
 
     private static func timerString(elapsed: TimeInterval) -> String {

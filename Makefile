@@ -1,6 +1,6 @@
 # Vocal — developer entry points. CI and humans use the same commands.
 
-.PHONY: test build generate mac clean reset-tcc
+.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup
 
 # Build + run all package tests (pure targets work on Linux; full graph on macOS).
 test:
@@ -9,21 +9,74 @@ test:
 build:
 	swift build
 
+# Score stage-3 cleanup against the curated case set (docs/05 §7, docs/12 A1).
+# Needs a model serving locally — it is not part of `make test`, which stays
+# hermetic. Writes a checked-in report so prompt changes are diffable.
+#   make eval-cleanup MODEL=qwen2.5:3b-instruct
+MODEL ?= qwen2.5:3b-instruct
+# Model tags carry colons and slashes; neither belongs in a filename.
+MODEL_SLUG = $(subst /,-,$(subst :,-,$(MODEL)))
+EVAL_REPORT ?= docs/benchmarks/cleanup-eval-$(MODEL_SLUG).md
+eval-cleanup:
+	swift run eval-cleanup --model "$(MODEL)" --out "$(EVAL_REPORT)"
+
 # Generate the Xcode project for the app shells (requires: brew install xcodegen).
 generate:
 	xcodegen generate
 
+# Generate an Xcode project signable with a FREE Apple ID.
+#
+# A personal team cannot provision App Groups, and signing fails outright
+# rather than degrading — so this variant drops every App Group entitlement
+# plus the two extensions that exist only to cross that boundary (keyboard,
+# share sheet). Main-app dictation, the Action Button, history, dictionary and
+# the Dynamic Island all survive; see docs/14 §1a.
+#
+# Produces VocalFree.xcodeproj, beside (not replacing) the full Vocal.xcodeproj.
+generate-free:
+	python3 scripts/free-account-spec.py project.yml project-free.yml
+	xcodegen generate --spec project-free.yml
+	@echo "✅ VocalFree.xcodeproj — open it, set your Team on VocalIOS + VocalWidgets, Run."
+
 # Build the macOS app from the command line after `make generate`.
+# repair-framework-symlinks: SwiftPM can mangle the symlinks inside binary
+# xcframework artifacts (onnxruntime), which fails the CodeSign step on a
+# real Mac (docs/10 troubleshooting). The repair is idempotent and free when
+# nothing is broken.
 mac: generate
+	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug build
+
+LSREGISTER = /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
 
 # Release-build VocalMac and install it to /Applications as Vocal.app.
 # Requires the signing Team to be selected once in Xcode (Signing & Capabilities).
+# The build retries once after a symlink repair: the very first build is the
+# one that extracts the artifacts, so a mangled framework only becomes
+# repairable after that build has already failed at CodeSign.
 install:
+	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
+	rm -rf build/Build/Products/Release/VocalMac.app
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Release \
-		-derivedDataPath build -allowProvisioningUpdates build
+		-derivedDataPath build -allowProvisioningUpdates build \
+	|| { sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts && \
+		rm -rf build/Build/Products/Release/VocalMac.app && \
+		xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Release \
+			-derivedDataPath build -allowProvisioningUpdates build; }
 	rm -rf /Applications/Vocal.app
 	ditto build/Build/Products/Release/VocalMac.app /Applications/Vocal.app
+	@# Xcode registers the build product with Launch Services, so the Finder and
+	@# Spotlight offer a second app — "VocalMac", beside the installed "Vocal" —
+	@# indistinguishable until you launch the wrong copy and wonder why your
+	@# settings and history are missing.
+	@#
+	@# Unregistering is not enough on its own: Launch Services and Spotlight are
+	@# separate indexes, and Spotlight indexes the bundle sitting on disk no
+	@# matter what Launch Services thinks. So do both — drop the registration,
+	@# then delete the bundle. ditto has already copied it to /Applications, and
+	@# the next build recreates it from the intermediates, which stay put.
+	@$(LSREGISTER) -u build/Build/Products/Release/VocalMac.app 2>/dev/null || true
+	rm -rf build/Build/Products/Release/VocalMac.app
 	@echo "✅ Installed /Applications/Vocal.app — grant mic + Accessibility once for this copy."
 
 # Zip the installed app for sharing to another Mac (AirDrop the zip).
@@ -32,9 +85,15 @@ share: install
 	@echo "✅ ~/Desktop/Vocal.zip ready to AirDrop."
 
 clean:
-	rm -rf .build Vocal.xcodeproj
+	rm -rf .build Vocal.xcodeproj VocalFree.xcodeproj project-free.yml
 
 # Development hygiene: clear wedged TCC grants after signing changes (docs/03 §3.4).
+# Both bundle IDs. Debug runs from Xcode are com.vocal.mac.dev, but `make
+# install` ships Release as com.vocal.mac — and a wedged grant on the installed
+# copy is the one that actually stops you dictating, so resetting only the dev
+# ID left the failing case untouched.
 reset-tcc:
+	tccutil reset Accessibility com.vocal.mac || true
+	tccutil reset Microphone com.vocal.mac || true
 	tccutil reset Accessibility com.vocal.mac.dev || true
 	tccutil reset Microphone com.vocal.mac.dev || true

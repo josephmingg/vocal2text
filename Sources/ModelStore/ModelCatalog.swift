@@ -77,5 +77,36 @@ public enum ModelCatalog {
             approximateBytes: 506_462_208, // ≈483 MB
             files: []
         ),
+        /// Burmese (v1.1). Whisper is unusable for Burmese — 80–100% WER with
+        /// hallucination loops — so Burmese gets its own engine rather than
+        /// another Whisper variant (docs/04 Appendix A). Benchmarked on
+        /// FLEURS my_mm: 10.78% CER (1B) / 15.19% (300M) — docs/11 G13.
+        ///
+        /// Served by `SherpaOnnxEngine` (ASREngineSherpaOnnx), which manages
+        /// its own archive download/extraction into the same
+        /// `<root>/sherpa-onnx/<id>/` directory this catalog describes, so
+        /// `files` stays empty like the WhisperKit entries and ModelStore
+        /// tracks the installed footprint.
+        ModelSpec(
+            id: "omni-asr-ctc-1b-int8",
+            displayName: "Omnilingual ASR CTC 1B (int8)",
+            engine: "sherpa-onnx",
+            languages: [.burmese],
+            approximateBytes: 1_181_116_006, // ≈1.1 GB — Mac tier
+            files: []
+        ),
+        ModelSpec(
+            id: "omni-asr-ctc-300m-int8",
+            displayName: "Omnilingual ASR CTC 300M (int8)",
+            engine: "sherpa-onnx",
+            languages: [.burmese],
+            approximateBytes: 364_904_448, // ≈348 MB — iPhone tier
+            files: []
+        ),
     ]
+
+    /// Catalog entries that can serve `language`.
+    public static func models(for language: Language) -> [ModelSpec] {
+        builtIn.filter { $0.languages.contains(language) }
+    }
 }

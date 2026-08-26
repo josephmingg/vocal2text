@@ -1,0 +1,82 @@
+[
+  {
+    "id": "mix-001",
+    "category": "code-switching",
+    "language": "zh",
+    "input": "这个bug我明天fix一下",
+    "reference": "这个 bug 我明天 fix 一下。",
+    "rules": [
+      { "kind": "mustContain", "values": ["bug", "fix"] },
+      { "kind": "mustNotContain", "values": ["漏洞", "修复"] }
+    ],
+    "note": "Embedded English stays English — translating it is the failure. Pangu spacing is stage 4's job, not scored here."
+  },
+  {
+    "id": "mix-002",
+    "category": "code-switching",
+    "language": "zh",
+    "input": "我们先review一下这个PR再merge",
+    "reference": "我们先 review 一下这个 PR 再 merge。",
+    "rules": [
+      { "kind": "mustContain", "values": ["review", "PR", "merge"] },
+      { "kind": "mustNotContain", "values": ["审查", "合并"] }
+    ]
+  },
+  {
+    "id": "mix-003",
+    "category": "code-switching",
+    "language": "zh",
+    "input": "打开GitHub看一下那个issue",
+    "reference": "打开 GitHub 看一下那个 issue。",
+    "protectedTerms": ["GitHub"],
+    "rules": [
+      { "kind": "preservesTerms", "values": ["GitHub"] },
+      { "kind": "mustContain", "values": ["issue"] }
+    ]
+  },
+  {
+    "id": "mix-004",
+    "category": "code-switching",
+    "language": "zh",
+    "input": "这个API的response有点慢",
+    "reference": "这个 API 的 response 有点慢。",
+    "rules": [
+      { "kind": "mustContain", "values": ["API", "response"] },
+      { "kind": "mustNotContain", "values": ["接口", "响应"] }
+    ]
+  },
+  {
+    "id": "mix-005",
+    "category": "code-switching",
+    "language": "en",
+    "input": "she said 差不多 which basically means close enough",
+    "reference": "She said 差不多, which basically means close enough.",
+    "rules": [
+      { "kind": "mustContain", "values": ["差不多"] },
+      { "kind": "maxWords", "limit": 16 }
+    ],
+    "note": "Han inside an English dictation must survive; the language is still EN, so the validator's Han-output rule does not apply."
+  },
+  {
+    "id": "mix-006",
+    "category": "code-switching",
+    "language": "zh",
+    "input": "先跑一下test，pass了再deploy",
+    "reference": "先跑一下 test，pass 了再 deploy。",
+    "rules": [
+      { "kind": "mustContain", "values": ["test", "deploy"] },
+      { "kind": "mustNotContain", "values": ["测试通过后部署"] }
+    ]
+  },
+  {
+    "id": "mix-007",
+    "category": "code-switching",
+    "language": "zh",
+    "input": "这个feature要不要加到roadmap里",
+    "reference": "这个 feature 要不要加到 roadmap 里？",
+    "rules": [
+      { "kind": "mustContain", "values": ["feature", "roadmap"] },
+      { "kind": "maxWords", "limit": 16 }
+    ]
+  }
+]

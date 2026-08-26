@@ -151,8 +151,10 @@ struct DictateView: View {
             // Language quick pin (FR-i1.1 parity with the Mac menu bar).
             Picker("Language", selection: languageBinding) {
                 Text("Auto").tag("auto")
-                Text("EN").tag("en")
-                Text("中文").tag("zh")
+                // Driven by Language.allCases (docs/04 §2).
+                ForEach(Language.allCases, id: \.self) { language in
+                    Text(language.shortLabel).tag(language.rawValue)
+                }
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 200)

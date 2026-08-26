@@ -1,12 +1,13 @@
 import AppKit
+import AudioPipeline
 import CoreModels
 import PersistenceKit
 import ServiceManagement
 import SwiftUI
 
-/// Settings panes, v1 subset of FR-11.2: General, Cleanup, Dictionary,
-/// History & privacy, About. Hosted in an AppKit window via `WindowManager`
-/// (docs/03 §3.4).
+/// Settings panes, v1 subset of FR-11.2: General, Profiles, Cleanup,
+/// Dictionary, History & privacy, About. Hosted in an AppKit window via
+/// `WindowManager` (docs/03 §3.4).
 @MainActor
 struct SettingsView: View {
     @ObservedObject private var appState: AppState
@@ -19,8 +20,10 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            GeneralPane(settings: settings)
+            GeneralPane(settings: settings, appState: appState)
                 .tabItem { Label("General", systemImage: "gearshape") }
+            ProfilesPane(profileStore: appState.profileStore)
+                .tabItem { Label("Profiles", systemImage: "person.2") }
             CleanupPane(settings: settings)
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
             DictionaryPane(database: appState.database)
@@ -30,7 +33,9 @@ struct SettingsView: View {
             AboutPane()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 560, height: 460)
+        // Sized for the Profiles master–detail pane; the Form panes are
+        // scrollable at any size.
+        .frame(width: 680, height: 560)
     }
 }
 
@@ -39,38 +44,15 @@ struct SettingsView: View {
 @MainActor
 private struct GeneralPane: View {
     @ObservedObject var settings: SettingsStore
+    let appState: AppState
     @State private var launchAtLogin = false
     @State private var loginItemError: String?
-    @State private var globeActionConfigured = false
 
     var body: some View {
         Form {
-            Section("Hotkey") {
-                Picker("Dictation hotkey", selection: $settings.hotkeyChoice) {
-                    Text("Fn / Globe (hold)").tag(SettingsStore.HotkeyChoice.fnKey)
-                    Text("Right Command (hold)").tag(SettingsStore.HotkeyChoice.rightCommand)
-                    Text("Right Option (hold)").tag(SettingsStore.HotkeyChoice.rightOption)
-                }
-                if settings.hotkeyChoice == .fnKey && globeActionConfigured {
-                    // docs/03 §3.1: the Globe system action fires at the IOHID
-                    // layer and cannot be suppressed; the user must set
-                    // "Press 🌐 key to: Do Nothing" themselves.
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(
-                            """
-                            The 🌐 key currently triggers a system action (emoji \
-                            picker or input switching) that Vocal cannot suppress. \
-                            In System Settings → Keyboard, set “Press 🌐 key to” \
-                            to “Do Nothing”.
-                            """
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        Button("Open Keyboard Settings") {
-                            FnKeySetup.openKeyboardSettings()
-                        }
-                    }
-                }
+            Section("Push-to-talk key") {
+                // Same control onboarding shows, so the two cannot drift.
+                HotkeyPickerView(appState: appState)
             }
             Section {
                 Toggle("Launch at login", isOn: launchAtLoginBinding)
@@ -87,7 +69,6 @@ private struct GeneralPane: View {
         .formStyle(.grouped)
         .onAppear {
             launchAtLogin = SMAppService.mainApp.status == .enabled
-            globeActionConfigured = FnKeySetup.globeKeyActionIsConfigured()
         }
     }
 
@@ -269,13 +250,15 @@ private struct HistoryPrivacyPane: View {
 
     var body: some View {
         Form {
-            // Truth pass (docs/14 W16): audio is not retained yet (G9), so no
-            // picker pretends otherwise. The retention choice returns with
-            // audio history in Phase 5.
             Section("Audio recordings") {
-                Text("Take audio is kept only until the text is delivered, then discarded. Retention options arrive together with audio history.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                // -1 = keep forever, 0 = never keep (SettingsStore contract).
+                Picker("Keep audio", selection: $settings.audioRetentionDays) {
+                    Text("Never").tag(0)
+                    Text("1 day").tag(1)
+                    Text("7 days").tag(7)
+                    Text("30 days").tag(30)
+                    Text("Forever").tag(-1)
+                }
             }
             Section("History") {
                 Button("Delete All History…", role: .destructive) {
@@ -309,7 +292,21 @@ private struct HistoryPrivacyPane: View {
     private func deleteAllHistory() {
         guard let database else { return }
         do {
+            // One SQL statement, deliberately not fetch-decode-delete-each:
+            // the list query skips rows this build cannot decode, and
+            // enumerating it would silently spare them — breaking the
+            // dialog's "permanently removes every transcript" promise.
             let count = try database.deleteAllTranscripts()
+            // Retained recordings are transcript data too — "delete every
+            // transcript" cannot leave the audio of every transcript behind.
+            if let directory = AppState.audioDirectory() {
+                AudioArchive.deleteAll(in: directory)
+            }
+            // Deleting rows only unlinks them: the transcript text stays
+            // readable in the file's free pages until it is overwritten.
+            // Compacting is what makes "permanently removes" true, and it is
+            // only safe to run now that rowids are stable (docs/11 G7).
+            try database.vacuum()
             statusText = "Deleted \(count) transcript\(count == 1 ? "" : "s")."
         } catch {
             statusText = "Delete failed: \(error.localizedDescription)"
@@ -333,11 +330,17 @@ private struct AboutPane: View {
                 .bold()
             Text("Version \(Self.versionString)")
                 .foregroundStyle(.secondary)
-            Text("Personal offline dictation for English and 简体中文. Audio and transcripts stay on this Mac.")
+            Text("Personal offline dictation for English, 简体中文, and မြန်မာ. Audio and transcripts stay on this Mac.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
+            // The Burmese caveat both apps must state identically (docs/11 G13).
+            Text(BurmeseSupportNote.text)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 400)
 
             GroupBox("Diagnostics") {
                 VStack(alignment: .leading, spacing: 3) {

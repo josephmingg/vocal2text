@@ -177,3 +177,104 @@ func hanDetectionPositives(text: String) {
 func hanDetectionNegatives(text: String) {
     #expect(!text.containsHanCharacters)
 }
+
+// MARK: - Burmese language layer (v1.1)
+
+@Test func burmeseIsAnUnspacedScriptWithCleanupOffByDefault() {
+    #expect(Language.burmese.rawValue == "my")
+    #expect(Language.burmese.isUnspacedScript)
+    #expect(Language.chinese.isUnspacedScript)
+    #expect(!Language.english.isUnspacedScript)
+    // Small local models corrupt Burmese more often than they tidy it
+    // (docs/04 Appendix A), so it opts out of cleanup by default.
+    #expect(!Language.burmese.allowsCleanupByDefault)
+    #expect(Language.english.allowsCleanupByDefault)
+    #expect(Language.chinese.allowsCleanupByDefault)
+}
+
+@Test func everyLanguageHasLabels() {
+    for language in Language.allCases {
+        #expect(!language.displayName.isEmpty)
+        #expect(!language.shortLabel.isEmpty)
+    }
+    #expect(Language.allCases.count == 3)
+}
+
+@Test(arguments: [
+    ("မင်္ဂလာပါ", true),
+    ("ကျေးဇူးတင်ပါတယ်", true),
+    ("Vocal ကို သုံးပါ", true),  // code-switched still counts
+    ("hello there", false),
+    ("你好世界", false),
+    ("", false),
+])
+func myanmarScriptDetection(text: String, expected: Bool) {
+    #expect(text.containsMyanmarCharacters == expected)
+}
+
+@Test func myanmarAndHanDetectionDoNotOverlap() {
+    #expect(!"မင်္ဂလာပါ".containsHanCharacters)
+    #expect(!"你好世界".containsMyanmarCharacters)
+}
+
+/// Myanmar script has no word boundaries, so entries written in it must
+/// default to substring matching exactly like Han ones.
+@Test func burmeseDictionaryEntriesDefaultToPhraseMatching() {
+    #expect(DictionaryEntry(spoken: "မင်္ဂလာ", written: "Mingalar").matchMode == .phrase)
+    #expect(DictionaryEntry(spoken: "你好", written: "Nihao").matchMode == .phrase)
+    #expect(DictionaryEntry(spoken: "cube control", written: "kubectl").matchMode == .word)
+    // An explicit mode still wins.
+    #expect(
+        DictionaryEntry(spoken: "မင်္ဂလာ", written: "Mingalar", matchMode: .word).matchMode == .word
+    )
+}
+
+// MARK: - FormattingOptions forward/backward compatibility
+
+@Test func formattingOptionsCarriesBurmeseSettings() throws {
+    let options = FormattingOptions(
+        autoPunctuation: true,
+        myanmarDigits: .myanmar,
+        myanmarSpokenPunctuation: false
+    )
+    #expect(try roundTrip(options) == options)
+    #expect(FormattingOptions.verbatim.myanmarDigits == .asRecognized)
+    #expect(!FormattingOptions.verbatim.myanmarSpokenPunctuation)
+}
+
+/// Profiles are stored as JSON documents and a decode failure makes the app
+/// fall back to built-ins — silently discarding the user's customizations.
+/// Adding a formatting option must therefore never break an older document.
+@Test func formattingOptionsDecodesADocumentWrittenBeforeBurmeseExisted() throws {
+    let legacy = """
+        {
+          "autoPunctuation": false,
+          "smartSpacing": true,
+          "structureAllowed": false,
+          "enforceFullWidthZhPunctuation": true,
+          "panguSpacing": false
+        }
+        """
+    let decoded = try JSONDecoder().decode(
+        FormattingOptions.self, from: Data(legacy.utf8)
+    )
+    #expect(!decoded.autoPunctuation)
+    #expect(decoded.smartSpacing)
+    // New keys take their defaults rather than failing the decode.
+    #expect(decoded.myanmarDigits == .asRecognized)
+    #expect(!decoded.myanmarSpokenPunctuation)  // ships OFF (docs/11 G18)
+}
+
+@Test func formattingOptionsDecodesAnEmptyDocument() throws {
+    let decoded = try JSONDecoder().decode(FormattingOptions.self, from: Data("{}".utf8))
+    #expect(decoded == FormattingOptions())
+}
+
+@Test func profileWithBurmeseOverrideRoundTrips() throws {
+    let profile = Profile(
+        name: "Burmese notes",
+        formatting: FormattingOptions(myanmarDigits: .western),
+        languageOverride: .pinned(.burmese)
+    )
+    #expect(try roundTrip(profile) == profile)
+}

@@ -14,6 +14,13 @@ public enum Stage1Normalizer: Sendable {
         formatting: FormattingOptions
     ) -> String {
         var result = text
+        if language == .burmese {
+            // Before anything inspects or matches characters: Myanmar text
+            // arrives in inconsistent normalization, and two visually
+            // identical strings that differ by composition do not compare
+            // equal — which would silently break dictionary matching.
+            result = MyText.normalizedToNFC(result)
+        }
         result = stripTokenRemnants(result)
         result = stripNoiseTags(result)
         result = collapseRepeatedTokenLoops(result)
@@ -32,6 +39,17 @@ public enum Stage1Normalizer: Sendable {
         case .chinese:
             result = ZhText.removeSingleSpacesBetweenHan(result)
             result = ZhText.convertHalfWidthPunctuationBetweenHan(result)
+        case .burmese:
+            // Spoken marks first, so the terminal-mark check below sees them.
+            if formatting.myanmarSpokenPunctuation {
+                result = MyText.spokenPunctuationApplied(result)
+                // A command spoken as the very first word leaves its mark at
+                // position 0; the general orphan strip already ran before the
+                // substitution existed, so re-run it on what it produced.
+                result = stripLeadingOrphanPunctuation(result)
+            }
+            result = MyText.tidiedSpacing(result)
+            result = MyText.appendingSectionIfSentenceLike(result)
         }
         return result
     }
@@ -120,6 +138,7 @@ public enum Stage1Normalizer: Sendable {
     /// brackets, `$`, `#` etc. are deliberately absent.
     private static let orphanLeadingPunctuation: Set<Character> = [
         ",", ".", "!", "?", ";", ":", "、", "，", "。", "！", "？", "；", "：", "…",
+        "\u{104A}", "\u{104B}",  // Myanmar ၊ and ။
     ]
 
     private static func stripLeadingOrphanPunctuation(_ text: String) -> String {

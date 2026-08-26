@@ -153,6 +153,12 @@ Selection: per-profile provider override → global default provider → fallbac
 (local → skip). Timeout default 6 s (configurable); on timeout deliver stage-2 text and record
 `cleanup: timed-out` in history.
 
+**Resolved per take**, not per launch (`DictationSession.Dependencies.selectCleanup`, docs/11
+G3/G15): the session asks for a provider only after the profile is pinned and only when stage 3
+is actually going to run, so a profile's override selects the model and a Settings change applies
+to the next dictation. v1 honors `.ollama` overrides only — no other provider has a configured
+URL or key to reach, so those fall back to the global model instead of failing the take.
+
 ### 3.3 Prompt architecture
 
 One **system prompt template** with slots, versioned in-repo as a resource
@@ -243,7 +249,12 @@ profile name + route type.
 All editable; user can add unlimited profiles (F8 requirement: "write your own profile with
 any prompt you want"). **Shipped state**: these are pre-authored *configurations* — with the
 global cleanup master switch OFF (the default), none of their cleanup behavior runs; the
-Terminal profile's verbatim formatting gates apply regardless of the master switch.
+Terminal profile's verbatim formatting gates apply regardless of the master switch. The
+editor itself ships on the Mac (Settings → Profiles, docs/11 G17): profiles persist in the
+database, the built-ins are seeded on first run so their IDs survive relaunch, and the
+press-time resolver reads the live set — an edit applies to the next dictation. iOS seeds
+the same built-ins but has no editor yet; `providerOverride` has no UI until the G3
+provider-selecting factory makes it real.
 
 ### iOS routing
 

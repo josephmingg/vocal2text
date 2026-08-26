@@ -19,19 +19,29 @@ public enum Stage4Formatter: Sendable {
     ) -> String {
         guard !text.isEmpty else { return text }
         var result = text
-        if language == .chinese {
+        switch language {
+        case .chinese:
             if formatting.enforceFullWidthZhPunctuation {
                 result = ZhText.enforceFullWidthPunctuationAfterHan(result)
             }
             if formatting.panguSpacing {
                 result = ZhText.applyPanguSpacing(result)
             }
-        }
-        if language == .english, formatting.autoPunctuation {
-            result = collapseDuplicateTerminalPunctuation(result)
-        }
-        if language == .english, formatting.smartSpacing, let context = precedingContext {
-            result = smartSpaced(result, against: context)
+        case .burmese:
+            // The digit preference is a display choice, not punctuation, so it
+            // applies even to verbatim profiles — a Burmese user who asked for
+            // Myanmar numerals wants them in the terminal too.
+            result = MyText.applyingDigitPreference(result, formatting.myanmarDigits)
+            if formatting.autoPunctuation {
+                result = MyText.tidiedSpacing(result)
+            }
+        case .english:
+            if formatting.autoPunctuation {
+                result = collapseDuplicateTerminalPunctuation(result)
+            }
+            if formatting.smartSpacing, let context = precedingContext {
+                result = smartSpaced(result, against: context)
+            }
         }
         return result
     }

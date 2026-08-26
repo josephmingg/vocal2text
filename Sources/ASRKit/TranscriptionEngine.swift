@@ -4,8 +4,25 @@ import Foundation
 /// Availability of an engine for a given language.
 public enum EngineAvailability: Sendable, Hashable {
     case ready
+    /// Usable, but the engine knows its output for this language is poor.
+    ///
+    /// "Supported" and "good" are not the same thing: Whisper accepts a
+    /// Burmese language token and returns something for it, at 80–100% WER
+    /// (docs/04 Appendix A). Reporting that as `.ready` would let the UI
+    /// promise a quality the engine cannot deliver, and reporting it as
+    /// `.unsupported` would hide a path some users still want. `caveat` is
+    /// user-facing copy.
+    case readyWithCaveat(String)
     case needsDownload(bytes: Int64)
     case unsupported(reason: String)
+
+    /// True when a dictation can actually be attempted.
+    public var isUsable: Bool {
+        switch self {
+        case .ready, .readyWithCaveat, .needsDownload: true
+        case .unsupported: false
+        }
+    }
 }
 
 /// A partial (volatile) or final transcription update during streaming.

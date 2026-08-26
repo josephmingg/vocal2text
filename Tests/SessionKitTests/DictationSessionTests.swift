@@ -42,6 +42,46 @@ private actor ScriptedCleanupProvider: CleanupProvider {
     }
 }
 
+/// Fails the first transcription, then succeeds — the shape of "the model was
+/// not loaded yet, and now it is", which is exactly when a user retries a
+/// recovered take.
+private actor FailThenSucceedEngine: TranscriptionEngine {
+    nonisolated let id = "fail-then-succeed"
+    nonisolated let displayName = "Fail Then Succeed"
+
+    private let result: TranscriptionResult
+    private var calls = 0
+
+    init(result: TranscriptionResult) {
+        self.result = result
+    }
+
+    func availability(for language: Language) async -> EngineAvailability { .ready }
+    func prepare(languageMode: LanguageMode) async throws {}
+    func unload() async {}
+
+    func transcribe(
+        _ audio: PCMChunk,
+        languageMode: LanguageMode,
+        dictionaryTerms: [String]
+    ) async throws -> TranscriptionResult {
+        calls += 1
+        if calls == 1 { throw TranscriptionError.engineUnavailable("model not loaded") }
+        return result
+    }
+
+    nonisolated func transcribeStream(
+        _ audio: AsyncStream<PCMChunk>,
+        languageMode: LanguageMode,
+        dictionaryTerms: [String]
+    ) -> AsyncThrowingStream<TranscriptionUpdate, Error> {
+        // Unused: the session transcribes on release, never by streaming.
+        AsyncThrowingStream<TranscriptionUpdate, Error> { continuation in
+            continuation.finish()
+        }
+    }
+}
+
 private let fixedNow = Date(timeIntervalSince1970: 1_723_000_000)
 
 /// One-shot latch for scripting suspension points (e.g. a profile resolution
@@ -90,6 +130,9 @@ private func makeHarness(
     config: StaticConfig = StaticConfig(),
     cleanup: CleanupPipeline? = nil,
     cleanupProviderID: CleanupProviderID = .ollama(model: "qwen2.5"),
+    /// Per-take provider selection. Defaults to the fixed `cleanup` pipeline,
+    /// so existing tests read unchanged.
+    selectCleanup: DictationSession.CleanupSelecting? = nil,
     prewarm: @escaping @Sendable () async -> Void = {},
     deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes"),
     profileResolution: (@Sendable () async -> DictationSession.ResolvedRoute)? = nil
@@ -108,8 +151,14 @@ private func makeHarness(
     let dependencies = DictationSession.Dependencies(
         audio: audio,
         engine: engine,
-        cleanup: cleanup,
-        cleanupProviderID: cleanupProviderID,
+        selectCleanup: selectCleanup
+            ?? { _ in
+                cleanup.map {
+                    DictationSession.CleanupSelection(
+                        pipeline: $0, providerID: cleanupProviderID
+                    )
+                }
+            },
         prewarmCleanup: prewarm,
         deliverer: deliverer,
         store: store,
@@ -308,6 +357,94 @@ struct DictationSessionTests {
         )
     }
 
+    // MARK: - Per-take provider selection (docs/11 G3, G15)
+
+    @Test func cleanupProviderIsSelectedPerTakeFromThePinnedProfile() async throws {
+        // The selector runs once per take and sees the take's profile, so a
+        // profile override picks the provider (G3) and a settings change
+        // applies on the next dictation instead of the next launch (G15).
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let seen = ProfileRecorder()
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
+            profile: Profile(
+                name: "Notes",
+                cleanupEnabled: true,
+                providerOverride: .ollama(model: "sailor2:8b")
+            ),
+            config: StaticConfig(masterSwitch: true),
+            selectCleanup: { profile in
+                await seen.record(profile)
+                // What the Mac app does: build from the profile's override,
+                // falling back to the global model when it names none.
+                guard case .ollama(let model)? = profile.providerOverride else {
+                    return DictationSession.CleanupSelection(
+                        pipeline: CleanupPipeline(provider: provider),
+                        providerID: .ollama(model: "global-default")
+                    )
+                }
+                return DictationSession.CleanupSelection(
+                    pipeline: CleanupPipeline(provider: provider),
+                    providerID: .ollama(model: model)
+                )
+            }
+        )
+
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let profiles = await seen.profiles
+        #expect(profiles.count == 1)
+        #expect(profiles.first?.name == "Notes")
+        // History records the overridden provider, not a launch-time default.
+        let record = try #require(await harness.store.records.first)
+        #expect(
+            record.cleanup
+                == .applied(provider: .ollama(model: "sailor2:8b"), model: "scripted-upper")
+        )
+    }
+
+    @Test func theSelectorIsNotConsultedWhenCleanupIsGatedOff() async throws {
+        // Master switch off: no provider is built at all, so a take costs
+        // nothing even when the endpoint is misconfigured.
+        let seen = ProfileRecorder()
+        let harness = makeHarness(
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: false),
+            selectCleanup: { profile in
+                await seen.record(profile)
+                return nil
+            }
+        )
+
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        #expect(await seen.profiles.isEmpty)
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .masterSwitchOff))
+    }
+
+    @Test func aNilSelectionRecordsProviderUnavailableAndStillDelivers() async throws {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            selectCleanup: { _ in nil }
+        )
+
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .providerUnavailable))
+        // A missing provider is never a reason to lose the take (FR-7.3).
+        #expect(await harness.deliverer.deliveredTexts == ["Meet on saturday."])
+    }
+
     @Test func validatorRejectionFallsBackToStage2Text() async throws {
         // "Here is…" trips the output validator's meta-text rule, so the
         // session must deliver the stage-2 text (FR-7.3) and log the rejection.
@@ -396,6 +533,76 @@ struct DictationSessionTests {
         // Written forms also flow to the engine as biasing terms.
         let terms = await harness.engine.lastDictionaryTerms
         #expect(terms == ["Claude Code"])
+    }
+
+    /// Regression: profile resolution must never gate the microphone. On macOS
+    /// it shells out to osascript for the frontmost browser's tab URL (up to
+    /// 1.5 s), and every millisecond before capture opens is speech the user
+    /// already spoke. Here resolution refuses to finish until capture is live,
+    /// so the pre-fix serial order (resolve → start) cannot pass.
+    @Test func captureStartsWithoutWaitingForProfileResolution() async throws {
+        let gate = CaptureGate()
+        let captureLog = CaptureLog()
+        let audio = ScriptedAudioCapturing(
+            chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+            log: captureLog,
+            onStart: { await gate.open() }
+        )
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: audio,
+                engine: FakeTranscriptionEngine(
+                    result: TranscriptionResult(text: "hello there", detectedLanguage: .english)
+                ),
+                deliverer: deliverer,
+                store: store,
+                config: StaticConfig(),
+                profileResolution: {
+                    // Bounded so a regression fails the assertion instead of
+                    // hanging the suite forever.
+                    let sawCaptureStart = await withTaskGroup(of: Bool.self) { group in
+                        group.addTask {
+                            await gate.waitForOpen()
+                            return true
+                        }
+                        group.addTask {
+                            try? await Task.sleep(for: .seconds(5))
+                            return false
+                        }
+                        let first = await group.next() ?? false
+                        group.cancelAll()
+                        return first
+                    }
+                    return (
+                        Profile(name: sawCaptureStart ? "Concurrent" : "Serialized"),
+                        .app,
+                        "com.example.pressapp"
+                    )
+                },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask {
+            await pipeline.value
+        }
+
+        // "Serialized" would mean the press awaited resolution before opening
+        // the mic — the leading-speech-loss bug.
+        let records = await store.records
+        let record = try #require(records.first)
+        #expect(record.profileName == "Concurrent")
+
+        // The resolution is still the pinned press-time one (FR-3.6).
+        let contexts = await deliverer.contexts
+        #expect(contexts.first?.pressTimeAppBundleID == "com.example.pressapp")
+        #expect(record.routeKind == .app)
+        let finishCount = await captureLog.finishCount
+        #expect(finishCount == 1)
     }
 
     @Test func secureFieldBlockPersistsNothing() async {
@@ -517,5 +724,234 @@ struct DictationSessionTests {
         #expect(transcribeCount == 2)
         let phase = await harness.session.phase
         #expect(phase == .idle)
+    }
+}
+
+// MARK: - Burmese (v1.1)
+
+/// Cleanup that damages a transcript is worse than no cleanup: small local
+/// models corrupt Burmese rather than tidy it (docs/04 Appendix A).
+struct BurmeseCleanupGateTests {
+
+    @Test func autoDetectedBurmeseSkipsCleanup() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ရာသီဥတုကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(name: "Default", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 0)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.cleanup == .skipped(reason: .languageOptOut))
+        // The deterministic stages still ran, so the text is still improved.
+        #expect(record.deliveredText.hasSuffix("။"))
+    }
+
+    /// Pinning Burmese on a profile is the deliberate opt-in.
+    @Test func aProfilePinnedToBurmeseMayUseCleanup() async throws {
+        let provider = ScriptedCleanupProvider(
+            script: .fixed("ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+        )
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ရာသီဥတုကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(
+                name: "Burmese notes",
+                cleanupEnabled: true,
+                languageOverride: .pinned(.burmese)
+            ),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 1)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.deliveredText == "ဒီနေ့ ရာသီဥတု ကောင်းတယ်။")
+    }
+
+    @Test func englishAndChineseAreUnaffectedByTheGate() {
+        #expect(
+            DictationSession.cleanupAllowed(for: .english, profile: Profile(name: "Default"))
+        )
+        #expect(
+            DictationSession.cleanupAllowed(for: .chinese, profile: Profile(name: "Default"))
+        )
+        #expect(
+            !DictationSession.cleanupAllowed(for: .burmese, profile: Profile(name: "Default"))
+        )
+    }
+
+    /// A Burmese dictation still runs the deterministic Burmese stages end to
+    /// end — that is the part of v1.1 that is genuinely complete.
+    @Test func burmeseGoesThroughTheBurmesePipeline() async throws {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "ဒီနေ့ ရာသီဥတု ကောင်းတယ်", detectedLanguage: .burmese
+            ),
+            profile: Profile(
+                name: "Burmese",
+                formatting: FormattingOptions(myanmarDigits: .western)
+            )
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        // The terminal ။ was appended — no English capitalization or period.
+        #expect(delivered == ["ဒီနေ့ ရာသီဥတု ကောင်းတယ်။"])
+        let records = await harness.store.records
+        #expect(records.first?.language == .burmese)
+    }
+}
+
+/// Recovering a take the user cancelled with Escape (FR-1.6, docs/11 G9).
+struct CancelledTakeRecoveryTests {
+
+    private static func recoverableAudio(seconds: Double = 2.0) -> PCMChunk {
+        PCMChunk(
+            samples: [Float](repeating: 0.1, count: Int(seconds * Double(PCMChunk.sampleRate)))
+        )
+    }
+
+    @Test func recoveringACancelledTakeRunsTheWholePipeline() async throws {
+        let harness = makeHarness()
+
+        let consumed = await harness.session.recover(audio: Self.recoverableAudio())
+        #expect(consumed)
+
+        // Identical to a take that was never cancelled: same normalization,
+        // same delivery, same history row.
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday."])
+
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        // The one thing that differs, so history can tell the story.
+        #expect(record.source == .recovered)
+        #expect(record.language == .english)
+        #expect(record.profileName == "Default")
+        #expect(abs(record.durationSeconds - 2.0) < 0.01)
+    }
+
+    @Test func recoveryResolvesTheProfileNowRatherThanAtCancelTime() async throws {
+        // Recovery delivers into whatever is frontmost at the moment the user
+        // asks for it, so it must ask the resolver then — not replay a pinned
+        // context captured minutes ago.
+        let harness = makeHarness()
+        _ = await harness.session.recover(audio: Self.recoverableAudio())
+
+        let contexts = await harness.deliverer.contexts
+        #expect(contexts.first?.pressTimeAppBundleID == "com.example.pressapp")
+        // Recovery is never a locked take: it has no press to hold open.
+        #expect(contexts.first?.isLockMode == false)
+    }
+
+    @Test func aFailedRecoveryKeepsTheTakeRecoverable() async throws {
+        // The whole promise of recovery is a second chance. Reporting the audio
+        // consumed after the engine failed would let the caller delete the only
+        // copy of a take that produced nothing.
+        let harness = makeHarness(engineFailure: .engineUnavailable("model missing"))
+
+        let consumed = await harness.session.recover(audio: Self.recoverableAudio())
+        #expect(!consumed)
+
+        let records = await harness.store.records
+        #expect(records.isEmpty)
+        let error = await harness.session.lastError
+        #expect(error != nil)
+    }
+
+    @Test func aSecureFieldConsumesTheRecoveredTake() async throws {
+        // FR-3.2: that take leaves no trace. Holding its raw audio back for
+        // another attempt would undo the rule that just fired.
+        let harness = makeHarness(
+            deliveryOutcome: .blockedSecureField(culpritApp: "1Password")
+        )
+
+        let consumed = await harness.session.recover(audio: Self.recoverableAudio())
+        #expect(consumed)
+
+        let records = await harness.store.records
+        #expect(records.isEmpty)
+    }
+
+    @Test func recoveryIsRefusedWhileATakeIsInFlight() async throws {
+        let harness = makeHarness()
+        await harness.session.pressBegan()
+
+        let consumed = await harness.session.recover(audio: Self.recoverableAudio())
+        #expect(!consumed)
+
+        // The live take is untouched and still completes normally.
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        let records = await harness.store.records
+        #expect(records.count == 1)
+        #expect(records.first?.source == .dictation)
+    }
+
+    @Test func recoveringSilenceIsANoOp() async throws {
+        let harness = makeHarness()
+        let consumed = await harness.session.recover(audio: PCMChunk(samples: []))
+        #expect(!consumed)
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.isEmpty)
+    }
+
+    @Test func aRetriedRecoveryClearsTheEarlierFailuresError() async throws {
+        // The HUD reads `lastError` when the session returns to idle, so a
+        // stale error from the attempt that failed would be shown over the
+        // retry that worked — and the user would think recovery was broken.
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: ScriptedAudioCapturing(chunk: PCMChunk(samples: []), log: CaptureLog()),
+                engine: FailThenSucceedEngine(
+                    result: TranscriptionResult(text: "second time lucky", detectedLanguage: .english)
+                ),
+                selectCleanup: { _ in nil },
+                deliverer: deliverer,
+                store: store,
+                config: StaticConfig(),
+                profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+                now: { fixedNow }
+            )
+        )
+
+        let audio = Self.recoverableAudio()
+        let firstAttempt = await session.recover(audio: audio)
+        #expect(!firstAttempt)
+        let errorAfterFailure = await session.lastError
+        #expect(errorAfterFailure != nil)
+
+        // The caller kept the recording precisely because the first attempt
+        // reported it unconsumed, so the same audio comes back.
+        let secondAttempt = await session.recover(audio: audio)
+        #expect(secondAttempt)
+        let errorAfterSuccess = await session.lastError
+        #expect(errorAfterSuccess == nil)
+
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered == ["Second time lucky."])
+        let records = await store.records
+        #expect(records.count == 1)
+        #expect(records.first?.source == .recovered)
     }
 }

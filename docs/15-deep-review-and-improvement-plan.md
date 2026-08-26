@@ -1,5 +1,16 @@
 # Deep Review & Improvement Plan — "Match Wispr Flow" (2026-08-26)
 
+> **Status addendum (same day):** this review was written against the v0.1.1 snapshot;
+> main's v1.1 (through `f669569`) independently resolved several findings before the
+> review landed — W1 (mic-first press), W8 (both-modifiers edge, via the extracted
+> `HotkeyDecisionCore`), W12/G7 (FTS5 surrogate-rowid migration), the fake waveform,
+> audio retention + cancelled-take recovery (G9), Escape-in-lock (G5), the low-disk
+> guard (G4), per-take provider routing (G3/G15), app names in history (G8), and the
+> per-row delete-all. The remaining Phase 0–1 items — W3 concurrent takes, W9 dead-tap
+> failure surfacing, W10 provisional short-taps, latency surfacing, structured logging,
+> diagnostics counters, the benchmark harness, and the lint gate — are implemented on
+> this branch, adapted to the v1.1 architecture. Phase 2+ recommendations stand.
+
 **Scope**: a full product + engineering review of Vocal v0.1.1 against the 2026 dictation
 market (Wispr Flow, superwhisper, VoiceInk, Aqua Voice, Handy, MacWhisper), followed by a
 step-by-step, phased improvement plan. **This document recommends; it does not implement.**

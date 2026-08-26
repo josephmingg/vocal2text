@@ -42,9 +42,11 @@ IDs are stable; acceptance criteria in §6 reference them.
   research-confirmed viable via CGEventTap — requires onboarding step setting "Press 🌐
   key to: Do Nothing", see docs/03 §3.1). **First-class fallback: Right-⌘ hold** (no system
   conflict, works on all keyboards incl. third-party externals whose firmware swallows Fn).
-  Also offered: Right-⌥, Right-⌃ holds. Keyed chords (⌥Space) supported but discouraged
-  (they die under secure-input sessions; modifier-only hotkeys survive). Interview C8 can
-  override the default.
+  Also offered: every other left/right modifier hold, F13–F15 for external keyboards, and
+  a recorder for any custom combination (docs/13). Keyed chords (⌥Space) and bare keys
+  (F13) are supported but discouraged: they die under secure-input sessions, where
+  modifier-only hotkeys survive. Left-hand modifiers and both Shifts arm on ordinary
+  typing, so the UI flags them. Interview C8 can override the default.
 - FR-1.5 A press shorter than 500 ms is discarded silently (accidental tap) **unless** the
   VAD detected speech during it, in which case it is transcribed normally. (Same rule and
   threshold in docs/03 §3.1.)

@@ -18,6 +18,9 @@ public enum CleanupOutcome: Codable, Sendable, Hashable {
         case masterSwitchOff
         case profileDisabled
         case providerUnavailable
+        /// The detected language opts out of cleanup by default
+        /// (`Language.allowsCleanupByDefault`) and no profile pinned it.
+        case languageOptOut
     }
 }
 

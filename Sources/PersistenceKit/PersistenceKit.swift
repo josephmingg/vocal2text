@@ -78,46 +78,32 @@ public final class DatabaseStore: Sendable {
                     tokenize='trigram'
                 )
                 """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_insert AFTER INSERT ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                END
-                """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_delete AFTER DELETE ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                END
-                """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_update AFTER UPDATE ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
-                        VALUES (new.rowid, new.rawText, new.deliveredText);
-                END
-                """)
+            try Self.createTranscriptFTSTriggers(db)
         }
-        // G7 hardening: the v1 external-content FTS tables key on the rowid
-        // of a TEXT-PK table, and VACUUM may renumber such rowids — silently
-        // corrupting the FTS index. v2 gives transcript an INTEGER PRIMARY
-        // KEY surrogate (rowid alias — VACUUM-stable by definition), rebuilds
-        // the FTS tables against it, and re-derives both indexes.
-        migrator.registerMigration("v2") { db in
-            try db.execute(sql: "DROP TRIGGER transcript_after_insert")
-            try db.execute(sql: "DROP TRIGGER transcript_after_delete")
-            try db.execute(sql: "DROP TRIGGER transcript_after_update")
-            try db.execute(sql: "DROP TABLE transcript_fts_latin")
-            try db.execute(sql: "DROP TABLE transcript_fts_tri")
+
+        // v2 (docs/03 §5, docs/11 G7): give `transcript` an INTEGER PRIMARY KEY
+        // so its rowids stop being volatile.
+        //
+        // Both FTS indexes are external-content tables keyed on the content
+        // table's rowid. v1's `id TEXT PRIMARY KEY` leaves rowid implicit, and
+        // SQLite is free to renumber implicit rowids when the database is
+        // rebuilt — VACUUM does exactly that. Every FTS entry would then point
+        // at whichever row inherited its old number: search would answer with
+        // other people's transcripts, or nothing at all, with no error to
+        // notice. A column declared INTEGER PRIMARY KEY *is* the rowid, so its
+        // values are data and survive any rebuild.
+        //
+        // AUTOINCREMENT on top: without it SQLite reuses the numbers of deleted
+        // rows, so a new transcript can land on a dead row's rowid and inherit
+        // any FTS entry a failed delete-trigger left behind. Monotonic ids make
+        // that class of staleness impossible for the cost of one counter row.
+        migrator.registerMigration("v2-transcript-surrogate-rowid") { db in
+            // The triggers name `transcript`; they are recreated against the
+            // rebuilt table below.
+            try db.execute(sql: "DROP TRIGGER IF EXISTS transcript_after_insert")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS transcript_after_delete")
+            try db.execute(sql: "DROP TRIGGER IF EXISTS transcript_after_update")
+
             try db.execute(sql: """
                 CREATE TABLE transcript_v2 (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,64 +125,19 @@ public final class DatabaseStore: Sendable {
                     importedFilename TEXT
                 )
                 """)
+            // Ordered by the existing rowid so the surrogate numbers follow
+            // insertion order, keeping `ORDER BY rowid` tie-breaks meaningful.
             try db.execute(sql: """
-                INSERT INTO transcript_v2 (
-                    id, createdAt, source, language, rawText, deliveredText,
-                    durationSeconds, targetAppBundleID, targetAppName, profileName,
-                    routeKind, cleanup, timings, audioPath, isCancelled, importedFilename
-                )
-                SELECT
-                    id, createdAt, source, language, rawText, deliveredText,
-                    durationSeconds, targetAppBundleID, targetAppName, profileName,
-                    routeKind, cleanup, timings, audioPath, isCancelled, importedFilename
-                FROM transcript ORDER BY rowid
+                INSERT INTO transcript_v2 (\(Self.transcriptColumns))
+                    SELECT \(Self.transcriptColumns) FROM transcript ORDER BY rowid
                 """)
             try db.execute(sql: "DROP TABLE transcript")
             try db.execute(sql: "ALTER TABLE transcript_v2 RENAME TO transcript")
-            try db.execute(sql: """
-                CREATE VIRTUAL TABLE transcript_fts_latin USING fts5(
-                    rawText, deliveredText,
-                    content='transcript',
-                    content_rowid='seq',
-                    tokenize='unicode61'
-                )
-                """)
-            try db.execute(sql: """
-                CREATE VIRTUAL TABLE transcript_fts_tri USING fts5(
-                    rawText, deliveredText,
-                    content='transcript',
-                    content_rowid='seq',
-                    tokenize='trigram'
-                )
-                """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_insert AFTER INSERT ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
-                        VALUES (new.seq, new.rawText, new.deliveredText);
-                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
-                        VALUES (new.seq, new.rawText, new.deliveredText);
-                END
-                """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_delete AFTER DELETE ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
-                END
-                """)
-            try db.execute(sql: """
-                CREATE TRIGGER transcript_after_update AFTER UPDATE ON transcript BEGIN
-                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
-                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
-                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
-                        VALUES (new.seq, new.rawText, new.deliveredText);
-                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
-                        VALUES (new.seq, new.rawText, new.deliveredText);
-                END
-                """)
+
+            try Self.createTranscriptFTSTriggers(db)
+            // The copied rows carry new rowids, so every FTS entry inherited
+            // from v1 now points at the wrong row: discard and re-derive both
+            // indexes from the content table.
             try db.execute(
                 sql: "INSERT INTO transcript_fts_latin(transcript_fts_latin) VALUES('rebuild')"
             )
@@ -204,12 +145,49 @@ public final class DatabaseStore: Sendable {
                 sql: "INSERT INTO transcript_fts_tri(transcript_fts_tri) VALUES('rebuild')"
             )
         }
+
         try migrator.migrate(queue)
         dbQueue = queue
     }
 
-    /// Compacts the database file. Exposed so callers (and tests) can VACUUM
-    /// safely — the v2 schema's INTEGER PRIMARY KEY keeps FTS rowids stable.
+    /// The three triggers that keep both external-content FTS indexes in step
+    /// with `transcript`. Shared by the v1 create and the v2 table rebuild so
+    /// the two can never disagree.
+    private static func createTranscriptFTSTriggers(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE TRIGGER transcript_after_insert AFTER INSERT ON transcript BEGIN
+                INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+                INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+            END
+            """)
+        try db.execute(sql: """
+            CREATE TRIGGER transcript_after_delete AFTER DELETE ON transcript BEGIN
+                INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+                INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+            END
+            """)
+        try db.execute(sql: """
+            CREATE TRIGGER transcript_after_update AFTER UPDATE ON transcript BEGIN
+                INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+                INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
+                    VALUES ('delete', old.rowid, old.rawText, old.deliveredText);
+                INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+                INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
+                    VALUES (new.rowid, new.rawText, new.deliveredText);
+            END
+            """)
+    }
+
+    /// Compacts the database file, reclaiming space from deleted history.
+    ///
+    /// Safe only because of the v2 surrogate rowid: under v1's implicit rowids
+    /// this call was the documented way to corrupt search (docs/11 G7).
     public func vacuum() throws {
         try dbQueue.writeWithoutTransaction { db in
             try db.execute(sql: "VACUUM")
@@ -259,6 +237,8 @@ public final class DatabaseStore: Sendable {
         }
     }
 
+    /// Fetching one row surfaces the decode failure — the caller asked for
+    /// exactly this record and deserves to know it is unreadable.
     public func transcript(id: UUID) throws -> TranscriptRecord? {
         try dbQueue.read { db -> TranscriptRecord? in
             let row = try Row.fetchOne(
@@ -276,7 +256,7 @@ public final class DatabaseStore: Sendable {
                 db,
                 sql: "SELECT \(Self.transcriptColumns) FROM transcript ORDER BY createdAt DESC"
             )
-            return try rows.map(Self.record(from:))
+            return Self.decodedRecords(from: rows)
         }
     }
 
@@ -286,8 +266,13 @@ public final class DatabaseStore: Sendable {
         }
     }
 
-    /// One statement, one transaction; the delete triggers keep FTS in sync.
-    /// Returns the number of rows removed.
+    /// Removes every transcript row, decodable or not, and returns the count.
+    ///
+    /// Deliberately one SQL statement rather than delete-by-enumerated-id:
+    /// `allTranscripts()` skips rows this build cannot decode, so enumerating
+    /// it would silently spare exactly the rows the user can no longer see —
+    /// while their raw text still sits in the file. "Delete All" must mean
+    /// all. (The FTS delete triggers fire per row either way.)
     public func deleteAllTranscripts() throws -> Int {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM transcript")
@@ -306,19 +291,17 @@ public final class DatabaseStore: Sendable {
             var seen = Set<UUID>()
             var results: [TranscriptRecord] = []
 
-            func collect(_ rows: [Row]) throws {
-                for row in rows {
-                    let record = try Self.record(from: row)
-                    if seen.insert(record.id).inserted {
-                        results.append(record)
-                    }
+            func collect(_ rows: [Row]) {
+                for record in Self.decodedRecords(from: rows)
+                where seen.insert(record.id).inserted {
+                    results.append(record)
                 }
             }
 
             // Quote as one FTS5 phrase so user text is never parsed as query syntax.
             let phrase = "\"" + trimmed.replacingOccurrences(of: "\"", with: "\"\"") + "\""
 
-            try collect(try Row.fetchAll(
+            collect(try Row.fetchAll(
                 db,
                 sql: """
                     SELECT \(Self.transcriptColumns) FROM transcript
@@ -331,7 +314,7 @@ public final class DatabaseStore: Sendable {
 
             // FTS5's trigram tokenizer needs at least three characters to match.
             if trimmed.count >= 3 {
-                try collect(try Row.fetchAll(
+                collect(try Row.fetchAll(
                     db,
                     sql: """
                         SELECT \(Self.transcriptColumns) FROM transcript
@@ -351,7 +334,7 @@ public final class DatabaseStore: Sendable {
                     .replacingOccurrences(of: "%", with: "\\%")
                     .replacingOccurrences(of: "_", with: "\\_")
                 let pattern = "%" + escaped + "%"
-                try collect(try Row.fetchAll(
+                collect(try Row.fetchAll(
                     db,
                     sql: """
                         SELECT \(Self.transcriptColumns) FROM transcript
@@ -383,13 +366,13 @@ public final class DatabaseStore: Sendable {
 
     public func dictionaryEntries() throws -> [DictionaryEntry] {
         try dbQueue.read { db -> [DictionaryEntry] in
-            let documents = try String.fetchAll(
+            let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT document FROM dictionary_entry ORDER BY rowid"
+                sql: "SELECT id, document FROM dictionary_entry ORDER BY rowid"
             )
-            return try documents.map {
-                try Self.decodeJSON(DictionaryEntry.self, from: $0, column: "dictionary_entry.document")
-            }
+            return Self.decodedDocuments(
+                DictionaryEntry.self, from: rows, column: "dictionary_entry.document"
+            )
         }
     }
 
@@ -420,13 +403,11 @@ public final class DatabaseStore: Sendable {
 
     public func profiles() throws -> [Profile] {
         try dbQueue.read { db -> [Profile] in
-            let documents = try String.fetchAll(
+            let rows = try Row.fetchAll(
                 db,
-                sql: "SELECT document FROM profile ORDER BY name, rowid"
+                sql: "SELECT id, document FROM profile ORDER BY name, rowid"
             )
-            return try documents.map {
-                try Self.decodeJSON(Profile.self, from: $0, column: "profile.document")
-            }
+            return Self.decodedDocuments(Profile.self, from: rows, column: "profile.document")
         }
     }
 
@@ -458,6 +439,46 @@ public final class DatabaseStore: Sendable {
             return try JSONDecoder().decode(type, from: data)
         } catch {
             throw DatabaseStoreError.invalidJSON(column: column)
+        }
+    }
+
+    /// Decodes a list result, dropping rows that will not decode instead of
+    /// failing the whole query.
+    ///
+    /// A row can be unreadable because a newer build wrote an enum case this
+    /// one does not know (a `language` from a later version, say) or because
+    /// a JSON column got mangled. Either way, one bad row must not make the
+    /// user's entire history disappear — everything else in the table is
+    /// still perfectly good.
+    /// The `decodedRecords` rule applied to a JSON-document table: one row a
+    /// newer build wrote (or one mangled document) must not hide every other
+    /// row. Skipping is safe for these tables specifically because nothing
+    /// destructive enumerates them — the transcript Delete-All lesson: any
+    /// future "delete all" must be one SQL statement, never
+    /// fetch-decode-delete-each.
+    private static func decodedDocuments<T: Decodable>(
+        _ type: T.Type, from rows: [Row], column: String
+    ) -> [T] {
+        rows.compactMap { row in
+            do {
+                return try decodeJSON(type, from: row["document"], column: column)
+            } catch {
+                let id: String? = row["id"]
+                print("Vocal: skipping unreadable \(column) row \(id ?? "<unknown>"): \(error)")
+                return nil
+            }
+        }
+    }
+
+    private static func decodedRecords(from rows: [Row]) -> [TranscriptRecord] {
+        rows.compactMap { row in
+            do {
+                return try record(from: row)
+            } catch {
+                let id: String? = row["id"]
+                print("Vocal: skipping unreadable history row \(id ?? "<unknown>"): \(error)")
+                return nil
+            }
         }
     }
 

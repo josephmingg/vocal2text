@@ -28,7 +28,59 @@ private struct ExplodingProvider: CleanupProvider {
     }
 }
 
+/// A provider that cannot be interrupted: it parks on a continuation that is
+/// never resumed — the async analogue of an inference call stuck in native
+/// code. This is deliberately NOT a `Task.sleep` fake: sleep is
+/// cancellation-cooperative and returns the instant the deadline race cancels
+/// it, which lets a timeout that merely relabels a late failure pass the test
+/// without ever bounding anything. (This test's first version made exactly
+/// that mistake.)
+private struct NonCooperativeProvider: CleanupProvider {
+    let id: CleanupProviderID = .appleFoundationModels
+    let leavesDevice = false
+
+    func isAvailable() async -> Bool { true }
+    func prewarm() async {}
+    func cleanup(_ request: CleanupRequest, timeout: Duration) async throws -> CleanupResponse {
+        // Ignores the timeout parameter AND cancellation. The hung task leaks
+        // for the life of the test process; that is the point.
+        await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
+        return CleanupResponse(text: "unreachable", modelName: "hung")
+    }
+}
+
 struct CleanupPipelineTests {
+
+    /// FR-7.3: a provider that never returns — and never honours cancellation
+    /// — must not park the dictation in `.cleaning`. The pipeline has to come
+    /// back at its own deadline and deliver the stage-2 text. The time limit
+    /// is the real assertion: a regression here hangs, it does not fail.
+    @Test(.timeLimit(.minutes(1)))
+    func providerThatIgnoresCancellationStillFallsBackOnTime() async {
+        let pipeline = CleanupPipeline(provider: NonCooperativeProvider())
+        let clock = ContinuousClock()
+        let start = clock.now
+        let outcome = await pipeline.run(
+            CleanupRequest(text: "meet on saturday", language: .english),
+            timeout: .milliseconds(100)
+        )
+        let elapsed = clock.now - start
+        #expect(outcome == .fellBack(reason: "timed-out"))
+        // Generous CI margin; the point is that it returns near the budget,
+        // not after the provider deigns to.
+        #expect(elapsed < .seconds(30))
+    }
+
+    /// "No time" must mean fail-now, not run-unbounded.
+    @Test(.timeLimit(.minutes(1)))
+    func zeroTimeoutFailsImmediately() async {
+        let pipeline = CleanupPipeline(provider: NonCooperativeProvider())
+        let outcome = await pipeline.run(
+            CleanupRequest(text: "meet on saturday", language: .english),
+            timeout: .zero
+        )
+        #expect(outcome == .fellBack(reason: "timed-out"))
+    }
 
     @Test func successPathDeliversCleanedTextAndModel() async {
         let provider = MockProvider(
@@ -142,8 +194,9 @@ struct OpenAICompatibleProviderRequestTests {
         #expect(body.model == "qwen2.5:7b-instruct")
         #expect(body.temperature == 0.2)
         #expect(body.stream == false)
-        // 29 chars → 2× char cap, floored at 64 (ZH-safe budget).
-        #expect(body.maxTokens == 64)
+        // 29 chars → 4× char cap, floored at 1024 (room for a reasoning model
+        // to think before it answers).
+        #expect(body.maxTokens == 1024)
         #expect(body.messages.count == 2)
         #expect(body.messages.first?.role == "system")
         #expect(body.messages.first?.content.contains("Claude") == true)
@@ -155,9 +208,14 @@ struct OpenAICompatibleProviderRequestTests {
         )
     }
 
-    @Test func maxTokensHeuristicIsTwiceCharsWithFloor() {
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 300) == 600)
-        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 3) == 64)
+    @Test func maxTokensLeavesRoomForAReasoningModelToThink() {
+        // A reasoning model spends the budget before emitting anything: qwen3:8b
+        // needed 231 completion tokens for a 48-character dictation, and the
+        // previous 2×-chars/64-floor budget gave it 96 — so `content` came back
+        // empty and cleanup silently did nothing on every take.
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 48) >= 231)
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 300) == 1200)
+        #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 3) == 1024)
     }
 
     @Test func prewarmBodyRequestsSingleToken() throws {

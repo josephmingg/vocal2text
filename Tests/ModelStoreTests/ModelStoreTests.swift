@@ -56,12 +56,17 @@ private func writeFile(at url: URL, bytes count: Int) throws {
 
 // MARK: - Catalog
 
+/// Scoped to the WhisperKit entries. It used to assert these properties of
+/// every catalog entry, which quietly encoded "the catalog is Whisper-only" —
+/// an assumption v1.1 retires, since Whisper cannot serve Burmese at all
+/// (docs/04 Appendix A). The claim worth keeping is about the Whisper models
+/// themselves.
 @Test func builtInCatalogListsWhisperKitEnglishChineseModels() {
-    let ids = ModelCatalog.builtIn.map(\.id)
+    let whisper = ModelCatalog.builtIn.filter { $0.engine == "whisperkit" }
+    let ids = whisper.map(\.id)
     #expect(ids.contains("whisper-large-v3-turbo"))
     #expect(ids.contains("whisper-small"))
-    for spec in ModelCatalog.builtIn {
-        #expect(spec.engine == "whisperkit")
+    for spec in whisper {
         #expect(spec.approximateBytes > 0)
         #expect(spec.languages.contains(.english))
         #expect(spec.languages.contains(.chinese))
@@ -331,4 +336,33 @@ private func writeFile(at url: URL, bytes count: Int) throws {
     let request = ModelDownloader.makeRequest(for: file, resumingFrom: 0)
     #expect(request.value(forHTTPHeaderField: "Range") == nil)
     #expect(request.url == file.url)
+}
+
+// MARK: - Burmese catalog entries (v1.1)
+
+@Test func catalogOffersABurmeseCapableEngine() {
+    let burmese = ModelCatalog.models(for: .burmese)
+    #expect(!burmese.isEmpty)
+    // Whisper is unusable for Burmese (docs/04 Appendix A), so no Burmese
+    // entry may point at it — that is the whole reason these exist.
+    #expect(burmese.allSatisfy { $0.engine != "whisperkit" })
+    #expect(burmese.contains { $0.id == "omni-asr-ctc-300m-int8" })
+    #expect(burmese.contains { $0.id == "omni-asr-ctc-1b-int8" })
+}
+
+@Test func whisperEntriesStillCoverEnglishAndChinese() {
+    #expect(ModelCatalog.models(for: .english).contains { $0.engine == "whisperkit" })
+    #expect(ModelCatalog.models(for: .chinese).contains { $0.engine == "whisperkit" })
+}
+
+@Test func everyCatalogEntryIsWellFormed() {
+    for spec in ModelCatalog.builtIn {
+        #expect(!spec.id.isEmpty)
+        #expect(!spec.displayName.isEmpty)
+        #expect(!spec.engine.isEmpty)
+        #expect(!spec.languages.isEmpty)
+        #expect(spec.approximateBytes > 0)
+    }
+    // Catalog ids are the on-disk directory names, so they must be unique.
+    #expect(Set(ModelCatalog.builtIn.map(\.id)).count == ModelCatalog.builtIn.count)
 }

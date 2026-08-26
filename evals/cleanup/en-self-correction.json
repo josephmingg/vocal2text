@@ -1,0 +1,124 @@
+[
+  {
+    "id": "en-corr-001",
+    "category": "self-correction",
+    "language": "en",
+    "input": "let's meet Friday sorry Saturday",
+    "reference": "Let's meet Saturday.",
+    "rules": [
+      { "kind": "mustContain", "values": ["Saturday"] },
+      { "kind": "mustNotContain", "values": ["Friday", "sorry"] },
+      { "kind": "maxWords", "limit": 8 }
+    ],
+    "note": "The showcase case (docs/12 A1). Keeping \"Friday\" means the correction was not applied — the single most visible cleanup failure."
+  },
+  {
+    "id": "en-corr-002",
+    "category": "self-correction",
+    "language": "en",
+    "input": "send it to Mark no I mean Marcus",
+    "reference": "Send it to Marcus.",
+    "rules": [
+      { "kind": "mustContain", "values": ["Marcus"] },
+      { "kind": "mustNotContain", "values": ["no I mean"] },
+      { "kind": "maxWords", "limit": 8 }
+    ],
+    "note": "\"Mark\" is a prefix of \"Marcus\", so a naive deletion breaks the surviving name."
+  },
+  {
+    "id": "en-corr-003",
+    "category": "self-correction",
+    "language": "en",
+    "input": "the meeting is at three actually four thirty",
+    "reference": "The meeting is at four thirty.",
+    "rules": [
+      { "kind": "mustContain", "values": ["four thirty"] },
+      { "kind": "maxWords", "limit": 10 }
+    ]
+  },
+  {
+    "id": "en-corr-004",
+    "category": "self-correction",
+    "language": "en",
+    "input": "deploy to staging I mean production",
+    "reference": "Deploy to production.",
+    "rules": [
+      { "kind": "mustContain", "values": ["production"] },
+      { "kind": "mustNotContain", "values": ["staging"] },
+      { "kind": "maxWords", "limit": 8 }
+    ]
+  },
+  {
+    "id": "en-corr-005",
+    "category": "self-correction",
+    "language": "en",
+    "input": "it costs about fifty dollars or rather fifteen",
+    "reference": "It costs about fifteen dollars.",
+    "rules": [
+      { "kind": "mustContain", "values": ["fifteen"] },
+      { "kind": "mustNotContain", "values": ["fifty"] },
+      { "kind": "maxWords", "limit": 10 }
+    ],
+    "note": "fifty/fifteen is the correction most likely to be silently mis-resolved."
+  },
+  {
+    "id": "en-corr-006",
+    "category": "self-correction",
+    "language": "en",
+    "input": "we need three no four more testers before launch",
+    "reference": "We need four more testers before launch.",
+    "rules": [
+      { "kind": "mustContain", "values": ["four"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  },
+  {
+    "id": "en-corr-007",
+    "category": "self-correction",
+    "language": "en",
+    "input": "call her on Tuesday scratch that she's away call her Thursday",
+    "reference": "Call her Thursday.",
+    "rules": [
+      { "kind": "mustContain", "values": ["Thursday"] },
+      { "kind": "mustNotContain", "values": ["scratch that"] },
+      { "kind": "maxWords", "limit": 12 }
+    ],
+    "note": "The reason for the correction (\"she's away\") is context, not content — dropping it is correct, keeping it is acceptable."
+  },
+  {
+    "id": "en-corr-008",
+    "category": "self-correction",
+    "language": "en",
+    "input": "the file is in downloads wait no it's on the desktop",
+    "reference": "The file is on the desktop.",
+    "rules": [
+      { "kind": "mustContain", "values": ["desktop"] },
+      { "kind": "mustNotContain", "values": ["wait no"] },
+      { "kind": "maxWords", "limit": 12 }
+    ]
+  },
+  {
+    "id": "en-corr-009",
+    "category": "self-correction",
+    "language": "en",
+    "input": "I'll take the train sorry I'll drive",
+    "reference": "I'll drive.",
+    "rules": [
+      { "kind": "mustContain", "values": ["drive"] },
+      { "kind": "maxWords", "limit": 8 }
+    ],
+    "note": "A legitimate large collapse — the length validator must not reject it (docs/05 §3.3 short-input rule)."
+  },
+  {
+    "id": "en-corr-010",
+    "category": "self-correction",
+    "language": "en",
+    "input": "sorry I'm late the traffic was bad",
+    "reference": "Sorry I'm late, the traffic was bad.",
+    "rules": [
+      { "kind": "mustContain", "values": ["sorry", "traffic"] },
+      { "kind": "maxWords", "limit": 12 }
+    ],
+    "note": "Control case: \"sorry\" here is content, not a correction marker. Deleting it is a failure."
+  }
+]

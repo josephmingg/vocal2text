@@ -1,13 +1,10 @@
 import AppKit
 import CoreModels
-import PersistenceKit
-import ProfileKit
 import SwiftUI
 
 /// Manual profile pin (FR-8.3). Lives outside SettingsStore because pinning is
 /// transient UI state, not a persisted setting; a singleton so the menu and the
-/// composition root's profile resolution can share it once app-core wires
-/// `manualPinProfileID` into `ProfileResolver.resolve` (currently passed nil).
+/// composition root's press-time profile resolution share one value.
 @MainActor
 final class PinState: ObservableObject {
     static let shared = PinState()
@@ -27,12 +24,16 @@ struct MenuBarView: View {
     @ObservedObject private var appState: AppState
     @ObservedObject private var settings: SettingsStore
     @ObservedObject private var pinState: PinState
-    @State private var profiles: [Profile] = []
+    // The composition root's single store, so pin-picker UUIDs always match
+    // the resolver's (FR-8.3) and edits from Settings → Profiles show up here
+    // live (docs/11 G17).
+    @ObservedObject private var profileStore: ProfileStore
 
     init(appState: AppState) {
         _appState = ObservedObject(wrappedValue: appState)
         _settings = ObservedObject(wrappedValue: appState.settings)
         _pinState = ObservedObject(wrappedValue: PinState.shared)
+        _profileStore = ObservedObject(wrappedValue: appState.profileStore)
     }
 
     var body: some View {
@@ -55,9 +56,12 @@ struct MenuBarView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Picker("Language", selection: languageSelection) {
-                    Text("Auto").tag(LanguageSelection.auto)
-                    Text("EN").tag(LanguageSelection.english)
-                    Text("中文").tag(LanguageSelection.chinese)
+                    Text("Auto").tag(LanguageMode.auto)
+                    // Driven by Language.allCases so adding a language is a
+                    // CoreModels change only (docs/04 §2).
+                    ForEach(Language.allCases, id: \.self) { language in
+                        Text(language.shortLabel).tag(LanguageMode.pinned(language))
+                    }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -65,7 +69,7 @@ struct MenuBarView: View {
 
             Picker("Profile", selection: $pinState.pinnedProfileID) {
                 Text("Auto (by app)").tag(Optional<UUID>.none)
-                ForEach(profiles) { profile in
+                ForEach(profileStore.profiles) { profile in
                     Text(profile.name).tag(Optional(profile.id))
                 }
             }
@@ -77,6 +81,18 @@ struct MenuBarView: View {
             .controlSize(.small)
 
             Divider()
+
+            // FR-1.6: Escape throws a take away, but the audio survives for 24
+            // hours. Shown only while there is something to recover, so the
+            // menu does not carry a permanently dead entry.
+            if let candidate = appState.recoverableTake {
+                Button("Recover Cancelled Take (\(Self.durationLabel(candidate.durationSeconds)))") {
+                    appState.recoverLastCancelledTake()
+                }
+                .help(
+                    "Transcribe the take you cancelled and insert it where you are typing now. Cancelled takes stay recoverable for 24 hours."
+                )
+            }
 
             Button("Open History") {
                 WindowManager.shared.showHistory(appState: appState)
@@ -93,7 +109,16 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 280)
-        .onAppear { loadProfiles() }
+        // The sidecar can appear or expire while the menu is closed — and a
+        // crash leaves one behind with no phase change to notice it.
+        .onAppear { appState.refreshRecoverableTake() }
+    }
+
+    /// "12s" / "1:24" — enough for the user to tell which take is on offer.
+    static func durationLabel(_ seconds: Double) -> String {
+        let whole = max(0, Int(seconds.rounded()))
+        guard whole >= 60 else { return "\(whole)s" }
+        return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 
     // MARK: - Status
@@ -104,6 +129,11 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(statusText)
                     .font(.headline)
+                // The hotkey is customizable, so this is the one place that
+                // always answers "which key do I hold again?".
+                Text("Hold \(settings.hotkeySpec.label) to talk")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if !appState.hudState.profileName.isEmpty {
                     Text("Profile: \(appState.hudState.profileName)")
                         .font(.caption)
@@ -135,38 +165,12 @@ struct MenuBarView: View {
 
     // MARK: - Language quick toggle
 
-    private enum LanguageSelection: Hashable {
-        case auto
-        case english
-        case chinese
-    }
-
-    private var languageSelection: Binding<LanguageSelection> {
+    /// `LanguageMode` is itself Hashable, so it doubles as the picker tag —
+    /// no parallel enum to keep in sync with the language list.
+    private var languageSelection: Binding<LanguageMode> {
         Binding(
-            get: {
-                switch settings.languageMode {
-                case .auto: return .auto
-                case .pinned(.english): return .english
-                case .pinned(.chinese): return .chinese
-                }
-            },
-            set: { selection in
-                switch selection {
-                case .auto: settings.languageMode = .auto
-                case .english: settings.languageMode = .pinned(.english)
-                case .chinese: settings.languageMode = .pinned(.chinese)
-                }
-            }
+            get: { settings.languageMode },
+            set: { settings.languageMode = $0 }
         )
-    }
-
-    // MARK: - Profiles
-
-    private func loadProfiles() {
-        // The composition root builds the profile list once; using the same
-        // instances keeps pin-picker UUIDs aligned with the resolver's
-        // (a fresh BuiltInProfiles.makeAll() here would mint different IDs
-        // and make pinning a silent no-op — FR-8.3).
-        profiles = appState.profiles
     }
 }
