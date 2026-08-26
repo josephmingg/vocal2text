@@ -239,6 +239,12 @@ public actor DictationSession {
     /// kept so tests — and any caller that must observe delivery — can wait
     /// deterministically.
     private(set) var pipelineTask: Task<Void, Never>?
+    /// The chained post-delivery persistence work (audio archive encode +
+    /// history write) for the most recent delivered take (docs/15 step 49).
+    /// Neither affects the delivered text, so the session settles to idle
+    /// without awaiting them; chaining keeps history rows in press order, and
+    /// tests await this to observe saves deterministically.
+    private(set) var persistenceTask: Task<Void, Never>?
 
     public init(dependencies: Dependencies) {
         self.deps = dependencies
@@ -667,11 +673,6 @@ public actor DictationSession {
         // landed, and only when the user's retention setting keeps any. The
         // transcript id names the file, so the two are found together.
         let transcriptID = UUID()
-        var audioPath: String?
-        if let archive = deps.archiveAudio {
-            audioPath = await archive(audio, transcriptID)
-        }
-
         let record = TranscriptRecord(
             id: transcriptID,
             createdAt: deps.now(),
@@ -691,13 +692,27 @@ public actor DictationSession {
                 cleanupSeconds: cleanupSeconds,
                 deliverySeconds: deliverySeconds
             ),
-            audioPath: audioPath
+            audioPath: nil
         )
         lastTimings = record.timings
-        // A failed save must not un-deliver text that already landed; the
-        // session still returns to idle (history write errors surface via
+        // The audio archive encode and the history write happen after the
+        // session settles (docs/15 step 49): the text already landed, neither
+        // changes it, and awaiting an AAC encode here held the next queued
+        // take — and the HUD's return to idle — hostage to disk work. Chained
+        // so rows land in press order; a failed save must not un-deliver text
+        // that already landed (history write errors surface via
         // PersistenceKit, not here).
-        try? await deps.store.save(record)
+        let archive = deps.archiveAudio
+        let store = deps.store
+        let previousPersist = persistenceTask
+        persistenceTask = Task {
+            await previousPersist?.value
+            var record = record
+            if let archive {
+                record.audioPath = await archive(audio, transcriptID)
+            }
+            try? await store.save(record)
+        }
         finishPipeline()
         return true
     }

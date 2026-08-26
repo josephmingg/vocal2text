@@ -116,6 +116,11 @@ private struct Harness {
         if let task = await session.pipelineTask {
             await task.value
         }
+        // The archive + history write settle after the pipeline (docs/15
+        // step 49); tests that assert on saved records must see them land.
+        if let task = await session.persistenceTask {
+            await task.value
+        }
     }
 }
 
@@ -590,6 +595,9 @@ struct DictationSessionTests {
         if let pipeline = await session.pipelineTask {
             await pipeline.value
         }
+        if let persistence = await session.persistenceTask {
+            await persistence.value
+        }
 
         // "Serialized" would mean the press awaited resolution before opening
         // the mic — the leading-speech-loss bug.
@@ -834,6 +842,7 @@ struct CancelledTakeRecoveryTests {
 
         let consumed = await harness.session.recover(audio: Self.recoverableAudio())
         #expect(consumed)
+        await harness.drainPipeline()
 
         // Identical to a take that was never cancelled: same normalization,
         // same delivery, same history row.
@@ -945,6 +954,9 @@ struct CancelledTakeRecoveryTests {
         // reported it unconsumed, so the same audio comes back.
         let secondAttempt = await session.recover(audio: audio)
         #expect(secondAttempt)
+        if let persistence = await session.persistenceTask {
+            await persistence.value
+        }
         let errorAfterSuccess = await session.lastError
         #expect(errorAfterSuccess == nil)
 
