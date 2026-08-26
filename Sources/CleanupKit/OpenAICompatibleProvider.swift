@@ -90,16 +90,22 @@ public actor OpenAICompatibleProvider: CleanupProvider {
     // MARK: - CleanupProvider
 
     /// True when the server answers HTTP at all (any status) within 2 s.
+    ///
+    /// Kept for explicit probes (onboarding, a settings change). Deliberately
+    /// NOT called on the hotkey press path: the press-time prewarm already
+    /// ignores every error, so a preflight probe there was a pure extra HTTP
+    /// round-trip before the useful request (docs/15 step 19).
     public func isAvailable() async -> Bool {
         var request = URLRequest(
             url: baseURL.appendingPathComponent("v1").appendingPathComponent("models")
         )
         request.httpMethod = "GET"
+        request.timeoutInterval = Self.seconds(from: .seconds(2))
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         do {
-            _ = try await perform(request, timeout: .seconds(2))
+            _ = try await perform(request)
             return true
         } catch {
             return false
@@ -108,17 +114,35 @@ public actor OpenAICompatibleProvider: CleanupProvider {
 
     /// Sends a 1-max_token request so the served model is loaded before the
     /// dictation finishes; all errors are ignored (fire-and-forget warmup).
+    /// Uses a representative English request — see `prewarm(for:)` for the
+    /// caller-shaped variant.
     public func prewarm() async {
-        guard let request = try? makeURLRequest(body: makePrewarmBody(), timeout: .seconds(5))
+        await prewarm(for: CleanupRequest(text: "", language: .english))
+    }
+
+    /// Prewarm shaped like the requests that will follow (docs/15 step 19).
+    ///
+    /// The old warmup sent `"hi"`, which loads the model but caches nothing
+    /// useful: servers with prompt caching (Ollama included) reuse the longest
+    /// common token prefix between requests, and the ~700-token system prompt
+    /// is byte-identical on every take for a given language + style + terms.
+    /// Sending the real system prompt here means the expensive prefix is
+    /// already in the server's KV cache when the dictation's own request
+    /// arrives — the cleanup call then only pays for the transcript tokens.
+    public func prewarm(for request: CleanupRequest) async {
+        guard
+            let urlRequest = try? makeURLRequest(
+                body: makePrewarmBody(for: request), timeout: .seconds(5)
+            )
         else { return }
-        _ = try? await perform(request, timeout: .seconds(5))
+        _ = try? await perform(urlRequest)
     }
 
     public func cleanup(
         _ request: CleanupRequest, timeout: Duration
     ) async throws -> CleanupResponse {
         let urlRequest = try makeURLRequest(body: makeRequestBody(for: request), timeout: timeout)
-        let reply = try await perform(urlRequest, timeout: timeout)
+        let reply = try await perform(urlRequest)
         guard (200..<300).contains(reply.statusCode) else {
             throw CleanupError.providerUnavailable("HTTP \(reply.statusCode)")
         }
@@ -143,6 +167,19 @@ public actor OpenAICompatibleProvider: CleanupProvider {
             .appendingPathComponent("completions")
     }
 
+    /// How long Ollama keeps the model resident after a request. Sent
+    /// explicitly so the server's default (5 minutes) cannot silently unload
+    /// the model between dictations — a cold reload is a multi-second stall
+    /// on the very take that follows a coffee break (docs/15 step 19). Only
+    /// Ollama understands the field; strict OpenAI-compatible servers reject
+    /// unknown arguments, so it is omitted for every other provider id.
+    static let ollamaKeepAlive = "30m"
+
+    nonisolated var keepAliveValue: String? {
+        if case .ollama = id { return Self.ollamaKeepAlive }
+        return nil
+    }
+
     nonisolated func makeRequestBody(for request: CleanupRequest) -> ChatCompletionRequest {
         ChatCompletionRequest(
             model: model,
@@ -156,17 +193,33 @@ public actor OpenAICompatibleProvider: CleanupProvider {
             ],
             temperature: temperature,
             maxTokens: Self.maxTokens(forInputCharacterCount: request.text.count),
-            stream: false
+            stream: false,
+            keepAlive: keepAliveValue
         )
     }
 
     nonisolated func makePrewarmBody() -> ChatCompletionRequest {
+        makePrewarmBody(for: CleanupRequest(text: "", language: .english))
+    }
+
+    /// The prewarm request: the real system prompt (so the server's prompt
+    /// cache holds the reusable prefix), an empty transcript, and a 1-token
+    /// budget so the reply costs nothing.
+    nonisolated func makePrewarmBody(for request: CleanupRequest) -> ChatCompletionRequest {
         ChatCompletionRequest(
             model: model,
-            messages: [ChatCompletionRequest.Message(role: "user", content: "hi")],
+            messages: [
+                ChatCompletionRequest.Message(
+                    role: "system", content: assembler.systemPrompt(for: request)
+                ),
+                ChatCompletionRequest.Message(
+                    role: "user", content: assembler.userMessage(for: request)
+                ),
+            ],
             temperature: 0,
             maxTokens: 1,
-            stream: false
+            stream: false,
+            keepAlive: keepAliveValue
         )
     }
 
@@ -220,13 +273,24 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         var body: Data
     }
 
-    private func perform(_ request: URLRequest, timeout: Duration) async throws -> HTTPReply {
+    /// One session for every provider instance (docs/15 step 19). Providers
+    /// are rebuilt per take (a few string copies, by design — docs/11 G15),
+    /// so a per-instance session meant a fresh session, connection pool, and
+    /// TLS/TCP handshake on every single request. A shared session keeps the
+    /// server connection alive across takes; per-request timeouts come from
+    /// `URLRequest.timeoutInterval`, which overrides the configuration.
+    /// URLSession is documented thread-safe; the `unsafe` spelling only
+    /// covers platforms whose Foundation predates its Sendable annotation.
+    private nonisolated(unsafe) static let sharedSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
-        let interval = Self.seconds(from: timeout)
-        configuration.timeoutIntervalForRequest = interval
-        configuration.timeoutIntervalForResource = interval
-        let session = URLSession(configuration: configuration)
-        defer { session.finishTasksAndInvalidate() }
+        // Ceiling for a whole transfer; each request sets its own (much
+        // shorter) timeout on the URLRequest.
+        configuration.timeoutIntervalForResource = 120
+        return URLSession(configuration: configuration)
+    }()
+
+    private func perform(_ request: URLRequest) async throws -> HTTPReply {
+        let session = Self.sharedSession
 
         // Without a cancellation handler, a continuation-based transport is
         // deaf to cancellation: CleanupPipeline's deadline race would abandon
@@ -312,6 +376,10 @@ struct ChatCompletionRequest: Codable, Sendable, Equatable {
     var temperature: Double
     var maxTokens: Int
     var stream: Bool
+    /// Ollama extension: how long the served model stays resident after this
+    /// request (docs/15 step 19). nil (the non-Ollama case) omits the field
+    /// entirely — strict OpenAI-compatible servers reject unknown arguments.
+    var keepAlive: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -319,6 +387,7 @@ struct ChatCompletionRequest: Codable, Sendable, Equatable {
         case temperature
         case maxTokens = "max_tokens"
         case stream
+        case keepAlive = "keep_alive"
     }
 }
 

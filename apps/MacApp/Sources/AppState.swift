@@ -128,17 +128,6 @@ final class AppState: ObservableObject {
         let frontmost = FrontmostContext()
         let relay = ResolutionRelay()
 
-        // Rebuilt per take from the live settings (docs/11 G15) and the take's
-        // profile (docs/11 G3) — see `selectCleanup` below. This one is only
-        // for the press-time prewarm, which needs *a* provider before the
-        // profile is known; a model changed since launch still prewarms the
-        // old one, which costs nothing but a wasted keep-alive ping.
-        let prewarmProvider = OpenAICompatibleProvider(
-            baseURL: AppState.ollamaBaseURL(),
-            model: settings.ollamaModel,
-            id: .ollama(model: settings.ollamaModel)
-        )
-
         let engine = WhisperKitEngine()
         // Pinned မြန်မာ routes to the Burmese engine (Omnilingual CTC 1B,
         // 10.78% CER on FLEURS my_mm — docs/11 G13); everything else,
@@ -187,10 +176,38 @@ final class AppState: ObservableObject {
             },
             prewarmCleanup: {
                 // Fired at press (docs/03 §2); skip the network touch entirely
-                // while the master switch is off.
-                guard await settings.cleanupMasterSwitch else { return }
-                guard await prewarmProvider.isAvailable() else { return }
-                await prewarmProvider.prewarm()
+                // while the master switch is off. No availability preflight:
+                // prewarm already swallows every error, so the probe was a
+                // second HTTP round-trip for nothing (docs/15 step 19). The
+                // provider is rebuilt here (string copies, no network) so a
+                // model or server changed since launch prewarms the right one.
+                let snapshot = await MainActor.run {
+                    settings.cleanupMasterSwitch
+                        ? (
+                            baseURL: AppState.ollamaBaseURL(),
+                            model: settings.ollamaModel,
+                            language: settings.languageMode.pinnedLanguage ?? .english,
+                            stylePrompt: settings.stylePrompt
+                        )
+                        : nil
+                }
+                guard let snapshot else { return }
+                let provider = OpenAICompatibleProvider(
+                    baseURL: snapshot.baseURL,
+                    model: snapshot.model,
+                    id: .ollama(model: snapshot.model)
+                )
+                // Shaped like the take's real request so the server's prompt
+                // cache holds the reusable system-prompt prefix, not a "hi".
+                let terms = await settings.enabledDictionaryEntries().map(\.written)
+                await provider.prewarm(
+                    for: CleanupRequest(
+                        text: "",
+                        language: snapshot.language,
+                        stylePrompt: snapshot.stylePrompt,
+                        protectedTerms: terms
+                    )
+                )
             },
             deliverer: MacTextDelivering(
                 deliverer: TextDeliverer(
