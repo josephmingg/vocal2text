@@ -124,7 +124,10 @@ struct CleanupPipelineTests {
         #expect(outcome == .fellBack(reason: "validator: meta-text"))
     }
 
-    @Test func protectedTermMutationFallsBack() async {
+    @Test func protectedTermMutationIsRepairedNotRejected() async {
+        // docs/15 step 25: the old behavior threw away the whole cleanup over
+        // one mangled term; now the exact spelling is restored and the
+        // cleanup survives.
         let provider = MockProvider(
             result: .success(CleanupResponse(text: "ask Cluade to review it", modelName: "mock-1"))
         )
@@ -137,7 +140,23 @@ struct CleanupPipelineTests {
             ),
             timeout: .seconds(5)
         )
-        #expect(outcome == .fellBack(reason: "protected-terms"))
+        #expect(outcome == .cleaned("ask Claude to review it", model: "mock-1"))
+    }
+
+    @Test func caseMutationOfAProtectedTermIsRepaired() async {
+        let provider = MockProvider(
+            result: .success(CleanupResponse(text: "the vocal2text repo", modelName: "mock-1"))
+        )
+        let pipeline = CleanupPipeline(provider: provider)
+        let outcome = await pipeline.run(
+            CleanupRequest(
+                text: "the Vocal2Text repo",
+                language: .english,
+                protectedTerms: ["Vocal2Text"]
+            ),
+            timeout: .seconds(5)
+        )
+        #expect(outcome == .cleaned("the Vocal2Text repo", model: "mock-1"))
     }
 
     @Test func providerErrorFallsBackWithReason() async {
