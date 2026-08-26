@@ -48,11 +48,18 @@ final class TextDeliverer: NSObject {
             return .copiedToClipboard(reason: .noFocusedField)
         }
 
-        // (3) Configuration-driven tier selection — a synthesized ⌘V has no
-        // reliable success signal, so there is no runtime descent through the
-        // ladder (docs/03 §3.2).
+        // (3) Tier selection. Tier 0 is AX insertion with a verifying
+        // read-back (docs/15 step 17) — the success signal that finally lets
+        // the ladder descend on failure; it only runs where the configured
+        // strategy is paste, since unicodeTyping (terminals) and
+        // clipboardOnly are deliberate choices about *how* text arrives.
+        // Below tier 0, selection stays configuration-driven — a synthesized
+        // ⌘V still has no reliable success signal (docs/03 §3.2).
         switch strategies.strategy(forBundleID: frontmostBundleID) {
         case .paste:
+            if AXInserter.insertAndVerify(text) {
+                return .inserted(method: .accessibility, appBundleID: frontmostBundleID)
+            }
             return await paste(text, into: frontmostBundleID)
         case .unicodeTyping:
             KeystrokeSynthesizer.typeUnicode(text)

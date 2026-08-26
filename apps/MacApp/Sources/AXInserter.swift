@@ -1,0 +1,87 @@
+import AppKit
+import ApplicationServices
+
+/// Tier 0 of the insertion ladder (docs/15 step 17, superseded form):
+/// insert at the caret through the Accessibility API — no clipboard
+/// round-trip, no synthesized keystroke, no fixed sleeps — and read the
+/// focused element back to *know* it landed. That read is the success signal
+/// the paste tier never had, so failure here descends to paste instead of
+/// being silently lost.
+///
+/// Deliberately conservative about when it claims the insertion: the attempt
+/// is only made when the focused element both accepts a selected-text write
+/// AND exposes a readable string value, because a "successful" AX write with
+/// no way to verify it is indistinguishable from a silent no-op — and
+/// descending to paste after an unverifiable write that actually landed
+/// would deliver the text twice. Unsupported and unverifiable elements go
+/// straight to paste, which is exactly today's behavior.
+@MainActor
+enum AXInserter {
+
+    /// Attempts the AX insertion. `true` means the text verifiably landed in
+    /// the focused element; `false` means nothing was inserted and the caller
+    /// must fall through to the next tier.
+    static func insertAndVerify(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        guard let element = focusedElement() else { return false }
+
+        // Only elements that accept a selected-text write are candidates —
+        // writing kAXSelectedTextAttribute replaces the selection, or inserts
+        // at the caret when the selection is empty.
+        var settable = DarwinBoolean(false)
+        guard
+            AXUIElementIsAttributeSettable(
+                element, kAXSelectedTextAttribute as CFString, &settable
+            ) == .success,
+            settable.boolValue
+        else { return false }
+
+        // Insist on verifiability BEFORE writing (see type comment): an
+        // element with no readable value cannot confirm the write, and a
+        // paste after an unconfirmed-but-landed write duplicates the text.
+        guard readableValue(of: element) != nil else { return false }
+
+        guard
+            AXUIElementSetAttributeValue(
+                element, kAXSelectedTextAttribute as CFString, text as CFTypeRef
+            ) == .success
+        else { return false }
+
+        // The verification read. Whitespace-insensitive containment: a
+        // single-line field may fold the newlines out of a multi-line
+        // insertion, and reporting that landed-but-transformed write as a
+        // failure would paste the text a second time.
+        guard let after = readableValue(of: element) else { return false }
+        let needle = text.filter { !$0.isWhitespace }
+        if needle.isEmpty { return true }
+        return after.filter { !$0.isWhitespace }.contains(needle)
+    }
+
+    // MARK: - Helpers
+
+    private static func focusedElement() -> AXUIElement? {
+        var focusedRef: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            AXUIElementCreateSystemWide(),
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedRef
+        )
+        guard result == .success, let focusedRef,
+            CFGetTypeID(focusedRef) == AXUIElementGetTypeID()
+        else { return nil }
+        // CF references have identical layout; the type is checked above.
+        // (A plain cast would be force_cast, which this repo bans.)
+        return unsafeBitCast(focusedRef, to: AXUIElement.self)
+    }
+
+    /// The element's string value, when it exposes one.
+    private static func readableValue(of element: AXUIElement) -> String? {
+        var valueRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXValueAttribute as CFString, &valueRef
+            ) == .success
+        else { return nil }
+        return valueRef as? String
+    }
+}
