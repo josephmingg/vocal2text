@@ -50,6 +50,11 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(soundsEnabled, forKey: Keys.soundsEnabled) }
     }
 
+    /// FR-11.4 opt-in: show a per-take latency breakdown toast after delivery.
+    @Published var showTimingsToast: Bool {
+        didSet { Self.defaults.set(showTimingsToast, forKey: Keys.showTimingsToast) }
+    }
+
     /// Per-bundle-ID insertion strategy overrides (docs/03 §3.2: tier choice is
     /// configuration-driven, not failure-driven). Keys are bundle IDs, values
     /// are strategy names owned by the insertion layer.
@@ -81,6 +86,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
         hudEnabled = defaults.object(forKey: Keys.hudEnabled) as? Bool ?? true
         soundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
+        showTimingsToast = defaults.object(forKey: Keys.showTimingsToast) as? Bool ?? false
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
@@ -133,6 +139,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let audioRetentionDays = "settings.audioRetentionDays"
         static let hudEnabled = "settings.hudEnabled"
         static let soundsEnabled = "settings.soundsEnabled"
+        static let showTimingsToast = "settings.showTimingsToast"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
     }

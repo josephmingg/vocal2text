@@ -247,6 +247,10 @@ final class AppState: ObservableObject {
             } else if let error = await session.lastError {
                 hudState.mode = .error(Self.message(for: error))
                 scheduleErrorDismiss()
+            } else if settings.showTimingsToast, let timings = await session.lastTimings {
+                // FR-11.4 opt-in: show where the time went after each take.
+                hudState.mode = .notice(Self.timingsSummary(timings))
+                scheduleErrorDismiss()
             } else {
                 hudState.mode = .hidden
             }
@@ -261,9 +265,11 @@ final class AppState: ObservableObject {
         case .inserted:
             break
         case .copiedToClipboard:
+            Diagnostics.shared.increment(.clipboardFallbacks)
             hudState.mode = .notice("Copied — press ⌘V to paste")
             scheduleErrorDismiss()
         case .blockedSecureField(let culprit):
+            Diagnostics.shared.increment(.secureFieldBlocks)
             let suffix = culprit.map { " (\($0))" } ?? ""
             hudState.mode = .notice("Secure field\(suffix) — nothing inserted or saved")
             scheduleErrorDismiss()
@@ -290,7 +296,7 @@ final class AppState: ObservableObject {
                 for: .applicationSupportDirectory, in: .userDomainMask
             ).first
         else {
-            print("Vocal: Application Support directory unavailable — history disabled")
+            VocalLog.persistence.error("Application Support unavailable — history disabled")
             return nil
         }
         let directory = appSupport.appendingPathComponent("Vocal", isDirectory: true)
@@ -299,7 +305,9 @@ final class AppState: ObservableObject {
             let path = directory.appendingPathComponent("vocal.sqlite").path
             return try DatabaseStore(path: path)
         } catch {
-            print("Vocal: failed to open database — history disabled: \(error)")
+            VocalLog.persistence.error(
+                "database open failed — history disabled: \(String(describing: error), privacy: .public)"
+            )
             return nil
         }
     }
@@ -310,7 +318,9 @@ final class AppState: ObservableObject {
                 let stored = try database.profiles()
                 if !stored.isEmpty { return stored }
             } catch {
-                print("Vocal: failed to load profiles — using built-ins: \(error)")
+                VocalLog.persistence.error(
+                    "profile load failed — using built-ins: \(String(describing: error), privacy: .public)"
+                )
             }
         }
         return BuiltInProfiles.makeAll()
@@ -339,6 +349,17 @@ final class AppState: ObservableObject {
         case .pinned(.english): return "EN"
         case .pinned(.chinese): return "中文"
         }
+    }
+
+    /// One-line "where the time went" summary for the latency toast.
+    private static func timingsSummary(_ timings: TimingBreakdown) -> String {
+        var parts = [String(format: "transcribe %.2fs", timings.transcriptionSeconds)]
+        if timings.cleanupSeconds > 0 {
+            parts.append(String(format: "cleanup %.2fs", timings.cleanupSeconds))
+        }
+        parts.append(String(format: "deliver %.2fs", timings.deliverySeconds))
+        let total = String(format: "%.2fs", timings.totalPostReleaseSeconds)
+        return "Delivered in \(total) (\(parts.joined(separator: ", ")))"
     }
 
     private static func message(for error: TranscriptionError) -> String {

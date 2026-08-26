@@ -113,10 +113,14 @@ struct HistoryView: View {
     @ViewBuilder
     private var detail: some View {
         if let record = records.first(where: { $0.id == selectedID }) {
-            HStack(alignment: .top, spacing: 0) {
-                transcriptColumn(title: "Raw", text: record.rawText)
+            VStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
+                    transcriptColumn(title: "Raw", text: record.rawText)
+                    Divider()
+                    transcriptColumn(title: "Delivered", text: record.deliveredText)
+                }
                 Divider()
-                transcriptColumn(title: "Delivered", text: record.deliveredText)
+                timingsFooter(record.timings)
             }
         } else {
             Text("Select a transcript")
@@ -142,6 +146,31 @@ struct HistoryView: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The FR-11.4 per-stage breakdown — every row has carried these numbers
+    /// since v0.1; this is where they finally show.
+    private func timingsFooter(_ timings: TimingBreakdown) -> some View {
+        HStack(spacing: 12) {
+            timingLabel("capture", timings.captureSeconds)
+            timingLabel("transcribe", timings.transcriptionSeconds)
+            timingLabel("dictionary", timings.dictionarySeconds)
+            timingLabel("cleanup", timings.cleanupSeconds)
+            timingLabel("deliver", timings.deliverySeconds)
+            Spacer()
+            Text(String(format: "after release: %.2fs", timings.totalPostReleaseSeconds))
+                .font(.caption.bold())
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+    }
+
+    private func timingLabel(_ name: String, _ seconds: Double) -> some View {
+        Text(String(format: "%@ %.2fs", name, seconds))
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
     }
 
     // MARK: - Actions

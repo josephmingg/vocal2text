@@ -142,6 +142,10 @@ public actor DictationSession {
     /// HUD, and returns to idle.
     public private(set) var lastError: TranscriptionError?
 
+    /// Timings of the most recently completed (delivered) take, cleared at
+    /// each press — the FR-11.4 surface the HUD's latency toast reads.
+    public private(set) var lastTimings: TimingBreakdown?
+
     /// The fire-and-forget prewarm task from the latest press; kept so tests
     /// can await its completion deterministically.
     private(set) var prewarmTask: Task<Void, Never>?
@@ -218,6 +222,7 @@ public actor DictationSession {
             break
         }
         lastError = nil
+        lastTimings = nil
         pendingRelease = nil
         pendingCancel = false
         transition(to: .arming)
@@ -395,6 +400,7 @@ public actor DictationSession {
         } catch {
             lastError =
                 (error as? TranscriptionError) ?? .engineUnavailable(String(describing: error))
+            Diagnostics.shared.increment(.transcriptionFailures)
             finishPipeline()
             return
         }
@@ -454,6 +460,12 @@ public actor DictationSession {
                 // FR-7.3: cleanup failure never loses the dictation — the
                 // stage-2 text is delivered and the fallback reason logged.
                 cleanupOutcome = Self.fallbackOutcome(reason: reason, provider: providerID)
+                // R5 early-warning signal (docs/07): count what fell back.
+                if case .rejectedByValidator = cleanupOutcome {
+                    Diagnostics.shared.increment(.cleanupValidatorRejections)
+                } else {
+                    Diagnostics.shared.increment(.cleanupFailures)
+                }
             }
         } else {
             cleanupOutcome = .skipped(reason: .providerUnavailable)
@@ -506,6 +518,7 @@ public actor DictationSession {
                 deliverySeconds: deliverySeconds
             )
         )
+        lastTimings = record.timings
         // A failed save must not un-deliver text that already landed; the
         // session still returns to idle (history write errors surface via
         // PersistenceKit, not here).

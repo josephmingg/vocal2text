@@ -49,14 +49,18 @@ public actor WhisperKitEngine: TranscriptionEngine {
             for waiter in waiters { waiter.resume() }
         }
         do {
-            print("Vocal: loading WhisperKit model \(modelName) — first run downloads ~600 MB and compiles for the Neural Engine (can take several minutes)…")
+            VocalLog.engine.info(
+                "loading WhisperKit model \(self.modelName, privacy: .public) — first run downloads ~600 MB and compiles for the Neural Engine"
+            )
             let config = WhisperKitConfig(model: modelName, modelFolder: modelFolder?.path)
             let loaded = try await WhisperKit(config)
-            print("Vocal: WhisperKit model ready")
+            VocalLog.engine.info("WhisperKit model ready")
             pipe = loaded
             return loaded
         } catch {
-            print("Vocal: WhisperKit model load FAILED: \(error)")
+            VocalLog.engine.error(
+                "WhisperKit model load failed: \(String(describing: error), privacy: .public)"
+            )
             throw TranscriptionError.engineUnavailable(String(describing: error))
         }
     }

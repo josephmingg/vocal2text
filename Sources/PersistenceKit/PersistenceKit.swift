@@ -286,6 +286,15 @@ public final class DatabaseStore: Sendable {
         }
     }
 
+    /// One statement, one transaction; the delete triggers keep FTS in sync.
+    /// Returns the number of rows removed.
+    public func deleteAllTranscripts() throws -> Int {
+        try dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM transcript")
+            return db.changesCount
+        }
+    }
+
     /// Search history: Latin FTS first, then trigram FTS, then a LIKE scan for
     /// 1–2-character CJK queries. Results are de-duplicated by id and ordered
     /// by `createdAt` descending (AC-7 covers both scripts).

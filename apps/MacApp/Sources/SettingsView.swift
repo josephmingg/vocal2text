@@ -81,6 +81,7 @@ private struct GeneralPane: View {
                 }
                 Toggle("Play sounds", isOn: $settings.soundsEnabled)
                 Toggle("Show HUD while dictating", isOn: $settings.hudEnabled)
+                Toggle("Show latency after each dictation", isOn: $settings.showTimingsToast)
             }
         }
         .formStyle(.grouped)
@@ -310,11 +311,8 @@ private struct HistoryPrivacyPane: View {
     private func deleteAllHistory() {
         guard let database else { return }
         do {
-            let all = try database.allTranscripts()
-            for record in all {
-                try database.deleteTranscript(id: record.id)
-            }
-            statusText = "Deleted \(all.count) transcript\(all.count == 1 ? "" : "s")."
+            let count = try database.deleteAllTranscripts()
+            statusText = "Deleted \(count) transcript\(count == 1 ? "" : "s")."
         } catch {
             statusText = "Delete failed: \(error.localizedDescription)"
         }
@@ -325,6 +323,8 @@ private struct HistoryPrivacyPane: View {
 
 @MainActor
 private struct AboutPane: View {
+    @State private var counters: [(counter: Diagnostics.Counter, count: Int)] = []
+
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "mic.circle.fill")
@@ -340,8 +340,35 @@ private struct AboutPane: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 340)
+
+            GroupBox("Diagnostics") {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(counters, id: \.counter) { entry in
+                        HStack {
+                            Text(entry.counter.label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(entry.count)")
+                                .font(.caption)
+                                .monospacedDigit()
+                        }
+                    }
+                    HStack {
+                        Spacer()
+                        Button("Reset Counters") {
+                            Diagnostics.shared.reset()
+                            counters = Diagnostics.shared.snapshot()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .padding(4)
+            }
+            .frame(maxWidth: 340)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { counters = Diagnostics.shared.snapshot() }
     }
 
     private static var versionString: String {

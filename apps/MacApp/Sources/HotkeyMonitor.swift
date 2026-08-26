@@ -1,5 +1,6 @@
 import ApplicationServices
 import Carbon.HIToolbox
+import CoreModels
 import Foundation
 
 /// Global push-to-talk hotkey monitor built on one CGEventTap (docs/03 §3.1).
@@ -326,6 +327,8 @@ private final class HotkeyTapMachine: @unchecked Sendable {
         // Re-enable only from inside the callback (docs/03 §3.1). Never poll
         // CGEventTapIsEnabled from outside — documented IPC-voucher leak that
         // kernel-panics macOS 26.5.2 (docs/03 §3.1).
+        Diagnostics.shared.increment(.hotkeyTapReenables)
+        VocalLog.hotkey.warning("event tap was disabled by the system — re-enabling")
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
         }
