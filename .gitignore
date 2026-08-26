@@ -6,3 +6,7 @@ build/
 xcuserdata/
 DerivedData/
 .DS_Store
+
+# Benchmark fixture audio is personal voice data — never committed.
+Benchmarks/fixtures/*.wav
+Benchmarks/fixtures/*.m4a

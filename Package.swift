@@ -22,6 +22,7 @@ let package = Package(
         .library(name: "PersistenceKit", targets: ["PersistenceKit"]),
         .library(name: "ASREngineWhisperKit", targets: ["ASREngineWhisperKit"]),
         .library(name: "ASREngineAppleSpeech", targets: ["ASREngineAppleSpeech"]),
+        .executable(name: "vocal-bench", targets: ["VocalBench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
@@ -62,6 +63,17 @@ let package = Package(
         ),
         .target(name: "ASREngineAppleSpeech", dependencies: ["CoreModels", "ASRKit"]),
 
+        // ── Benchmark harness (docs/06 M0, Phase 0.2) ───────────────────
+        // BenchKit is pure (WAV decode, WER/CER, percentiles) so it tests on
+        // Linux; the vocal-bench executable runs real ASR on Apple only.
+        .target(name: "BenchKit", dependencies: ["CoreModels"]),
+        .executableTarget(
+            name: "VocalBench",
+            dependencies: [
+                "BenchKit", "CoreModels", "TextPipeline", "ASRKit", "ASREngineWhisperKit",
+            ]
+        ),
+
         // ── Tests ───────────────────────────────────────────────────────
         .testTarget(name: "CoreModelsTests", dependencies: ["CoreModels"]),
         .testTarget(
@@ -79,6 +91,7 @@ let package = Package(
         .testTarget(name: "ASRKitTests", dependencies: ["ASRKit"]),
         .testTarget(name: "SessionKitTests", dependencies: ["SessionKit", "ASRKit"]),
         .testTarget(name: "PersistenceKitTests", dependencies: ["PersistenceKit"]),
+        .testTarget(name: "BenchKitTests", dependencies: ["BenchKit"]),
     ],
     swiftLanguageModes: [.v6]
 )
