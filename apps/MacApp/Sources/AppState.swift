@@ -281,6 +281,12 @@ final class AppState: ObservableObject {
                     relay.noteLevel(level)
                 }
             }
+            // Build and prepare the first take's audio engine now (docs/15
+            // step 50), so the first press finds the allocation already paid.
+            // Touches no microphone hardware — no permission prompt, no
+            // privacy indicator. Ordered after the handlers so a press racing
+            // launch never records without its guards installed.
+            await microphone.preheat()
         }
         // Enforce the retention window on the recordings already on disk.
         Self.sweepRetainedAudio(retentionDays: settings.audioRetentionDays)
