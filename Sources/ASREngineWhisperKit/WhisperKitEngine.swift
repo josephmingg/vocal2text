@@ -15,7 +15,7 @@ public actor WhisperKitEngine: TranscriptionEngine {
     public nonisolated let id = "whisperkit"
     public nonisolated let displayName = "WhisperKit (Whisper large-v3-turbo)"
 
-    private let modelName: String
+    private var modelName: String
     private let modelFolder: URL?
     private var pipe: WhisperKit?
     // WhisperKit is not Sendable, so concurrent loads coalesce with a
@@ -23,7 +23,13 @@ public actor WhisperKitEngine: TranscriptionEngine {
     private var isLoading = false
     private var loadWaiters: [CheckedContinuation<Void, Never>] = []
 
-    public init(modelName: String = "openai_whisper-large-v3-v20240930_turbo", modelFolder: URL? = nil) {
+    /// The shipping default (docs/04 §1). Public so the settings layer and
+    /// the engine cannot disagree about what "default" means.
+    public static let defaultModelName = "openai_whisper-large-v3-v20240930_turbo"
+
+    public init(
+        modelName: String = WhisperKitEngine.defaultModelName, modelFolder: URL? = nil
+    ) {
         self.modelName = modelName
         self.modelFolder = modelFolder
     }
@@ -48,6 +54,17 @@ public actor WhisperKitEngine: TranscriptionEngine {
         _ = try await loadedPipe()
     }
 
+    /// Switches the served model (docs/15 step 15 — Settings → Models).
+    /// Applies on the next load: the resident pipe is dropped, so the next
+    /// take (or preload) brings the chosen model up. A no-op for the same
+    /// name, so callers can wire it straight to a settings publisher.
+    public func setModel(name: String) {
+        guard name != modelName else { return }
+        VocalLog.engine.info("switching WhisperKit model to \(name, privacy: .public)")
+        modelName = name
+        pipe = nil
+    }
+
     private func loadedPipe() async throws -> WhisperKit {
         while isLoading {
             await withCheckedContinuation { loadWaiters.append($0) }
@@ -60,18 +77,24 @@ public actor WhisperKitEngine: TranscriptionEngine {
             loadWaiters = []
             for waiter in waiters { waiter.resume() }
         }
+        // Snapshot: `setModel` can land while the load below is suspended,
+        // and caching the stale pipe would silently keep serving the old
+        // model. The caller that asked still gets the pipe it asked for.
+        let requested = modelName
         do {
             VocalLog.engine.info(
-                "loading WhisperKit model \(self.modelName, privacy: .public) — first run downloads ~600 MB and compiles for the Neural Engine"
+                "loading WhisperKit model \(requested, privacy: .public) — first run downloads the model and compiles for the Neural Engine"
             )
             let config = WhisperKitConfig(
-                model: modelName,
+                model: requested,
                 modelFolder: modelFolder?.path,
                 computeOptions: Self.computeOptions
             )
             let loaded = try await WhisperKit(config)
             VocalLog.engine.info("WhisperKit model ready")
-            pipe = loaded
+            if requested == modelName {
+                pipe = loaded
+            }
             return loaded
         } catch {
             VocalLog.engine.error(

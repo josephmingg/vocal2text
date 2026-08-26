@@ -1,3 +1,4 @@
+import ASREngineWhisperKit
 import Combine
 import CoreModels
 import Foundation
@@ -67,6 +68,13 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(ollamaModel, forKey: Keys.ollamaModel) }
     }
 
+    /// WhisperKit model identifier for the primary EN/ZH engine (docs/15
+    /// step 15 — Settings → Models kills the hardcoded name). Applies on the
+    /// engine's next load; the composition root observes changes.
+    @Published var whisperKitModel: String {
+        didSet { Self.defaults.set(whisperKitModel, forKey: Keys.whisperKitModel) }
+    }
+
     /// Set by the composition root once the database opens; dictionary lookups
     /// degrade to empty when the store is unavailable.
     var database: DatabaseStore?
@@ -96,6 +104,8 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
+        whisperKitModel =
+            defaults.string(forKey: Keys.whisperKitModel) ?? WhisperKitEngine.defaultModelName
 
         // Settle the legacy hotkey migration on first launch so later reads are
         // plain decodes. `didSet` does not fire from `init`, hence the explicit
@@ -187,6 +197,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let showTimingsToast = "settings.showTimingsToast"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
+        static let whisperKitModel = "settings.whisperKitModel"
         static let modelWarmedOnce = "settings.modelWarmedOnce"
     }
 }

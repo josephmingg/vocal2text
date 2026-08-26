@@ -35,6 +35,9 @@ public struct ModelSpec: Codable, Sendable, Hashable {
     /// Individual files to download; empty when the engine manages its own
     /// download and ModelStore only tracks the on-disk footprint.
     public var files: [ModelFileSpec]
+    /// The name the serving engine loads this variant by (e.g. WhisperKit's
+    /// model identifier). nil when the engine has no such indirection.
+    public var engineModelName: String?
 
     public init(
         id: String,
@@ -42,7 +45,8 @@ public struct ModelSpec: Codable, Sendable, Hashable {
         engine: String,
         languages: [Language],
         approximateBytes: Int64,
-        files: [ModelFileSpec] = []
+        files: [ModelFileSpec] = [],
+        engineModelName: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -50,6 +54,7 @@ public struct ModelSpec: Codable, Sendable, Hashable {
         self.languages = languages
         self.approximateBytes = approximateBytes
         self.files = files
+        self.engineModelName = engineModelName
     }
 }
 
@@ -66,7 +71,8 @@ public enum ModelCatalog {
             engine: "whisperkit",
             languages: [.english, .chinese],
             approximateBytes: 656_408_576, // ≈626 MB
-            files: []
+            files: [],
+            engineModelName: "openai_whisper-large-v3-v20240930_turbo"
         ),
         /// Fallback for low-RAM machines; also WhisperKit-managed (`files` empty).
         ModelSpec(
@@ -75,7 +81,8 @@ public enum ModelCatalog {
             engine: "whisperkit",
             languages: [.english, .chinese],
             approximateBytes: 506_462_208, // ≈483 MB
-            files: []
+            files: [],
+            engineModelName: "openai_whisper-small"
         ),
         /// Burmese (v1.1). Whisper is unusable for Burmese — 80–100% WER with
         /// hallucination loops — so Burmese gets its own engine rather than

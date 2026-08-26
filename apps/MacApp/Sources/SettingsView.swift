@@ -1,6 +1,7 @@
 import AppKit
 import AudioPipeline
 import CoreModels
+import ModelStore
 import PersistenceKit
 import ServiceManagement
 import SwiftUI
@@ -24,6 +25,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             ProfilesPane(profileStore: appState.profileStore)
                 .tabItem { Label("Profiles", systemImage: "person.2") }
+            ModelsPane(settings: settings)
+                .tabItem { Label("Models", systemImage: "cpu") }
             CleanupPane(settings: settings)
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
             DictionaryPane(database: appState.database)
@@ -92,6 +95,145 @@ private struct GeneralPane: View {
         }
         // Reflect what the system actually recorded, not what was requested.
         launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}
+
+// MARK: - Models (docs/15 step 15)
+
+/// Settings → Models: the resurrected ModelStore. The primary EN/ZH model is
+/// a picker instead of a hardcoded name; the locally managed models
+/// (Burmese, VAD) show their real on-disk footprint with a delete that goes
+/// through `ModelStore`'s hardened path checks.
+@MainActor
+private struct ModelsPane: View {
+    @ObservedObject var settings: SettingsStore
+
+    /// One locally managed catalog entry's measured state.
+    private struct LocalModelRow: Identifiable {
+        var spec: ModelSpec
+        var state: InstalledState
+        var bytes: Int64
+        var id: String { spec.id }
+    }
+
+    @State private var localRows: [LocalModelRow] = []
+    @State private var statusText: String?
+
+    /// WhisperKit-served choices, from the catalog — the pane never invents
+    /// model names.
+    private var primaryChoices: [ModelSpec] {
+        ModelCatalog.builtIn.filter { $0.engine == "whisperkit" && $0.engineModelName != nil }
+    }
+
+    var body: some View {
+        Form {
+            Section("Primary model (English / 中文)") {
+                Picker("Model", selection: $settings.whisperKitModel) {
+                    ForEach(primaryChoices, id: \.id) { spec in
+                        Text("\(spec.displayName) (~\(Self.formatBytes(spec.approximateBytes)))")
+                            .tag(spec.engineModelName ?? spec.id)
+                    }
+                }
+                Text(
+                    """
+                    Applies immediately: the current model is released and the \
+                    chosen one loads in the background. A model that has never \
+                    been used downloads first (WhisperKit manages its own files).
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Section("Downloaded models") {
+                if localRows.isEmpty {
+                    Text("No locally managed models are installed yet.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(localRows) { row in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.spec.displayName)
+                            Text(Self.stateLabel(row.state, bytes: row.bytes))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if row.state != .notInstalled {
+                            Button("Delete", role: .destructive) {
+                                delete(row.spec)
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                Text(
+                    """
+                    Deleted models re-download automatically the next time a \
+                    dictation needs them.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            if let statusText {
+                Section {
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { reload() }
+    }
+
+    /// The catalog entries whose files live inside Vocal's own models tree —
+    /// exactly what `ModelStore` can measure and safely delete.
+    private var locallyManagedSpecs: [ModelSpec] {
+        ModelCatalog.builtIn.filter { $0.engine == "sherpa-onnx" }
+    }
+
+    private func reload() {
+        guard let root = AppState.modelsDirectory() else { return }
+        let specs = locallyManagedSpecs
+        Task {
+            let store = ModelStore(rootDirectory: root)
+            var rows: [LocalModelRow] = []
+            for spec in specs {
+                let state = await store.installedState(of: spec)
+                let bytes = await store.downloadedBytes(of: spec)
+                rows.append(LocalModelRow(spec: spec, state: state, bytes: bytes))
+            }
+            localRows = rows
+        }
+    }
+
+    private func delete(_ spec: ModelSpec) {
+        guard let root = AppState.modelsDirectory() else { return }
+        Task {
+            let store = ModelStore(rootDirectory: root)
+            do {
+                try await store.delete(spec)
+                statusText = "Deleted \(spec.displayName)."
+            } catch {
+                statusText = "Could not delete \(spec.displayName): \(error)"
+            }
+            reload()
+        }
+    }
+
+    private static func stateLabel(_ state: InstalledState, bytes: Int64) -> String {
+        switch state {
+        case .notInstalled: return "Not downloaded"
+        case .partial: return "Partial download (\(formatBytes(bytes)) on disk)"
+        case .installed: return "\(formatBytes(bytes)) on disk"
+        }
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 

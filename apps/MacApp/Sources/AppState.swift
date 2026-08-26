@@ -132,7 +132,9 @@ final class AppState: ObservableObject {
         let frontmost = FrontmostContext()
         let relay = ResolutionRelay()
 
-        let engine = WhisperKitEngine()
+        // The primary model is a setting now (docs/15 step 15), not a
+        // hardcoded name; Settings → Models switches it live.
+        let engine = WhisperKitEngine(modelName: settings.whisperKitModel)
         // Pinned မြန်မာ routes to the Burmese engine (Omnilingual CTC 1B,
         // 10.78% CER on FLEURS my_mm — docs/11 G13); everything else,
         // including auto mode, stays on WhisperKit. The routing contract is
@@ -310,6 +312,21 @@ final class AppState: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] mode in
                 self?.preloadEngineIfWarmedBefore(mode: mode)
+            }
+            .store(in: &settingsSinks)
+        // Settings → Models switches the primary model live (docs/15 step
+        // 15): drop the resident pipe, then warm the chosen model in the
+        // background so the next take doesn't pay the load.
+        settings.$whisperKitModel
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] name in
+                guard let self else { return }
+                let engine = self.engine
+                Task { [weak self] in
+                    await engine.setModel(name: name)
+                    await MainActor.run { self?.preloadEngineIfWarmedBefore() }
+                }
             }
             .store(in: &settingsSinks)
         startPhaseMirror()
@@ -708,6 +725,21 @@ final class AppState: ObservableObject {
         guard case .ollama(let model)? = profile.providerOverride else { return globalModel }
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? globalModel : trimmed
+    }
+
+    /// The ModelStore root: `Application Support/Vocal/models` — the same
+    /// tree `SherpaOnnxEngine` and the VAD install into, so Settings → Models
+    /// measures and deletes exactly what they wrote (docs/15 step 15).
+    nonisolated static func modelsDirectory() -> URL? {
+        let fileManager = FileManager.default
+        guard
+            let appSupport = fileManager.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first
+        else { return nil }
+        return appSupport
+            .appendingPathComponent("Vocal", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
     }
 
     /// Where retained take audio lives: `Application Support/Vocal/audio`,
