@@ -85,6 +85,10 @@ public enum DictionaryCSV {
                     } else {
                         inQuotes = false
                     }
+                } else if character == "\r\n" {
+                    // Quoted multi-line fields from CRLF files normalize to
+                    // \n — written forms should never paste carriage returns.
+                    field.append("\n")
                 } else {
                     field.append(character)
                 }
@@ -97,7 +101,11 @@ public enum DictionaryCSV {
                     field = ""
                 case "\r":
                     break
-                case "\n":
+                // "\r\n" is a single Character (one grapheme cluster) in
+                // Swift, so a CRLF row ending never matches "\r" or "\n"
+                // alone — it must be its own case or it lands in `default`
+                // and corrupts the field (the exact bug CI caught).
+                case "\n", "\r\n":
                     row.append(field)
                     field = ""
                     if !(row.count == 1 && row[0].isEmpty) {

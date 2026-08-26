@@ -60,4 +60,9 @@ struct DictionaryCSVTests {
         let parsed = DictionaryCSV.parse("a,b\r\nc,d\r\n")
         #expect(parsed.map(\.written) == ["b", "d"])
     }
+
+    @Test func quotedMultiLineFieldFromACRLFFileNormalizesToLF() {
+        let parsed = DictionaryCSV.parse("sig,\"line one\r\nline two\"\r\n")
+        #expect(parsed.map(\.written) == ["line one\nline two"])
+    }
 }
