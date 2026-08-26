@@ -47,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Warm the ASR model now, in the background, so the day's first
+        // dictation doesn't pay the model load inside the take (docs/15
+        // step 13). Skipped until the model has downloaded once.
+        appState.preloadEngineIfWarmedBefore()
+
         let monitor = HotkeyMonitor(spec: appState.settings.hotkeySpec)
         monitor.onPressBegan = { [weak self] in
             guard let self else { return }

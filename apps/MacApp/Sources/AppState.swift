@@ -96,6 +96,7 @@ final class AppState: ObservableObject {
     }
 
     private var phaseTask: Task<Void, Never>?
+    private var settingsSinks: Set<AnyCancellable> = []
     /// Hotkey edges must reach the session actor in order; independent
     /// unstructured Tasks give no FIFO guarantee, so each control call chains
     /// on the previous one.
@@ -283,6 +284,17 @@ final class AppState: ObservableObject {
         }
         // Enforce the retention window on the recordings already on disk.
         Self.sweepRetainedAudio(retentionDays: settings.audioRetentionDays)
+        // A language-mode change can point the router at a different engine;
+        // warm it when the choice is made, not inside the next take (docs/15
+        // step 13). The new value rides the publisher — @Published emits on
+        // willSet, so reading the property here would see the old mode.
+        settings.$languageMode
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] mode in
+                self?.preloadEngineIfWarmedBefore(mode: mode)
+            }
+            .store(in: &settingsSinks)
         startPhaseMirror()
         // A take interrupted by a crash or a quit leaves its sidecar behind, so
         // the offer has to survive a relaunch to be worth anything (FR-1.6).
@@ -312,6 +324,33 @@ final class AppState: ObservableObject {
     /// the router: pinned မြန်မာ warms the Burmese engine instead.
     func warmUp() async throws {
         try await routedEngine.prepare(languageMode: settings.languageMode)
+        settings.modelWarmedOnce = true
+    }
+
+    /// Loads the routed ASR model in the background (docs/15 step 13) so the
+    /// day's first dictation feels identical to the tenth — without this, the
+    /// press after every relaunch paid the multi-second model load inside the
+    /// take itself. Called at launch and again when the language mode changes
+    /// (the router may then point at a different engine).
+    ///
+    /// Gated on a previous successful load: a silent preload must never turn
+    /// into a surprise ~600 MB download on a fresh install — onboarding owns
+    /// that first, explicit download. Utility priority keeps the CoreML
+    /// compile off launch-critical threads; failures only log, because the
+    /// take path retries the load itself and owns user-facing errors.
+    func preloadEngineIfWarmedBefore(mode: LanguageMode? = nil) {
+        guard settings.modelWarmedOnce else { return }
+        let engine = routedEngine
+        let languageMode = mode ?? settings.languageMode
+        Task.detached(priority: .utility) {
+            do {
+                try await engine.prepare(languageMode: languageMode)
+            } catch {
+                VocalLog.engine.error(
+                    "background model preload failed: \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
     }
 
     // MARK: - Dictation controls
@@ -571,6 +610,12 @@ final class AppState: ObservableObject {
     /// Delivery outcomes the user must hear about (FR-3.2/3.4/3.6) — invoked
     /// by the deliverer seam before the session finishes the take.
     func showDelivery(outcome: DeliveryOutcome) {
+        // Reaching delivery means transcription ran, so the model is on disk
+        // and loaded — record that, so future launches may preload silently
+        // even if onboarding's "Warm up now" was skipped (docs/15 step 13).
+        if !settings.modelWarmedOnce {
+            settings.modelWarmedOnce = true
+        }
         switch outcome {
         case .inserted:
             break

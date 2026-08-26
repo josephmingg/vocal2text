@@ -71,6 +71,15 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     /// degrade to empty when the store is unavailable.
     var database: DatabaseStore?
 
+    /// Whether the ASR model has ever loaded successfully on this machine
+    /// (docs/15 step 13). Gates the silent launch preload: a background warm
+    /// must never turn into a surprise ~600 MB download on a fresh install —
+    /// onboarding owns that first, explicit download.
+    var modelWarmedOnce: Bool {
+        get { Self.defaults.bool(forKey: Keys.modelWarmedOnce) }
+        set { Self.defaults.set(newValue, forKey: Keys.modelWarmedOnce) }
+    }
+
     // MARK: - Init
 
     init() {
@@ -178,5 +187,6 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let showTimingsToast = "settings.showTimingsToast"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
+        static let modelWarmedOnce = "settings.modelWarmedOnce"
     }
 }
