@@ -139,6 +139,12 @@ struct MenuBarView: View {
 
             Divider()
 
+            // docs/15 step 44 (FR-6): a podcast in, a transcript in History.
+            Button("Import Audio File…") {
+                appState.importAudioFile()
+            }
+            .help("Transcribe an audio file into History (no text is inserted anywhere).")
+
             Button("Open History") {
                 WindowManager.shared.showHistory(appState: appState)
             }

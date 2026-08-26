@@ -12,6 +12,8 @@ import Foundation
 import PersistenceKit
 import ProfileKit
 import SessionKit
+import TextPipeline
+import UniformTypeIdentifiers
 
 /// What the HUD (and menu-bar icon) renders. Owned by AppState; views only read it.
 struct HUDState: Equatable {
@@ -648,6 +650,75 @@ final class AppState: ObservableObject {
         Task { [weak self] in
             await pending?.value
             self?.refreshRecoverableTake()
+        }
+    }
+
+    // MARK: - File import (docs/15 step 44, FR-6 — scoped)
+
+    /// Imports an audio file into History: decode → transcribe → deterministic
+    /// stages → history row. No delivery (there is no insertion point), no
+    /// cleanup (the prompt is tuned for dictation, and an import has no
+    /// profile). Timestamped segments and the quadratic-pipeline hardening
+    /// FR-6 also calls for remain open in the plan.
+    func importAudioFile() {
+        guard let database else {
+            showNotice("History is unavailable — cannot import")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        showNotice("Importing \(url.lastPathComponent)…")
+        let engine = routedEngine
+        let mode = settings.languageMode
+        let settings = settings
+        Task { [weak self] in
+            do {
+                let decoded = try await Task.detached(priority: .userInitiated) {
+                    try AudioFileDecoder.decode(url: url)
+                }.value
+                let entries = await settings.enabledDictionaryEntries()
+                let clock = ContinuousClock()
+                let start = clock.now
+                let result = try await engine.transcribe(
+                    decoded.audio, languageMode: mode, dictionaryTerms: entries.map(\.written)
+                )
+                let elapsed = start.duration(to: clock.now)
+                let language = result.detectedLanguage
+                let formatting = FormattingOptions()
+                let normalized = Stage1Normalizer.normalize(
+                    result.text, language: language, formatting: formatting
+                )
+                let stage2 = DictionaryEngine.apply(
+                    normalized, entries: entries, language: language
+                ).text
+                let formatted = Stage4Formatter.format(
+                    stage2, language: language, formatting: formatting, precedingContext: nil
+                )
+                let record = TranscriptRecord(
+                    createdAt: Date(),
+                    source: .fileImport,
+                    language: language,
+                    rawText: result.text,
+                    deliveredText: formatted,
+                    durationSeconds: decoded.audio.durationSeconds,
+                    profileName: "Import",
+                    routeKind: .defaultRoute,
+                    // Imports run without a profile, so stage 3 never applies.
+                    cleanup: .skipped(reason: .profileDisabled),
+                    timings: TimingBreakdown(
+                        transcriptionSeconds: Double(elapsed.components.seconds)
+                            + Double(elapsed.components.attoseconds) / 1e18
+                    ),
+                    importedFilename: url.lastPathComponent
+                )
+                try database.save(record)
+                let suffix = decoded.wasTruncated ? " (truncated at the 4 h cap)" : ""
+                self?.showNotice("Imported \(url.lastPathComponent)\(suffix) — see History")
+            } catch {
+                self?.showNotice("Import failed: \(error.localizedDescription)")
+            }
         }
     }
 
