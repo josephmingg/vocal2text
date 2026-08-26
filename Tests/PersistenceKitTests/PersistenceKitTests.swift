@@ -238,6 +238,36 @@ private func makeRecord(
     #expect(try store.profiles().isEmpty)
 }
 
+// MARK: - VACUUM safety (G7)
+
+@Test func searchSurvivesVacuum() throws {
+    // The v2 schema keys FTS on an INTEGER PRIMARY KEY surrogate, so VACUUM
+    // can no longer renumber the rowids the FTS index points at.
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let english = makeRecord(rawText: "ship the benchmark harness on friday")
+    let chinese = makeRecord(rawText: "周六一起去爬山", language: .chinese)
+    let doomed = makeRecord(rawText: "delete me before the vacuum")
+    try store.save(english)
+    try store.save(chinese)
+    try store.save(doomed)
+    try store.deleteTranscript(id: doomed.id)
+
+    try store.vacuum()
+
+    #expect(try store.search("benchmark").map(\.id) == [english.id])
+    #expect(try store.search("爬山").map(\.id) == [chinese.id])
+    #expect(try store.search("vacuum").isEmpty)
+
+    // Writes after a VACUUM stay searchable and deletable.
+    let later = makeRecord(rawText: "post vacuum dictation")
+    try store.save(later)
+    #expect(try store.search("dictation").map(\.id) == [later.id])
+    try store.deleteTranscript(id: later.id)
+    #expect(try store.search("dictation").isEmpty)
+}
+
 #else
 
 @Test func persistenceIsUnsupportedWithoutGRDB() {

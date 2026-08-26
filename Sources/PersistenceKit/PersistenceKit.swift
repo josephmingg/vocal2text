@@ -107,8 +107,113 @@ public final class DatabaseStore: Sendable {
                 END
                 """)
         }
+        // G7 hardening: the v1 external-content FTS tables key on the rowid
+        // of a TEXT-PK table, and VACUUM may renumber such rowids — silently
+        // corrupting the FTS index. v2 gives transcript an INTEGER PRIMARY
+        // KEY surrogate (rowid alias — VACUUM-stable by definition), rebuilds
+        // the FTS tables against it, and re-derives both indexes.
+        migrator.registerMigration("v2") { db in
+            try db.execute(sql: "DROP TRIGGER transcript_after_insert")
+            try db.execute(sql: "DROP TRIGGER transcript_after_delete")
+            try db.execute(sql: "DROP TRIGGER transcript_after_update")
+            try db.execute(sql: "DROP TABLE transcript_fts_latin")
+            try db.execute(sql: "DROP TABLE transcript_fts_tri")
+            try db.execute(sql: """
+                CREATE TABLE transcript_v2 (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    createdAt DOUBLE NOT NULL,
+                    source TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    rawText TEXT NOT NULL,
+                    deliveredText TEXT NOT NULL,
+                    durationSeconds DOUBLE NOT NULL,
+                    targetAppBundleID TEXT,
+                    targetAppName TEXT,
+                    profileName TEXT NOT NULL,
+                    routeKind TEXT NOT NULL,
+                    cleanup TEXT NOT NULL,
+                    timings TEXT NOT NULL,
+                    audioPath TEXT,
+                    isCancelled INTEGER NOT NULL DEFAULT 0,
+                    importedFilename TEXT
+                )
+                """)
+            try db.execute(sql: """
+                INSERT INTO transcript_v2 (
+                    id, createdAt, source, language, rawText, deliveredText,
+                    durationSeconds, targetAppBundleID, targetAppName, profileName,
+                    routeKind, cleanup, timings, audioPath, isCancelled, importedFilename
+                )
+                SELECT
+                    id, createdAt, source, language, rawText, deliveredText,
+                    durationSeconds, targetAppBundleID, targetAppName, profileName,
+                    routeKind, cleanup, timings, audioPath, isCancelled, importedFilename
+                FROM transcript ORDER BY rowid
+                """)
+            try db.execute(sql: "DROP TABLE transcript")
+            try db.execute(sql: "ALTER TABLE transcript_v2 RENAME TO transcript")
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE transcript_fts_latin USING fts5(
+                    rawText, deliveredText,
+                    content='transcript',
+                    content_rowid='seq',
+                    tokenize='unicode61'
+                )
+                """)
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE transcript_fts_tri USING fts5(
+                    rawText, deliveredText,
+                    content='transcript',
+                    content_rowid='seq',
+                    tokenize='trigram'
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER transcript_after_insert AFTER INSERT ON transcript BEGIN
+                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
+                        VALUES (new.seq, new.rawText, new.deliveredText);
+                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
+                        VALUES (new.seq, new.rawText, new.deliveredText);
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER transcript_after_delete AFTER DELETE ON transcript BEGIN
+                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
+                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
+                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
+                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
+                END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER transcript_after_update AFTER UPDATE ON transcript BEGIN
+                    INSERT INTO transcript_fts_latin(transcript_fts_latin, rowid, rawText, deliveredText)
+                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
+                    INSERT INTO transcript_fts_tri(transcript_fts_tri, rowid, rawText, deliveredText)
+                        VALUES ('delete', old.seq, old.rawText, old.deliveredText);
+                    INSERT INTO transcript_fts_latin(rowid, rawText, deliveredText)
+                        VALUES (new.seq, new.rawText, new.deliveredText);
+                    INSERT INTO transcript_fts_tri(rowid, rawText, deliveredText)
+                        VALUES (new.seq, new.rawText, new.deliveredText);
+                END
+                """)
+            try db.execute(
+                sql: "INSERT INTO transcript_fts_latin(transcript_fts_latin) VALUES('rebuild')"
+            )
+            try db.execute(
+                sql: "INSERT INTO transcript_fts_tri(transcript_fts_tri) VALUES('rebuild')"
+            )
+        }
         try migrator.migrate(queue)
         dbQueue = queue
+    }
+
+    /// Compacts the database file. Exposed so callers (and tests) can VACUUM
+    /// safely — the v2 schema's INTEGER PRIMARY KEY keeps FTS rowids stable.
+    public func vacuum() throws {
+        try dbQueue.writeWithoutTransaction { db in
+            try db.execute(sql: "VACUUM")
+        }
     }
 
     // MARK: - Transcripts

@@ -110,7 +110,7 @@ final class AppState: ObservableObject {
                 // pinned for the whole take (FR-3.6). The menu-bar pin wins
                 // over routing (FR-8.3, docs/05 §4).
                 let pinned = await MainActor.run { PinState.shared.pinnedProfileID }
-                let snapshot = frontmost.snapshot()
+                let snapshot = await frontmost.snapshot()
                 let resolution = resolver.resolve(
                     frontmostBundleID: snapshot.bundleID,
                     tabHostname: snapshot.tabHostname,
@@ -225,7 +225,13 @@ final class AppState: ObservableObject {
         case .arming:
             hudState.mode = .listening(startedAt: Date())
         case .recording:
-            hudState.mode = .listening(startedAt: Date())
+            // Keep the arming timestamp: resetting it here visibly restarted
+            // the HUD's elapsed timer a beat into every take.
+            if case .listening = hudState.mode {
+                // already listening since arming
+            } else {
+                hudState.mode = .listening(startedAt: Date())
+            }
             DeliverySounds.playStart(enabled: settings.soundsEnabled)
         case .transcribing, .cleaning, .delivering:
             hudState.mode = .processing
