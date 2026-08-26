@@ -110,7 +110,9 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     var cleanupTimeout: Duration { .seconds(6) }
 
     /// Runs off the main actor: the snapshot of the store handle hops to
-    /// MainActor, but the (synchronous, blocking) SQLite read does not.
+    /// MainActor, but the entry read does not. The store serves it from its
+    /// in-memory cache after the first take (docs/15 step 48), so this is a
+    /// SQLite read only immediately after launch or a dictionary edit.
     nonisolated func enabledDictionaryEntries() async -> [DictionaryEntry] {
         let database = await MainActor.run { self.database }
         guard let database else { return [] }
