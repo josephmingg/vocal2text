@@ -93,6 +93,28 @@ struct Stage1NormalizerTests {
         #expect(out == "Very very very good day.")
     }
 
+    // MARK: - G6 (docs/15 step 53): loop collapse must not eat paragraph breaks
+
+    @Test func paragraphBreaksSurviveALoopCollapseElsewhere() {
+        // The old implementation rebuilt the whole text with single spaces the
+        // moment any loop existed, flattening every paragraph of a long import.
+        let out = Stage1Normalizer.normalize(
+            "go go go go go now\n\nsecond paragraph stays",
+            language: .english,
+            formatting: .verbatim
+        )
+        #expect(out == "go now\n\nsecond paragraph stays")
+    }
+
+    @Test func aRepeatedWordAcrossAParagraphBreakDoesNotCollapseTheBreak() {
+        // Three + three around a break: a decoding loop is an intra-line
+        // artifact, so the run must not span the newline — and the break must
+        // survive.
+        let input = "yes yes yes\n\nyes yes yes here"
+        let out = Stage1Normalizer.normalize(input, language: .english, formatting: .verbatim)
+        #expect(out == input)
+    }
+
     @Test func leadingOrphanPunctuationIsStripped() {
         let out = Stage1Normalizer.normalize(". hello world friends", language: .english, formatting: defaults)
         #expect(out == "Hello world friends.")

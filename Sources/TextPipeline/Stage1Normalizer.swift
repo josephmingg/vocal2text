@@ -93,28 +93,70 @@ public enum Stage1Normalizer: Sendable {
 
     /// Collapses a whitespace-separated token repeated 4+ times consecutively
     /// (a Whisper decoding loop) down to one occurrence. Runs of 3 or fewer are
-    /// kept — "very very very good" is legitimate speech. The text is rebuilt
-    /// with single spaces only when a loop was actually found.
+    /// kept — "very very very good" is legitimate speech.
+    ///
+    /// Every separator outside a collapsed run is preserved verbatim (docs/15
+    /// step 53, G6): the old implementation rebuilt the whole text with single
+    /// spaces whenever a loop existed anywhere, which destroyed paragraph
+    /// breaks in exactly the long imports where they matter. A separator
+    /// containing a newline also *breaks* a run — a decoding loop is an
+    /// intra-line artifact, and the same word legitimately ending one
+    /// paragraph and starting the next must not swallow the break.
     private static func collapseRepeatedTokenLoops(_ text: String) -> String {
-        let tokens = text.split(whereSeparator: { $0.isWhitespace })
-        guard !tokens.isEmpty else { return text }
-        var runs: [(token: Substring, count: Int)] = []
-        for token in tokens {
-            if let last = runs.last, last.token == token {
+        // Each piece is one token plus the whitespace that precedes it.
+        struct Piece {
+            var separator: Substring
+            var token: Substring
+        }
+        var pieces: [Piece] = []
+        var cursor = text.startIndex
+        var trailingStart = text.endIndex
+        while cursor < text.endIndex {
+            let separatorStart = cursor
+            while cursor < text.endIndex, text[cursor].isWhitespace {
+                cursor = text.index(after: cursor)
+            }
+            guard cursor < text.endIndex else {
+                // Whitespace after the last token — preserved via `trailing`.
+                trailingStart = separatorStart
+                break
+            }
+            let separator = text[separatorStart..<cursor]
+            let tokenStart = cursor
+            while cursor < text.endIndex, !text[cursor].isWhitespace {
+                cursor = text.index(after: cursor)
+            }
+            pieces.append(Piece(separator: separator, token: text[tokenStart..<cursor]))
+            trailingStart = cursor
+        }
+        guard !pieces.isEmpty else { return text }
+        let trailing = text[trailingStart...]
+
+        // Group into runs of the identical token; a newline separator breaks
+        // the run even when the token repeats across it.
+        var runs: [(start: Int, count: Int)] = []
+        for (index, piece) in pieces.enumerated() {
+            if index > 0,
+                pieces[index - 1].token == piece.token,
+                !piece.separator.contains(where: \.isNewline) {
                 runs[runs.count - 1].count += 1
             } else {
-                runs.append((token: token, count: 1))
+                runs.append((start: index, count: 1))
             }
         }
         guard runs.contains(where: { $0.count >= repeatedTokenThreshold }) else { return text }
-        var collapsed: [Substring] = []
+
+        var rebuilt = ""
         for run in runs {
             let keep = run.count >= repeatedTokenThreshold ? 1 : run.count
-            for _ in 0..<keep {
-                collapsed.append(run.token)
+            for offset in 0..<keep {
+                let piece = pieces[run.start + offset]
+                rebuilt += piece.separator
+                rebuilt += piece.token
             }
         }
-        return collapsed.joined(separator: " ")
+        rebuilt += trailing
+        return rebuilt
     }
 
     /// Collapses an *unspaced* phrase repeated 4+ times consecutively — the
