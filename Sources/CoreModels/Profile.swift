@@ -28,6 +28,9 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
     public var panguSpacing: Bool
     /// Burmese: which digit set stage 4 emits (docs/04 Appendix A).
     public var myanmarDigits: MyanmarDigits
+    /// English: spoken symbols and casing commands become code — the
+    /// Terminal/Code profile upgrade (docs/15 step 31). Ships OFF.
+    public var codeMode: Bool
     /// Burmese: turn spoken punctuation commands into marks ("full stop" → ။,
     /// "comma" → ၊). Ships OFF. The Myanmar-script command words were removed
     /// in review — ပုဒ်မ is the everyday word for "section", and a substring
@@ -43,7 +46,8 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         enforceFullWidthZhPunctuation: Bool = true,
         panguSpacing: Bool = false,
         myanmarDigits: MyanmarDigits = .asRecognized,
-        myanmarSpokenPunctuation: Bool = false
+        myanmarSpokenPunctuation: Bool = false,
+        codeMode: Bool = false
     ) {
         self.autoPunctuation = autoPunctuation
         self.smartSpacing = smartSpacing
@@ -52,6 +56,7 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         self.panguSpacing = panguSpacing
         self.myanmarDigits = myanmarDigits
         self.myanmarSpokenPunctuation = myanmarSpokenPunctuation
+        self.codeMode = codeMode
     }
 
     /// Declared rather than synthesized because `init(from:)` below is hand
@@ -64,6 +69,7 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         case panguSpacing
         case myanmarDigits
         case myanmarSpokenPunctuation
+        case codeMode
     }
 
     /// Decodes leniently: every key falls back to its default when absent.
@@ -92,6 +98,7 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         self.myanmarSpokenPunctuation = try flag(
             .myanmarSpokenPunctuation, defaults.myanmarSpokenPunctuation
         )
+        self.codeMode = try flag(.codeMode, defaults.codeMode)
     }
 
     /// Verbatim mode: nothing is reshaped; only artifacts + dictionary apply.
@@ -102,7 +109,8 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         enforceFullWidthZhPunctuation: false,
         panguSpacing: false,
         myanmarDigits: .asRecognized,
-        myanmarSpokenPunctuation: false
+        myanmarSpokenPunctuation: false,
+        codeMode: false
     )
 }
 

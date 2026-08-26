@@ -43,6 +43,14 @@ public enum Stage4Formatter: Sendable {
                 result = SpokenNumberFormatter.apply(result)
                 result = collapseDuplicateTerminalPunctuation(result)
             }
+            if formatting.structureAllowed {
+                // docs/15 step 30 (layout slice): spoken breaks become real.
+                result = SpokenLayoutCommands.apply(result)
+            }
+            if formatting.codeMode {
+                // docs/15 step 31: spoken symbols and casing become code.
+                result = CodeModeFormatter.apply(result)
+            }
             if formatting.smartSpacing, let context = precedingContext {
                 result = smartSpaced(result, against: context)
             }
