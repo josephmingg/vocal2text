@@ -328,7 +328,9 @@ struct DictationSessionTests {
         let provider = ScriptedCleanupProvider(script: .uppercase)
         let harness = makeHarness(
             engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
-            profile: Profile(name: "Notes", cleanupEnabled: true),
+            // The TASK prompt keeps the step-20 skip heuristic out of this
+            // test's way: with instructions in effect, stage 3 always runs.
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
             config: StaticConfig(masterSwitch: true),
             cleanup: CleanupPipeline(provider: provider),
             prewarm: { await provider.prewarm() }
@@ -375,6 +377,7 @@ struct DictationSessionTests {
             profile: Profile(
                 name: "Notes",
                 cleanupEnabled: true,
+                promptText: "Tidy this.",
                 providerOverride: .ollama(model: "sailor2:8b")
             ),
             config: StaticConfig(masterSwitch: true),
@@ -435,7 +438,7 @@ struct DictationSessionTests {
     @Test func aNilSelectionRecordsProviderUnavailableAndStillDelivers() async throws {
         let harness = makeHarness(
             engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
-            profile: Profile(name: "Notes", cleanupEnabled: true),
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
             config: StaticConfig(masterSwitch: true),
             selectCleanup: { _ in nil }
         )
@@ -458,7 +461,7 @@ struct DictationSessionTests {
         )
         let harness = makeHarness(
             engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
-            profile: Profile(name: "Notes", cleanupEnabled: true),
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
             config: StaticConfig(masterSwitch: true),
             cleanup: CleanupPipeline(provider: provider)
         )
@@ -518,6 +521,48 @@ struct DictationSessionTests {
         let records = await harness.store.records
         let record = try #require(records.first)
         #expect(record.cleanup == .skipped(reason: .profileDisabled))
+    }
+
+    @Test func aCleanTakeSkipsTheModelEntirely() async throws {
+        // docs/15 step 20: no fillers, no correction cues, punctuation sane,
+        // no instructions — the model would round-trip the text unchanged,
+        // so the session never even builds a provider.
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 0)
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .notNeeded))
+        // The deterministic stages still ran.
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Meet on saturday."])
+    }
+
+    @Test func aFillerBearingTakeStillRunsTheModel() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "um meet on saturday", detectedLanguage: .english
+            ),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 1)
     }
 
     @Test func dictionaryEntryAppearsInDeliveredText() async {
@@ -776,6 +821,7 @@ struct BurmeseCleanupGateTests {
             profile: Profile(
                 name: "Burmese notes",
                 cleanupEnabled: true,
+                promptText: "Tidy this.",
                 languageOverride: .pinned(.burmese)
             ),
             config: StaticConfig(masterSwitch: true),

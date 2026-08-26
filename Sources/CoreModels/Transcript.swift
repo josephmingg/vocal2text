@@ -21,6 +21,10 @@ public enum CleanupOutcome: Codable, Sendable, Hashable {
         /// The detected language opts out of cleanup by default
         /// (`Language.allowsCleanupByDefault`) and no profile pinned it.
         case languageOptOut
+        /// The deterministic skip heuristic found nothing for the model to do
+        /// — no fillers, no correction cues, punctuation already sane
+        /// (docs/15 step 20).
+        case notNeeded
     }
 }
 

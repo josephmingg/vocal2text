@@ -596,6 +596,13 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .profileDisabled)
         } else if !Self.cleanupAllowed(for: language, profile: profile) {
             cleanupOutcome = .skipped(reason: .languageOptOut)
+        } else if await cleanupHasNothingToDo(stage2Text, language: language, profile: profile) {
+            // docs/15 step 20: no fillers, no correction cues, punctuation
+            // already sane, and no profile/style instructions in effect — the
+            // model would round-trip the text unchanged, so don't pay the
+            // round-trip. Deterministic, and the eval-backed tests on the
+            // heuristic keep it honest.
+            cleanupOutcome = .skipped(reason: .notNeeded)
         } else if let selection = await deps.selectCleanup(profile) {
             transitionIfNoCaptureActive(.cleaning)
             // Resolved for this take from this profile, so history records the
@@ -718,6 +725,23 @@ public actor DictationSession {
     }
 
     // MARK: - Helpers
+
+    /// The docs/15 step 20 skip gate, in full: the text-level heuristic can
+    /// only excuse the model when no instructions give it other work — a
+    /// profile TASK prompt or an effective style prompt can rewrite even a
+    /// perfectly clean transcript, so their presence always runs stage 3.
+    private func cleanupHasNothingToDo(
+        _ stage2Text: String, language: Language, profile: Profile
+    ) async -> Bool {
+        let profilePrompt = profile.promptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard profilePrompt.isEmpty else { return false }
+        if !profile.ignoresGlobalStyle {
+            let style = await deps.config.globalStylePrompt
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard style.isEmpty else { return false }
+        }
+        return CleanupSkipHeuristic.canSkip(stage2Text, language: language)
+    }
 
     /// Whether stage 3 may run for this language under this profile.
     ///
