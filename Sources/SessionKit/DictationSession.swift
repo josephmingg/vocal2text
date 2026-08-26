@@ -222,6 +222,8 @@ public actor DictationSession {
         var resolution: PendingResolution
         var capture: CaptureSession
         var pressedAt: ContinuousClock.Instant
+        /// Press → mic open (docs/15 step 47) — speech lost at take start.
+        var armSeconds: Double
     }
 
     /// Everything the detached processing pipeline needs once capture ended.
@@ -229,6 +231,7 @@ public actor DictationSession {
         var resolution: PendingResolution
         var audio: PCMChunk
         var captureSeconds: Double
+        var armSeconds: Double
         var isLockMode: Bool
     }
 
@@ -388,7 +391,8 @@ public actor DictationSession {
             take = ActiveTake(
                 resolution: resolution,
                 capture: capture,
-                pressedAt: pressedAt
+                pressedAt: pressedAt,
+                armSeconds: Self.seconds(pressedAt.duration(to: clock.now))
             )
             startPreview(chunks: capture.chunks)
             transition(to: .recording(startedAt: pressedAt))
@@ -570,6 +574,7 @@ public actor DictationSession {
             resolution: active.resolution,
             audio: audio,
             captureSeconds: captureSeconds,
+            armSeconds: active.armSeconds,
             isLockMode: isLockMode
         )
         if provisional {
@@ -596,6 +601,7 @@ public actor DictationSession {
                 resolved: resolved,
                 isLockMode: pending.isLockMode,
                 captureSeconds: pending.captureSeconds,
+                armSeconds: pending.armSeconds,
                 source: .dictation
             )
         }
@@ -625,6 +631,7 @@ public actor DictationSession {
             resolved: resolved,
             isLockMode: false,
             captureSeconds: audio.durationSeconds,
+            armSeconds: 0,
             source: .recovered
         )
     }
@@ -648,6 +655,7 @@ public actor DictationSession {
         ),
         isLockMode: Bool,
         captureSeconds: Double,
+        armSeconds: Double,
         source: TranscriptSource
     ) async -> Bool {
         let profile = resolved.profile
@@ -818,6 +826,7 @@ public actor DictationSession {
             routeKind: resolved.routeKind,
             cleanup: cleanupOutcome,
             timings: TimingBreakdown(
+                armSeconds: armSeconds,
                 captureSeconds: captureSeconds,
                 transcriptionSeconds: transcriptionSeconds,
                 dictionarySeconds: dictionarySeconds,

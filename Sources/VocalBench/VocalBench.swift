@@ -7,6 +7,7 @@ import TextPipeline
 #if canImport(WhisperKit)
 import ASREngineWhisperKit
 #endif
+import PersistenceKit
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -43,6 +44,12 @@ struct VocalBench {
     }
 
     static func main() async {
+        // docs/15 step 47: `vocal-bench latency` reads the real transcript
+        // database instead of fixtures — daily-driving numbers for free.
+        if CommandLine.arguments.dropFirst().first == "latency" {
+            runLatency(arguments: Array(CommandLine.arguments.dropFirst(2)))
+            return
+        }
         guard let options = parseOptions() else {
             printUsage()
             exit(2)
@@ -55,6 +62,72 @@ struct VocalBench {
         ))
         exit(1)
         #endif
+    }
+
+    // MARK: - Latency-from-history (docs/15 step 47)
+
+    static func runLatency(arguments: [String]) {
+        // DatabaseStore exists only where GRDB does (Darwin builds); the
+        // Linux stub of PersistenceKit has no store to read.
+        #if canImport(Darwin)
+        var databasePath: String?
+        var remaining = arguments
+        while !remaining.isEmpty {
+            let argument = remaining.removeFirst()
+            switch argument {
+            case "--db":
+                guard let value = remaining.first else {
+                    FileHandle.standardError.write(Data("--db needs a path\n".utf8))
+                    exit(2)
+                }
+                remaining.removeFirst()
+                databasePath = value
+            default:
+                FileHandle.standardError.write(Data(
+                    "usage: vocal-bench latency [--db /path/to/vocal.sqlite]\n".utf8
+                ))
+                exit(2)
+            }
+        }
+        let path = databasePath ?? defaultDatabasePath()
+        guard FileManager.default.fileExists(atPath: path) else {
+            FileHandle.standardError.write(Data(
+                "no database at \(path) — pass --db or dictate first\n".utf8
+            ))
+            exit(1)
+        }
+        do {
+            let store = try DatabaseStore(path: path)
+            let samples = try store.allTranscripts()
+                .filter { !$0.isCancelled }
+                .map {
+                    LatencyReport.Sample(
+                        durationSeconds: $0.durationSeconds, timings: $0.timings
+                    )
+                }
+            print(LatencyReport.render(samples: samples))
+        } catch {
+            FileHandle.standardError.write(Data(
+                "could not read \(path): \(error)\n".utf8
+            ))
+            exit(1)
+        }
+        #else
+        FileHandle.standardError.write(Data(
+            "vocal-bench latency needs the GRDB-backed store — run it on macOS.\n".utf8
+        ))
+        exit(1)
+        #endif
+    }
+
+    static func defaultDatabasePath() -> String {
+        let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+        return appSupport
+            .appendingPathComponent("Vocal", isDirectory: true)
+            .appendingPathComponent("vocal.sqlite")
+            .path
     }
 
     // MARK: - Argument parsing
@@ -107,7 +180,9 @@ struct VocalBench {
             """
             usage: vocal-bench <fixtures-dir> [--runs N] [--language auto|en|zh]
                                [--model NAME] [--output FILE]
+                   vocal-bench latency [--db /path/to/vocal.sqlite]
             Fixtures: <name>.wav (+ optional <name>.txt reference transcript).
+            `latency` prints p50/p95/p99 per stage from the app's own history.
             See docs/benchmarks/README.md.
             """
         )

@@ -139,6 +139,7 @@ let package = Package(
             name: "VocalBench",
             dependencies: [
                 "BenchKit", "CoreModels", "TextPipeline", "ASRKit", "ASREngineWhisperKit",
+                "PersistenceKit",
             ]
         ),
 
