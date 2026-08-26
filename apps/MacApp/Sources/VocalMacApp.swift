@@ -30,6 +30,11 @@ private struct MenuBarStatusIcon: View {
     }
 
     private var symbolName: String {
+        // An unarmed hotkey trumps dictation state: the app cannot hear the
+        // hotkey at all, and that must be visible at a glance (W9).
+        if !appState.hotkeyArmed {
+            return "mic.slash"
+        }
         switch appState.hudState.mode {
         case .hidden: return "mic"
         case .listening: return "mic.fill"

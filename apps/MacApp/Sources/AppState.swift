@@ -38,6 +38,10 @@ final class AppState: ObservableObject {
     let settings: SettingsStore
     let database: DatabaseStore?
     @Published var hudState: HUDState
+    /// Whether the global hotkey tap is armed (W9): false when Accessibility
+    /// is missing or the tap failed to start — the menu bar shows a warning
+    /// instead of the app looking alive with a dead hotkey.
+    @Published var hotkeyArmed = true
 
     /// Retained so onboarding's "Warm up now" can trigger the guided model
     /// download/load explicitly (FR-2.4).
@@ -168,6 +172,22 @@ final class AppState: ObservableObject {
     func stopDictation(isLockMode: Bool) {
         DeliverySounds.playStop(enabled: settings.soundsEnabled)
         enqueueControl { session in await session.pressEnded(isLockMode: isLockMode) }
+    }
+
+    /// Short-tap release: the mic stops now, but a speech-bearing take is
+    /// held until the double-tap window closes (see AppDelegate's commit /
+    /// discard calls) so the first tap of a lock gesture never pastes.
+    func endDictationProvisionally() {
+        DeliverySounds.playStop(enabled: settings.soundsEnabled)
+        enqueueControl { session in await session.pressEndedProvisionally() }
+    }
+
+    func commitProvisionalDictation() {
+        enqueueControl { session in await session.commitProvisionalTake() }
+    }
+
+    func discardProvisionalDictation() {
+        enqueueControl { session in await session.discardProvisionalTake() }
     }
 
     func cancelDictation() {

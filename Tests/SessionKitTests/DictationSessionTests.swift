@@ -444,6 +444,53 @@ struct DictationSessionTests {
         #expect(records.first?.profileName == "Default")
     }
 
+    @Test func provisionalTapWithSpeechDeliversOnlyAfterCommit() async {
+        // W10/FR-1.5: a short tap with real audio ends provisionally — held
+        // through the double-tap window, delivered only on commit.
+        let harness = makeHarness(audioSeconds: 2.0)
+        await harness.session.pressBegan()
+        await harness.session.finishPress(
+            isLockMode: false, heldDurationOverride: .milliseconds(200), provisional: true
+        )
+        await harness.drainPipeline()
+
+        let heldBack = await harness.deliverer.deliveredTexts
+        #expect(heldBack.isEmpty)
+
+        await harness.session.commitProvisionalTake()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday."])
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+    }
+
+    @Test func provisionalTapDiscardedByLockGestureDeliversNothing() async {
+        // W10 regression: the first tap of a double-tap must never paste —
+        // the lock gesture discards the held take.
+        let harness = makeHarness(audioSeconds: 2.0)
+        await harness.session.pressBegan()
+        await harness.session.finishPress(
+            isLockMode: false, heldDurationOverride: .milliseconds(200), provisional: true
+        )
+        await harness.session.discardProvisionalTake()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.isEmpty)
+        let records = await harness.store.records
+        #expect(records.isEmpty)
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+
+        // A late commit after the discard is a no-op.
+        await harness.session.commitProvisionalTake()
+        await harness.drainPipeline()
+        let deliveredAfter = await harness.deliverer.deliveredTexts
+        #expect(deliveredAfter.isEmpty)
+    }
+
     @Test func newPressAcceptedWhilePreviousTakeStillProcessing() async {
         // W3 regression: rapid-fire dictation — the second press must start
         // recording while the first take's pipeline (slowed engine) is still

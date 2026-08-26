@@ -39,6 +39,15 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 10) {
             statusLine
 
+            if !appState.hotkeyArmed {
+                Label(
+                    "Hotkey not armed — grant Accessibility in System Settings",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
             Divider()
 
             VStack(alignment: .leading, spacing: 4) {

@@ -108,6 +108,12 @@ public actor DictationSession {
         var isLockMode: Bool
     }
 
+    /// A release edge latched during the `.arming` suspension window.
+    private enum PendingRelease {
+        case normal(isLockMode: Bool)
+        case provisional
+    }
+
     private let deps: Dependencies
     private let clock = ContinuousClock()
 
@@ -117,8 +123,13 @@ public actor DictationSession {
     /// Release/cancel edges that arrived during the `.arming` suspension
     /// window; honored the moment recording starts (a lost release would
     /// leave the mic running — NFR-1).
-    private var pendingRelease: Bool?
+    private var pendingRelease: PendingRelease?
     private var pendingCancel = false
+    /// A speech-bearing short-tap take held while the double-tap window is
+    /// open (FR-1.5 × FR-1.3): the mic is already stopped; the take is
+    /// committed if no second tap arrives, discarded if the pair turned out
+    /// to be the hands-free lock gesture.
+    private var provisionalTake: PendingTake?
     /// Pipelines queued or running. Capture phases always win the display;
     /// this only decides whether an ended capture settles to `.transcribing`
     /// (work still in flight) or `.idle`.
@@ -234,7 +245,14 @@ public actor DictationSession {
                 await cancel()
             } else if let release = pendingRelease {
                 pendingRelease = nil
-                await finishPress(isLockMode: release, heldDurationOverride: nil)
+                switch release {
+                case .normal(let isLockMode):
+                    await finishPress(isLockMode: isLockMode, heldDurationOverride: nil)
+                case .provisional:
+                    await finishPress(
+                        isLockMode: false, heldDurationOverride: nil, provisional: true
+                    )
+                }
             }
         } catch {
             take = nil
@@ -251,10 +269,39 @@ public actor DictationSession {
     /// latched and honored the moment recording starts.
     public func pressEnded(isLockMode: Bool = false) async {
         if phaseValue == .arming {
-            pendingRelease = isLockMode
+            pendingRelease = .normal(isLockMode: isLockMode)
             return
         }
         await finishPress(isLockMode: isLockMode, heldDurationOverride: nil)
+    }
+
+    /// Short-tap release while the double-tap window is still open: capture
+    /// stops now, but a speech-bearing take is held instead of queued —
+    /// `commitProvisionalTake` delivers it once the window closes with no
+    /// second tap; `discardProvisionalTake` drops it when the pair turned out
+    /// to be the hands-free lock gesture (fixes the first tap of a double-tap
+    /// delivering text before the second tap locks).
+    public func pressEndedProvisionally() async {
+        if phaseValue == .arming {
+            pendingRelease = .provisional
+            return
+        }
+        await finishPress(isLockMode: false, heldDurationOverride: nil, provisional: true)
+    }
+
+    /// The double-tap window closed with no second tap: queue the held take.
+    public func commitProvisionalTake() async {
+        guard let pending = provisionalTake else { return }
+        provisionalTake = nil
+        queuePipeline(pending)
+    }
+
+    /// The tap pair was a lock gesture: the held take is dropped unseen.
+    public func discardProvisionalTake() async {
+        guard provisionalTake != nil else { return }
+        provisionalTake = nil
+        guard take == nil, phaseValue != .arming else { return }
+        settleAfterCaptureEnd()
     }
 
     /// Escape during capture (FR-1.6): abort the take — the session
@@ -281,7 +328,11 @@ public actor DictationSession {
     ///
     /// `heldDurationOverride` is a test seam substituting the measured hold
     /// time in the FR-1.5 accidental-tap check; production always passes nil.
-    func finishPress(isLockMode: Bool, heldDurationOverride: Duration?) async {
+    /// `provisional` holds a speech-bearing take instead of queueing it (see
+    /// `pressEndedProvisionally`).
+    func finishPress(
+        isLockMode: Bool, heldDurationOverride: Duration?, provisional: Bool = false
+    ) async {
         guard case .recording(let startedAt) = phaseValue, let active = take else { return }
         take = nil
         transition(to: .transcribing)
@@ -304,6 +355,14 @@ public actor DictationSession {
             captureSeconds: captureSeconds,
             isLockMode: isLockMode
         )
+        if provisional {
+            provisionalTake = pending
+        } else {
+            queuePipeline(pending)
+        }
+    }
+
+    private func queuePipeline(_ pending: PendingTake) {
         queuedPipelines += 1
         let previous = pipelineTask
         pipelineTask = Task {

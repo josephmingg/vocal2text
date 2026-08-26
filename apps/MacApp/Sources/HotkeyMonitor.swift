@@ -24,8 +24,12 @@ final class HotkeyMonitor {
     /// Release after a hold ≥ 0.5 s (push-to-talk), or a synthesized release
     /// when the tap was force-disabled mid-press (docs/03 §3.1).
     var onPressEnded: (() -> Void)?
-    /// Short tap (< 0.5 s — SessionKit separately applies the has-speech
-    /// override, FR-1.5), chord abort, or Escape while holding.
+    /// Short tap (< 0.5 s) that may still become the first half of a lock
+    /// double-tap — the caller ends the take provisionally and commits it
+    /// only if `onLockToggle` doesn't fire within the double-tap window
+    /// (SessionKit separately applies the has-speech override, FR-1.5).
+    var onShortTap: (() -> Void)?
+    /// Chord abort, or Escape while holding.
     var onCancel: (() -> Void)?
     /// Second tap of a double-tap: hands-free lock toggle (FR-1.3).
     var onLockToggle: (() -> Void)?
@@ -54,7 +58,8 @@ final class HotkeyMonitor {
         let binding = Self.binding(for: choice)
         let machine = HotkeyTapMachine(
             hotkeyKeyCode: binding.keyCode,
-            hotkeyFlag: binding.flag
+            hotkeyFlag: binding.flag,
+            hotkeyDeviceFlag: binding.deviceFlag
         ) { [weak self] event in
             // Tap thread → main actor. DispatchQueue.main preserves order.
             DispatchQueue.main.async {
@@ -80,10 +85,12 @@ final class HotkeyMonitor {
     }
 
     /// Tear down and recreate the tap — call on wake/unlock (docs/03 §3.4:
-    /// re-arm the tap on wake).
-    func rearm() {
+    /// re-arm the tap on wake). Returns whether the new tap armed, so callers
+    /// can surface an unarmed hotkey instead of silently losing it.
+    @discardableResult
+    func rearm() -> Bool {
         stop()
-        _ = start()
+        return start()
     }
 
     /// Switch the hotkey; rebuilds the tap machine when one is running.
@@ -103,6 +110,8 @@ final class HotkeyMonitor {
             onPressBegan?()
         case .pressEnded:
             onPressEnded?()
+        case .shortTap:
+            onShortTap?()
         case .cancelled:
             onCancel?()
         case .lockToggled:
@@ -110,16 +119,20 @@ final class HotkeyMonitor {
         }
     }
 
+    /// `deviceFlag` is the NX_DEVICER…KEYMASK bit for the physical right-side
+    /// key (0x10 right-⌘, 0x40 right-⌥, per IOKit's NX event tables). It reads
+    /// the edge direction for *this* key even while its left sibling holds the
+    /// class mask; Fn has no sibling, so the class mask stays the signal.
     private static func binding(
         for choice: SettingsStore.HotkeyChoice
-    ) -> (keyCode: Int64, flag: CGEventFlags) {
+    ) -> (keyCode: Int64, flag: CGEventFlags, deviceFlag: CGEventFlags?) {
         switch choice {
         case .fnKey:
-            return (Int64(kVK_Function), .maskSecondaryFn)
+            return (Int64(kVK_Function), .maskSecondaryFn, nil)
         case .rightCommand:
-            return (Int64(kVK_RightCommand), .maskCommand)
+            return (Int64(kVK_RightCommand), .maskCommand, CGEventFlags(rawValue: 0x0010))
         case .rightOption:
-            return (Int64(kVK_RightOption), .maskAlternate)
+            return (Int64(kVK_RightOption), .maskAlternate, CGEventFlags(rawValue: 0x0040))
         }
     }
 }
@@ -128,6 +141,7 @@ final class HotkeyMonitor {
 private enum HotkeyTapEvent: Sendable {
     case pressBegan
     case pressEnded
+    case shortTap
     case cancelled
     case lockToggled
 }
@@ -158,6 +172,9 @@ private final class HotkeyTapMachine: @unchecked Sendable {
 
     private let hotkeyKeyCode: Int64
     private let hotkeyFlag: CGEventFlags
+    /// Device-specific bit for the physical hotkey (see `binding(for:)`);
+    /// nil for Fn, which has no left/right sibling.
+    private let hotkeyDeviceFlag: CGEventFlags?
     private let sink: @Sendable (HotkeyTapEvent) -> Void
 
     private var eventTap: CFMachPort?
@@ -203,10 +220,12 @@ private final class HotkeyTapMachine: @unchecked Sendable {
     init(
         hotkeyKeyCode: Int64,
         hotkeyFlag: CGEventFlags,
+        hotkeyDeviceFlag: CGEventFlags?,
         sink: @escaping @Sendable (HotkeyTapEvent) -> Void
     ) {
         self.hotkeyKeyCode = hotkeyKeyCode
         self.hotkeyFlag = hotkeyFlag
+        self.hotkeyDeviceFlag = hotkeyDeviceFlag
         self.sink = sink
     }
 
@@ -256,7 +275,13 @@ private final class HotkeyTapMachine: @unchecked Sendable {
         tapThread.name = "com.vocal.hotkey-tap"
         tapThread.qualityOfService = .userInteractive
         tapThread.start()
-        _ = ready.wait(timeout: .now() + .seconds(2))
+        if ready.wait(timeout: .now() + .seconds(2)) == .timedOut {
+            // The tap thread never came up. Reporting success here would
+            // leave the hotkey silently dead with the caller's retry loop
+            // stopped; tear down and let the caller keep retrying.
+            stopTap()
+            return false
+        }
         thread = tapThread
         return true
     }
@@ -324,7 +349,19 @@ private final class HotkeyTapMachine: @unchecked Sendable {
         guard keyCode == hotkeyKeyCode else {
             return
         }
-        if event.flags.contains(hotkeyFlag) {
+        // Direction must be read per-key: with both ⌘ (or ⌥) keys held,
+        // releasing the right one still leaves the class mask set for the
+        // left sibling, which a bare contains(hotkeyFlag) misreads as a
+        // down-edge — recording would start and never stop (docs/13's
+        // "both-keys-held caveat"). The device-specific bit tracks exactly
+        // this physical key.
+        let isDown: Bool
+        if let deviceFlag = hotkeyDeviceFlag {
+            isDown = event.flags.contains(deviceFlag)
+        } else {
+            isDown = event.flags.contains(hotkeyFlag)
+        }
+        if isDown {
             downEdge()
         } else {
             upEdge()
@@ -392,12 +429,14 @@ private final class HotkeyTapMachine: @unchecked Sendable {
             lastShortTapDownTime = nil
             sink(.lockToggled)
         } else {
-            // Short tap: report it as an ended press so SessionKit's FR-1.5
-            // heuristic decides (a sub-500 ms take WITH speech transcribes;
-            // without speech it discards silently — docs/03 §3.1). Routing it
-            // to cancel would make the has-speech override a dead path.
+            // Short tap: reported as `.shortTap` so the caller ends the take
+            // provisionally — SessionKit's FR-1.5 heuristic still decides
+            // (a sub-500 ms take WITH speech transcribes; without speech it
+            // discards silently — docs/03 §3.1), but delivery waits out the
+            // double-tap window so the first tap of a lock gesture can never
+            // paste text before the second tap locks.
             lastShortTapDownTime = pressStartTime
-            sink(.pressEnded)
+            sink(.shortTap)
         }
     }
 }
