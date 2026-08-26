@@ -269,15 +269,13 @@ private struct HistoryPrivacyPane: View {
 
     var body: some View {
         Form {
+            // Truth pass (docs/14 W16): audio is not retained yet (G9), so no
+            // picker pretends otherwise. The retention choice returns with
+            // audio history in Phase 5.
             Section("Audio recordings") {
-                // -1 = keep forever, 0 = never keep (SettingsStore contract).
-                Picker("Keep audio", selection: $settings.audioRetentionDays) {
-                    Text("Never").tag(0)
-                    Text("1 day").tag(1)
-                    Text("7 days").tag(7)
-                    Text("30 days").tag(30)
-                    Text("Forever").tag(-1)
-                }
+                Text("Take audio is kept only until the text is delivered, then discarded. Retention options arrive together with audio history.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("History") {
                 Button("Delete All History…", role: .destructive) {

@@ -44,18 +44,13 @@ struct IOSSettingsView: View {
                     }
                 }
 
-                Section {
-                    Toggle("AI cleanup", isOn: appState.binding(\.cleanupMasterSwitch))
-                    TextField(
-                        "Style prompt (applies when cleanup is on)",
-                        text: appState.binding(\.stylePrompt),
-                        axis: .vertical
-                    )
-                    .lineLimit(2...4)
-                } header: {
-                    Text("Cleanup")
-                } footer: {
-                    Text("Off by default. On iPhone, cleanup uses Apple's on-device model when available; the raw transcript is always kept in History.")
+                // Truth pass (docs/14 W16): no cleanup provider is wired on
+                // iPhone yet, so no toggle pretends otherwise. The section
+                // returns when the on-device provider lands.
+                Section("Cleanup") {
+                    Text("AI cleanup is not available on iPhone yet — transcripts are delivered as recognized. It arrives with Apple's on-device model in a later update.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Delivery") {

@@ -4,8 +4,10 @@ A personal, fully-offline voice-to-text dictation system for macOS and iPhone, i
 Wispr Flow. Hold a hotkey anywhere, speak in English or Chinese, release — polished text lands
 in whatever app has focus. All speech recognition and AI cleanup runs on-device.
 
-**Status: planning.** This repository currently contains the product requirements and
-technical plan. Implementation milestones are defined in [`docs/06-roadmap.md`](docs/06-roadmap.md).
+**Status: shipped and daily-driven.** v0.1.1 dictates daily on two Macs; the iOS app
+builds in CI. See [`docs/12-next-steps.md`](docs/12-next-steps.md) for current state and
+[`docs/14-deep-review-and-improvement-plan.md`](docs/14-deep-review-and-improvement-plan.md)
+for the active improvement plan (Phases 0–1 are implemented on this branch).
 
 ## Core loop
 

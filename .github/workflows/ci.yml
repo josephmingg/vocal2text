@@ -16,6 +16,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The lint gate docs/03 always claimed: SwiftLint with the repo config.
+  # Error-severity rules (force_cast / force_try) fail the job; everything
+  # else reports as annotations. Runs in the Swift container because
+  # SwiftLint's Linux build needs the toolchain's sourcekit.
+  lint:
+    name: Lint — SwiftLint
+    runs-on: ubuntu-latest
+    container: swift:6.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SwiftLint
+        run: |
+          apt-get update -qq && apt-get install -y -qq curl unzip
+          curl -sSL -o /tmp/swiftlint.zip \
+            https://github.com/realm/SwiftLint/releases/download/0.59.1/swiftlint_linux.zip
+          unzip -q /tmp/swiftlint.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/swiftlint
+      - name: Lint
+        run: swiftlint lint --reporter github-actions-logging
+
   # Fast + cheap: pure-logic targets on Linux. Apple-only targets compile to
   # guarded stubs here, so this job proves the whole package parses and the
   # text pipeline / cleanup / profile / session logic passes its tests.

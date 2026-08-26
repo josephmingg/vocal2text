@@ -79,7 +79,7 @@ public final class Diagnostics: @unchecked Sendable {
     public func snapshot() -> [(counter: Counter, count: Int)] {
         lock.lock()
         defer { lock.unlock() }
-        return Counter.allCases.map { ($0, counts[$0] ?? 0) }
+        return Counter.allCases.map { (counter: $0, count: counts[$0] ?? 0) }
     }
 
     public func reset() {
