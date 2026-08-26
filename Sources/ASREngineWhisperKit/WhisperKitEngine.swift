@@ -149,6 +149,24 @@ public actor WhisperKitEngine: TranscriptionEngine {
         options.logProbThreshold = -1.0
         options.noSpeechThreshold = 0.6
         options.usePrefillPrompt = false
+        // docs/15 step 24 (the docs/04 M3 experiment, shipped): dictionary
+        // terms ride in as Whisper's initial prompt, so the model *hears*
+        // "Kubernetes" instead of stage 2 correcting it after the fact.
+        // Prompt biasing requires the prefill path; WhisperKit only reads
+        // promptTokens when usePrefillPrompt is on, and its language-detect
+        // loop re-prefills after detection, so auto mode keeps working. The
+        // prompt is only attached when terms exist — term-less takes keep the
+        // prefill-free anti-hallucination shape above. Accuracy is measured
+        // with vocal-bench planted-term fixtures, per the plan.
+        if !dictionaryTerms.isEmpty, let tokenizer = pipe.tokenizer {
+            let prompt = " " + dictionaryTerms.joined(separator: ", ")
+            let tokens = tokenizer.encode(text: prompt)
+                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+            if !tokens.isEmpty {
+                options.promptTokens = tokens
+                options.usePrefillPrompt = true
+            }
+        }
 
         let results = try await pipe.transcribe(audioArray: audio.samples, decodeOptions: options)
         let text = results.map(\.text).joined(separator: " ")
