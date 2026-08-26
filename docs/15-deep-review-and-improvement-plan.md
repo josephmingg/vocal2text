@@ -316,6 +316,81 @@ by the Phase 0 harness. The 2026 recipe used by the fastest local apps:
 
 ---
 
+## Part 2b — Adopted from the second review (2026-08-27, "Release to Text")
+
+A second, independent review of the same v1.1 codebase (run locally, full read of
+Sources/ + MacApp + docs at `f669569`) converged with Parts 1–2 on most findings —
+streaming decode as the one change that matters, model preload, VAD, AX insertion,
+context-aware cleanup, the learning loop. Where it went further, the following items
+are adopted into the phases below. Its framing is worth keeping verbatim: *ASR decode
+is ~85% of the release-to-text wait; delivery, cleanup, and the text pipeline could
+all be made infinitely fast and the app would still feel slow.*
+
+**Upgrades to existing steps:**
+
+- **Step 22 (streaming preview) is upgraded from display-only to commit-the-prefix.**
+  Stream during the utterance, *commit* the stable prefix as it settles, and run the
+  final accuracy pass over the unfinalized tail only. This converts streaming from a
+  perceived-speed feature into most of the real ~10× win (their model: ~3,000 ms →
+  ~355 ms for a 15 s take). The stability threshold is the accuracy dial; the WER
+  harness (already built) arbitrates. Speculative cleanup then runs on the committed
+  prefix while the user is still talking (upgrades step 20).
+- **Step 16 (VAD): use the Silero VAD that already ships inside the sherpa-onnx
+  dependency** (pulled in for the Burmese engine) — wiring, not a new dependency.
+- **Step 17 (paste) is superseded by AX-first insertion:** Accessibility-API insertion
+  as tier 0 (no clipboard round-trip, no sleeps), paste as fallback — and an AX read
+  of the focused element after insertion is the success signal the docs said didn't
+  exist, so the ladder can finally descend on failure. This demotes the hand-maintained
+  Electron bundle-ID list from correctness requirement to optimization.
+- **Step 19 (cleanup transport): prewarm with the real system prompt, not `"hi"`.**
+  The ~700-token system prompt is byte-identical on every take; prewarming it puts the
+  reusable prefix in the server's KV cache. Also send `keep_alive` explicitly and drop
+  the `isAvailable()` HTTP round-trip from the press path.
+- **Step 20 (fast cleanup): the skip heuristic is deterministic**, not length-based —
+  no fillers, no correction cues, punctuation already sane → skip the LLM; guard the
+  heuristic with the existing cleanup eval. Revisit the 7B model only after cleanup is
+  off the serial path (their "don't do" list is right: model-shopping before Phase 2/3
+  is premature).
+- **Step 28 (re-paste/retry) sharpened into undo:** one shortcut that replaces the last
+  insertion with the stage-2 raw text or removes it entirely — the safety net that
+  makes aggressive cleanup acceptable. Ship before command mode.
+- **Step 27 (auto-learned vocabulary) gains a concrete mechanism:** detect the
+  "dictate → immediately re-dictate a fix" pattern, diff the two takes, propose the
+  dictionary entry. Always propose, never auto-apply.
+
+**New steps (adopted wholesale):**
+
+47. **[S] `make bench-latency` from live history.** The fixture harness measures
+    fixtures; this reads `TimingBreakdown` back out of the transcript table and prints
+    p50/p95/p99 per stage bucketed by utterance length — real daily-driving numbers
+    for free. Add the two marks the breakdown is missing: press→mic-open and
+    release→text-visible (the two numbers the user actually feels).
+48. **[S] Dictionary cache in memory, invalidated on edit** — removes a synchronous
+    SQLite read from every take's critical path for data that changes monthly.
+49. **[S] Fire archive + history write after idle** — neither affects delivered text;
+    today both are awaited inside the pipeline before the session settles.
+50. **[M] Pre-create the audio engine; hoist capture-start I/O.** Everything between
+    key-down and mic-open (disk stat, sidecar file create, FileHandle open) is speech
+    the user already spoke. Keep a prepared AVAudioEngine; cache the free-space check.
+51. **[M] Deterministic number/date/unit formatting in stages 1/4** — "twenty twenty
+    six" → "2026", "three thirty pm" → "3:30 pm". Faster and more reliable than the
+    3B model, and removes a class of cleanup-eval failures.
+52. **[M] Gate CI on the cleanup eval's pass rate** — the 139-check eval runs by hand
+    today; a prompt or validator regression should fail a PR, not a vibe check.
+53. **[S] Fix G6** — whitespace loss in the repeated-token collapse destroys paragraph
+    breaks in exactly the long imports where they matter.
+54. **[M] Usage dashboard** (words, WPM, streaks, hours saved) on data already stored;
+    natural home for the latency percentiles. Personal-tool priority call — skip it if
+    Vocal stays single-user.
+
+**Four decisions the owner must make** (verbatim from the second review, still open):
+(1) macOS 26 as a floor? — the two biggest free wins (Apple Speech streaming engine,
+FoundationModels cleanup) both require it, and the app ships with a macOS 14 minimum;
+(2) how much WER is acceptable for the 10× streaming win? — sets the prefix-commit
+threshold; (3) does cleanup stay off by default? — if yes, Phases 3–4 reorder behind
+Phase 2; (4) personal tool or shipped product? — decides the dashboard's and the
+notarization work's priority.
+
 ## Part 3 — What "done" looks like
 
 Measured by the Phase 0 harness, on the owner's Mac:
