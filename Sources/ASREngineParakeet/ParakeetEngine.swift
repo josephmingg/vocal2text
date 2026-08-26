@@ -23,13 +23,19 @@ public actor ParakeetEngine: TranscriptionEngine {
     static let approximateDownloadBytes: Int64 = 600_000_000
 
     // AsrManager is a non-Sendable class whose work methods are async, so
-    // actor isolation alone cannot express its confinement (awaiting them
-    // would "send" it). `unsafe` records the actual discipline: the manager
+    // plain actor storage cannot call them: awaiting `transcribe` would send
+    // a self-isolated value into a nonisolated method, which Swift 6 rejects.
+    // The box smuggles it across that boundary — the standard unchecked-
+    // Sendable escape hatch — and records the actual discipline: the manager
     // is created once behind the load-coalescing gate below and only touched
-    // from this actor's methods; take-level serialization comes from the
+    // through this actor's methods; take-level serialization comes from the
     // session's chained pipeline, the same contract WhisperKitEngine relies
     // on.
-    private nonisolated(unsafe) var manager: AsrManager?
+    private struct ManagerBox: @unchecked Sendable {
+        let manager: AsrManager
+    }
+
+    private var managerBox: ManagerBox?
     private var isLoading = false
     private var loadWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -39,7 +45,7 @@ public actor ParakeetEngine: TranscriptionEngine {
         guard language == .english else {
             return .unsupported(reason: "Parakeet v2 is English-only; other languages use their own engines")
         }
-        if manager != nil { return .ready }
+        if managerBox != nil { return .ready }
         let cache = AsrModels.defaultCacheDirectory(for: .v2)
         return AsrModels.modelsExist(at: cache, version: .v2)
             ? .ready
@@ -47,23 +53,23 @@ public actor ParakeetEngine: TranscriptionEngine {
     }
 
     public func prepare(languageMode: LanguageMode) async throws {
-        _ = try await loadedManager()
+        _ = try await loadedManagerBox()
     }
 
     /// True once the models are resident — the first-run HUD hint reads this,
     /// mirroring the other engines.
-    public var isModelLoaded: Bool { manager != nil }
+    public var isModelLoaded: Bool { managerBox != nil }
 
     public func transcribe(
         _ audio: PCMChunk,
         languageMode: LanguageMode,
         dictionaryTerms: [String]
     ) async throws -> ASRKit.TranscriptionResult {
-        let manager = try await loadedManager()
+        let box = try await loadedManagerBox()
         try Task.checkCancellation()
         let result: ASRResult
         do {
-            result = try await manager.transcribe(audio.samples, source: .microphone)
+            result = try await box.manager.transcribe(audio.samples, source: .microphone)
         } catch {
             throw TranscriptionError.engineUnavailable(String(describing: error))
         }
@@ -115,16 +121,16 @@ public actor ParakeetEngine: TranscriptionEngine {
     }
 
     public func unload() async {
-        manager = nil
+        managerBox = nil
     }
 
     // MARK: - Loading
 
-    private func loadedManager() async throws -> AsrManager {
+    private func loadedManagerBox() async throws -> ManagerBox {
         while isLoading {
             await withCheckedContinuation { loadWaiters.append($0) }
         }
-        if let manager { return manager }
+        if let managerBox { return managerBox }
         isLoading = true
         defer {
             isLoading = false
@@ -140,8 +146,9 @@ public actor ParakeetEngine: TranscriptionEngine {
             let loaded = AsrManager(config: .default)
             try await loaded.initialize(models: models)
             VocalLog.engine.info("Parakeet TDT v2 ready")
-            manager = loaded
-            return loaded
+            let box = ManagerBox(manager: loaded)
+            managerBox = box
+            return box
         } catch {
             VocalLog.engine.error(
                 "Parakeet model load failed: \(String(describing: error), privacy: .public)"
