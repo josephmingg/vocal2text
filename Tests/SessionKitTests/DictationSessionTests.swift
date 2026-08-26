@@ -567,6 +567,99 @@ struct DictationSessionTests {
         #expect(cleanupCallCount == 1)
     }
 
+    // MARK: - Streaming preview (docs/15 step 22)
+
+    @Test func streamingPreviewCommitsThePrefixAcrossHypotheses() async throws {
+        // The preview loop consumes the live chunk stream, re-decodes once at
+        // least a second of new audio exists, and displays a prefix-committed
+        // line — while the take's own batch path stays untouched.
+        let feed = ChunkFeed()
+        let partials = LockedStrings()
+        let script = ScriptedHypotheses(["hello there", "hello there friend"])
+
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: StreamingAudioCapturing(
+                    finishChunk: PCMChunk(
+                        samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)
+                    ),
+                    feed: feed
+                ),
+                engine: FakeTranscriptionEngine(
+                    result: TranscriptionResult(
+                        text: "hello there friend", detectedLanguage: .english
+                    )
+                ),
+                previewTranscribe: { _ in await script.next() },
+                onPartial: { partials.append($0) },
+                previewInterval: .milliseconds(10),
+                deliverer: deliverer,
+                store: store,
+                config: StaticConfig(),
+                profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        let second = PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate))
+        await feed.push(second)
+        try await waitUntil("first partial") { partials.snapshot().count >= 1 }
+        await feed.push(second)
+        try await waitUntil("second partial") { partials.snapshot().count >= 2 }
+
+        await session.pressEnded()
+        if let task = await session.pipelineTask { await task.value }
+        if let task = await session.persistenceTask { await task.value }
+
+        let seen = partials.snapshot()
+        // First hypothesis: nothing agreed yet, all tail. Second: the shared
+        // prefix committed, the new word rides as tail.
+        #expect(seen.first == "hello there")
+        #expect(seen.contains("hello there friend"))
+        // The batch path delivered normally, independent of the preview.
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered == ["Hello there friend."])
+    }
+
+    @Test func previewStopsWhenCaptureEnds() async throws {
+        let feed = ChunkFeed()
+        let partials = LockedStrings()
+        let script = ScriptedHypotheses(["hello"])
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: StreamingAudioCapturing(
+                    finishChunk: PCMChunk(
+                        samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)
+                    ),
+                    feed: feed
+                ),
+                engine: FakeTranscriptionEngine(
+                    result: TranscriptionResult(text: "hello", detectedLanguage: .english)
+                ),
+                previewTranscribe: { _ in await script.next() },
+                onPartial: { partials.append($0) },
+                previewInterval: .milliseconds(10),
+                deliverer: RecordingTextDeliverer(),
+                store: InMemoryStore(),
+                config: StaticConfig(),
+                profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        await session.pressEnded()
+        if let task = await session.pipelineTask { await task.value }
+        // Push audio after the take ended: the loop is cancelled, so no
+        // partial may surface for it.
+        await feed.push(PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate)))
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(partials.snapshot().isEmpty)
+    }
+
     // MARK: - VAD gate + trim (docs/15 step 16)
 
     @Test func aSilentTakeDeliversAndSavesNothing() async throws {

@@ -152,10 +152,11 @@ private struct ModelsPane: View {
                 Text(
                     """
                     Parakeet TDT runs on the Neural Engine at roughly 100× \
-                    real time — the docs/15 raw-speed lever. Applies to the \
-                    next dictation with the language pinned to English; Auto, \
-                    中文, and မြန်မာ keep their engines. First use downloads \
-                    ~600 MB (FluidAudio manages its own files).
+                    real time — the docs/15 raw-speed lever — and enables the \
+                    live text preview in the HUD while you speak. Applies to \
+                    the next dictation with the language pinned to English; \
+                    Auto, 中文, and မြန်မာ keep their engines. First use \
+                    downloads ~600 MB (FluidAudio manages its own files).
                     """
                 )
                 .font(.caption)

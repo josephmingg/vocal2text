@@ -202,6 +202,30 @@ final class AppState: ObservableObject {
             analyzeSpeech: { audio in
                 await speechDetector.analyze(audio)
             },
+            // Streaming preview (docs/15 step 22), display-only per FR-4.1.
+            // Gated to the Parakeet route on purpose: its decode is fast
+            // enough that a release landing mid-preview waits a fraction of a
+            // second on the engine actor at worst, where Whisper's
+            // multi-second decode would hold the final pass hostage — the
+            // exact latency Phase 2 removed.
+            previewTranscribe: { audio in
+                let eligible = await MainActor.run {
+                    settings.parakeetEnglishEnabled
+                        && settings.languageMode == .pinned(.english)
+                }
+                guard eligible else { return nil }
+                // Never trigger the ~600 MB download from a preview tick; the
+                // preload and the take's own path own that moment.
+                guard await parakeetEngine.isModelLoaded else { return nil }
+                return try? await parakeetEngine.transcribe(
+                    audio, languageMode: .pinned(.english), dictionaryTerms: []
+                ).text
+            },
+            onPartial: { text in
+                Task { @MainActor in
+                    relay.notePartial(text)
+                }
+            },
             prewarmCleanup: {
                 // Fired at press (docs/03 §2); skip the network touch entirely
                 // while the master switch is off. No availability preflight:
@@ -377,6 +401,18 @@ final class AppState: ObservableObject {
             levels.removeFirst(levels.count - WaveformView.barCount)
         }
         hudState.levels = levels
+    }
+
+    /// Streaming-preview line for the HUD's partial row (docs/15 step 22).
+    /// Only while a take is visibly live: a preview that raced the take's end
+    /// must not resurrect text over an idle or error state.
+    func showPreview(_ text: String) {
+        switch hudState.mode {
+        case .listening, .processing:
+            hudState.partialText = text
+        case .hidden, .error, .notice:
+            break
+        }
     }
 
     /// The FR-1.3 mid-take low-disk guard fired: end the take normally and
@@ -862,6 +898,10 @@ private final class ResolutionRelay {
 
     func noteResolved(profileName: String) {
         appState?.hudState.profileName = profileName
+    }
+
+    func notePartial(_ text: String) {
+        appState?.showPreview(text)
     }
 
     func noteDelivery(_ outcome: DeliveryOutcome) {

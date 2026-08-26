@@ -533,11 +533,14 @@ public actor MicrophoneCapture {
             .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32")
 
         let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: [Float].self)
-        // The live-chunk stream is observation-only (future partials/VAD); the
-        // take itself is `accumulated`. Cap the buffer so an unconsumed stream
-        // (today's shipping shape) never retains the whole take a second time.
+        // The live-chunk stream feeds the streaming preview (docs/15 step 22);
+        // the take itself is `accumulated`. The buffer is bounded so an
+        // unconsumed stream never retains the whole take a second time, but
+        // deep enough (~5 s at ~12 chunks/s) that the preview's reader — which
+        // drains promptly but shares an actor with decodes — never drops audio
+        // out of its window in practice.
         let (chunkStream, chunkContinuation) = AsyncStream.makeStream(
-            of: PCMChunk.self, bufferingPolicy: .bufferingNewest(1)
+            of: PCMChunk.self, bufferingPolicy: .bufferingNewest(64)
         )
 
         self.engine = engine

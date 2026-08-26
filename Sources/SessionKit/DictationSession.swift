@@ -74,6 +74,13 @@ public actor DictationSession {
     /// never cost the user the transcript.
     public typealias AudioArchiving = @Sendable (PCMChunk, UUID) async -> String?
 
+    /// Produces the current hypothesis for the audio captured so far (docs/15
+    /// step 22 streaming preview), or nil when preview is unavailable for the
+    /// current configuration (engine not loaded, route not preview-capable).
+    /// Called serially, at most one in flight; must be cheap enough that a
+    /// release landing mid-call waits a fraction of a second at worst.
+    public typealias PreviewTranscribing = @Sendable (PCMChunk) async -> String?
+
     /// Locates the speech inside a finished take (docs/15 step 16, FR-1.5):
     /// returns the padded sample range worth transcribing, or nil when the
     /// take contains no speech at all — the session then delivers nothing
@@ -92,6 +99,13 @@ public actor DictationSession {
         public var archiveAudio: AudioArchiving?
         /// VAD gate + trim (docs/15 step 16); nil transcribes the whole take.
         public var analyzeSpeech: SpeechAnalyzing?
+        /// Streaming preview decode (docs/15 step 22); nil disables preview.
+        public var previewTranscribe: PreviewTranscribing?
+        /// Receives the prefix-committed preview line for display (FR-4.1:
+        /// display-only — the batch pass stays the correctness path).
+        public var onPartial: (@Sendable (String) -> Void)?
+        /// Cadence of the preview decode loop; tests shorten it.
+        public var previewInterval: Duration
         /// Fired fire-and-forget at hotkey press so the model is hot at
         /// release (docs/03 §2). Wire to `CleanupProvider.prewarm`; defaults
         /// to a no-op.
@@ -120,6 +134,9 @@ public actor DictationSession {
             cleanupProviderID: CleanupProviderID = .openAICompatible(name: "unconfigured"),
             archiveAudio: AudioArchiving? = nil,
             analyzeSpeech: SpeechAnalyzing? = nil,
+            previewTranscribe: PreviewTranscribing? = nil,
+            onPartial: (@Sendable (String) -> Void)? = nil,
+            previewInterval: Duration = .milliseconds(400),
             prewarmCleanup: @escaping @Sendable () async -> Void = {},
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
@@ -139,6 +156,9 @@ public actor DictationSession {
                 },
                 archiveAudio: archiveAudio,
                 analyzeSpeech: analyzeSpeech,
+                previewTranscribe: previewTranscribe,
+                onPartial: onPartial,
+                previewInterval: previewInterval,
                 prewarmCleanup: prewarmCleanup,
                 deliverer: deliverer,
                 store: store,
@@ -154,6 +174,9 @@ public actor DictationSession {
             selectCleanup: @escaping CleanupSelecting,
             archiveAudio: AudioArchiving? = nil,
             analyzeSpeech: SpeechAnalyzing? = nil,
+            previewTranscribe: PreviewTranscribing? = nil,
+            onPartial: (@Sendable (String) -> Void)? = nil,
+            previewInterval: Duration = .milliseconds(400),
             prewarmCleanup: @escaping @Sendable () async -> Void = {},
             deliverer: any TextDelivering,
             store: any TranscriptStoring,
@@ -170,6 +193,9 @@ public actor DictationSession {
             self.selectCleanup = selectCleanup
             self.archiveAudio = archiveAudio
             self.analyzeSpeech = analyzeSpeech
+            self.previewTranscribe = previewTranscribe
+            self.onPartial = onPartial
+            self.previewInterval = previewInterval
             self.prewarmCleanup = prewarmCleanup
             self.deliverer = deliverer
             self.store = store
@@ -248,6 +274,10 @@ public actor DictationSession {
     /// The fire-and-forget prewarm task from the latest press; kept so tests
     /// can await its completion deterministically.
     private(set) var prewarmTask: Task<Void, Never>?
+    /// The live streaming-preview loop for the current capture (docs/15
+    /// step 22); cancelled the moment capture ends, so a preview decode can
+    /// never outlive its take.
+    private var previewTask: Task<Void, Never>?
     /// The chained processing pipeline for the most recent released take.
     /// Awaiting it drains every queued pipeline (each chains on the previous);
     /// kept so tests — and any caller that must observe delivery — can wait
@@ -360,6 +390,7 @@ public actor DictationSession {
                 capture: capture,
                 pressedAt: pressedAt
             )
+            startPreview(chunks: capture.chunks)
             transition(to: .recording(startedAt: pressedAt))
             // A release or Escape that arrived while we were suspended in
             // profile resolution / audio start (the .arming window) must not
@@ -440,10 +471,68 @@ public actor DictationSession {
         }
         guard case .recording = phaseValue, let active = take else { return }
         take = nil
+        stopPreview()
         active.resolution.cancel()
         await active.capture.cancel()
         transition(to: .cancelled)
         settleAfterCaptureEnd()
+    }
+
+    // MARK: - Streaming preview (docs/15 step 22)
+
+    /// Consumes the live chunk stream and periodically re-transcribes the
+    /// audio captured so far, pushing a prefix-committed line to `onPartial`.
+    /// Display-only per FR-4.1: nothing here touches the take's audio path or
+    /// the batch pass that produces the delivered text.
+    ///
+    /// Two children: a reader that drains the stream promptly (the capture
+    /// layer's buffer is bounded, so a slow consumer would drop chunks) into
+    /// a private accumulator, and a decoder that wakes on `previewInterval`,
+    /// re-decodes once at least a second of new audio exists, and commits
+    /// the stable prefix so the display never flickers.
+    private func startPreview(chunks: AsyncStream<PCMChunk>) {
+        guard let preview = deps.previewTranscribe, let onPartial = deps.onPartial else { return }
+        let interval = deps.previewInterval
+        previewTask = Task {
+            let buffer = PreviewSampleBuffer()
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    for await chunk in chunks {
+                        await buffer.append(chunk.samples)
+                    }
+                }
+                group.addTask {
+                    var committer = PrefixCommitter()
+                    var decodedSampleCount = 0
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: interval)
+                        if Task.isCancelled { break }
+                        let samples = await buffer.snapshot()
+                        guard samples.count - decodedSampleCount >= PCMChunk.sampleRate else {
+                            continue
+                        }
+                        decodedSampleCount = samples.count
+                        guard
+                            let hypothesis = await preview(PCMChunk(samples: samples)),
+                            !Task.isCancelled
+                        else { continue }
+                        let line = committer.ingest(hypothesis)
+                        if !line.isEmpty {
+                            onPartial(line)
+                        }
+                    }
+                }
+                // The reader ends when capture finishes, the decoder on
+                // cancellation; whichever ends first releases the other.
+                await group.next()
+                group.cancelAll()
+            }
+        }
+    }
+
+    private func stopPreview() {
+        previewTask?.cancel()
+        previewTask = nil
     }
 
     // MARK: - Release pipeline
@@ -461,6 +550,7 @@ public actor DictationSession {
     ) async {
         guard case .recording(let startedAt) = phaseValue, let active = take else { return }
         take = nil
+        stopPreview()
         transition(to: .transcribing)
 
         let held = heldDurationOverride ?? startedAt.duration(to: clock.now)
@@ -814,5 +904,20 @@ public actor DictationSession {
     private static func seconds(_ duration: Duration) -> Double {
         let components = duration.components
         return Double(components.seconds) + Double(components.attoseconds) / 1e18
+    }
+}
+
+/// Accumulates the live capture for the preview decoder (docs/15 step 22).
+/// Deliberately separate from the capture layer's own accumulation: the
+/// preview must never touch the take's authoritative audio path.
+private actor PreviewSampleBuffer {
+    private var samples: [Float] = []
+
+    func append(_ newSamples: [Float]) {
+        samples.append(contentsOf: newSamples)
+    }
+
+    func snapshot() -> [Float] {
+        samples
     }
 }
