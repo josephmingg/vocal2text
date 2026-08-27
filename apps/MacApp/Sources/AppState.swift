@@ -435,6 +435,45 @@ final class AppState: ObservableObject {
             levels.removeFirst(levels.count - WaveformView.barCount)
         }
         hudState.levels = levels
+        feedAutoStopGate(level)
+    }
+
+    // MARK: - Hands-free auto-stop on trailing silence (docs/15 step 22 follow-up)
+
+    private var autoStopGate: TrailingSilenceGate?
+    private var autoStopEpoch: ContinuousClock.Instant?
+    private var pendingAutoStopNotice = false
+
+    /// AppDelegate reports lock-mode transitions so the gate exists exactly
+    /// while a hands-free take runs. Off (0 s) means no gate at all — the
+    /// level path stays a plain waveform feed.
+    func handsFreeLockChanged(active: Bool) {
+        guard active, settings.autoStopSilenceSeconds > 0 else {
+            autoStopGate = nil
+            autoStopEpoch = nil
+            return
+        }
+        autoStopGate = TrailingSilenceGate(
+            holdSeconds: Double(settings.autoStopSilenceSeconds)
+        )
+        autoStopEpoch = ContinuousClock.now
+    }
+
+    private func feedAutoStopGate(_ level: Float) {
+        guard let epoch = autoStopEpoch, case .listening = hudState.mode else { return }
+        let seconds = Self.seconds(epoch.duration(to: ContinuousClock.now))
+        guard autoStopGate?.ingest(level: level, at: seconds) == true else { return }
+        autoStopGate = nil
+        autoStopEpoch = nil
+        pendingAutoStopNotice = true
+        // Same forced-stop path as the mid-take guards: lock bookkeeping is
+        // cleared and the truthful isLockMode reaches the deliverer.
+        stopDictation(isLockMode: endLockModeForForcedStop?() ?? true)
+    }
+
+    private static func seconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) / 1e18
     }
 
     /// Streaming-preview line for the HUD's partial row (docs/15 step 22).
@@ -942,6 +981,7 @@ final class AppState: ObservableObject {
             // A device change queued its notice for a take the user then
             // cancelled — the flag must not survive to caption the next take.
             pendingDeviceChangeNotice = false
+            pendingAutoStopNotice = false
             hudState.mode = .hidden
             hudState.partialText = ""
             hudState.levels = []
@@ -960,6 +1000,7 @@ final class AppState: ObservableObject {
             if let error = await session.lastError {
                 pendingLowDiskNotice = false
                 pendingDeviceChangeNotice = false
+                pendingAutoStopNotice = false
                 DeliverySounds.playError(enabled: settings.soundsEnabled)
                 hudState.mode = .error(Self.message(for: error))
                 scheduleErrorDismiss()
@@ -975,6 +1016,10 @@ final class AppState: ObservableObject {
             } else if case .notice = hudState.mode {
                 // A delivery notice (clipboard fallback / secure block) is
                 // already showing; let its own dismiss timer run.
+                pendingAutoStopNotice = false
+            } else if pendingAutoStopNotice {
+                pendingAutoStopNotice = false
+                showNotice("Stopped after silence — take delivered")
             } else if settings.showTimingsToast, let timings = await session.lastTimings {
                 // FR-11.4 opt-in: show where the time went after each take.
                 showNotice(Self.timingsSummary(timings))

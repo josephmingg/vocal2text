@@ -76,6 +76,15 @@ private struct GeneralPane: View {
                     Text("30 minutes").tag(30)
                     Text("60 minutes").tag(60)
                 }
+                // The step 22 follow-up: end a hands-free take when the
+                // speaker has clearly stopped, not only at the hard cap.
+                Picker("Hands-free stop on silence", selection: $settings.autoStopSilenceSeconds) {
+                    Text("Off").tag(0)
+                    Text("2 seconds").tag(2)
+                    Text("3 seconds").tag(3)
+                    Text("5 seconds").tag(5)
+                    Text("10 seconds").tag(10)
+                }
             }
         }
         .formStyle(.grouped)
