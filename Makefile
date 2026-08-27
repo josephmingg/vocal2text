@@ -1,6 +1,6 @@
 # Vocal — developer entry points. CI and humans use the same commands.
 
-.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup bench-latency
+.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup bench-latency release
 
 # Latency percentiles from the app's own history (docs/15 step 47) — the
 # numbers you actually felt, per stage, bucketed by utterance length.
@@ -102,3 +102,9 @@ reset-tcc:
 	tccutil reset Microphone com.vocal.mac || true
 	tccutil reset Accessibility com.vocal.mac.dev || true
 	tccutil reset Microphone com.vocal.mac.dev || true
+
+# Signed, notarized, stapled release zip (docs/15 step 39). Needs the Apple
+# Developer enrollment: see the header of scripts/release.sh for the two
+# environment variables it requires.
+release:
+	scripts/release.sh
