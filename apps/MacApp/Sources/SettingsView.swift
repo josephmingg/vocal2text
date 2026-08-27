@@ -86,6 +86,14 @@ private struct GeneralPane: View {
                     Text("10 seconds").tag(10)
                 }
             }
+            Section("Setup") {
+                // docs/15 step 40: permissions and the key can rot after a
+                // macOS update or TCC reset — the assistant is re-runnable,
+                // with its final page doubling as the health check.
+                Button("Run Setup Assistant Again…") {
+                    WindowManager.shared.showOnboarding(appState: appState)
+                }
+            }
         }
         .formStyle(.grouped)
         .onAppear {

@@ -91,7 +91,7 @@ struct OnboardingView: View {
         case .hotkey: HotkeyStep(appState: appState)
         case .fnSetup: FnSetupStep()
         case .modelDownload: ModelDownloadStep(appState: appState)
-        case .done: DoneStep(hotkeyLabel: appState.settings.hotkeySpec.label)
+        case .done: DoneStep(appState: appState)
         }
     }
 
@@ -346,9 +346,11 @@ private struct ModelDownloadStep: View {
 
 @MainActor
 private struct DoneStep: View {
-    /// Named, not "your dictation key" — the key is customizable now, and this
-    /// is the last screen before the user has to actually press it.
-    let hotkeyLabel: String
+    let appState: AppState
+    @State private var microphoneGranted = false
+    @State private var accessibilityGranted = false
+    // The grants can flip in System Settings while this page is up.
+    private let recheck = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -357,13 +359,51 @@ private struct DoneStep: View {
                 .bold()
             Text(
                 """
-                Hold **\(hotkeyLabel)**, speak, release. Double-tap it for \
-                hands-free lock; press Escape while recording to cancel. \
-                You can change the key any time in Settings → General.
+                Hold **\(appState.settings.hotkeySpec.label)**, speak, release. \
+                Double-tap it for hands-free lock; press Escape while recording \
+                to cancel. You can change the key any time in Settings → General.
                 """
             )
+            // docs/15 step 40: the health summary — anything still red is
+            // visible *before* the window closes, not discovered as a silent
+            // first-dictation failure.
+            GroupBox {
+                VStack(alignment: .leading, spacing: 6) {
+                    healthRow("Microphone", ok: microphoneGranted)
+                    healthRow("Accessibility (hotkey + insertion)", ok: accessibilityGranted)
+                    healthRow("Dictation key armed", ok: appState.hotkeyArmed)
+                    healthRow(
+                        "Speech model downloaded",
+                        ok: appState.settings.modelWarmedOnce,
+                        pendingLabel: "downloads on first dictation"
+                    )
+                }
+                .padding(4)
+            }
             Text("Everything else lives in the menu-bar icon.")
                 .foregroundStyle(.secondary)
         }
+        .onAppear { refresh() }
+        .onReceive(recheck) { _ in refresh() }
+    }
+
+    private func refresh() {
+        microphoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        accessibilityGranted = AXIsProcessTrusted()
+    }
+
+    private func healthRow(_ label: String, ok: Bool, pendingLabel: String = "not yet") -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.circle")
+                .foregroundStyle(ok ? .green : .orange)
+            Text(label)
+            Spacer()
+            if !ok {
+                Text(pendingLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.callout)
     }
 }
