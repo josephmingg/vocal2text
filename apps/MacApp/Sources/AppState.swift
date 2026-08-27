@@ -959,6 +959,9 @@ final class AppState: ObservableObject {
     private func handle(phase: DictationSession.Phase, session: DictationSession) async {
         switch phase {
         case .arming:
+            // A press is live again — a scheduled idle unload must not pull
+            // the model out from under it.
+            idleUnloadTask?.cancel()
             hudState.mode = .listening(startedAt: Date())
         case .recording:
             // Keep the arming timestamp: resetting it here visibly restarted
@@ -1028,6 +1031,27 @@ final class AppState: ObservableObject {
             }
             hudState.partialText = ""
             hudState.levels = []
+            scheduleIdleUnload()
+        }
+    }
+
+    // MARK: - Idle model unload (docs/15 step 13, the optional other half)
+
+    private var idleUnloadTask: Task<Void, Never>?
+
+    /// Arms (or re-arms) the idle unload countdown when a take settles.
+    /// Keep-resident (0) is the default — this exists for memory-constrained
+    /// Macs, and the next press simply pays the model load again.
+    private func scheduleIdleUnload() {
+        idleUnloadTask?.cancel()
+        let minutes = settings.idleUnloadMinutes
+        guard minutes > 0 else { return }
+        let engine = routedEngine
+        idleUnloadTask = Task {
+            try? await Task.sleep(for: .seconds(min(24 * 60, max(1, minutes)) * 60))
+            guard !Task.isCancelled else { return }
+            await engine.unload()
+            VocalLog.session.info("idle unload: ASR model released after \(minutes) min")
         }
     }
 

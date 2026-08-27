@@ -161,6 +161,19 @@ private struct ModelsPane: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                // docs/15 step 13's optional other half. Keep-resident stays
+                // the default; unloading trades the next take's speed for RAM.
+                Picker("Release model when idle for", selection: $settings.idleUnloadMinutes) {
+                    Text("Never (keep loaded)").tag(0)
+                    Text("15 minutes").tag(15)
+                    Text("30 minutes").tag(30)
+                    Text("60 minutes").tag(60)
+                }
+                if settings.idleUnloadMinutes > 0 {
+                    Text("The first dictation after an idle stretch will pay the model load again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("English fast path") {
                 Toggle(

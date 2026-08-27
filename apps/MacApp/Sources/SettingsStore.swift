@@ -67,6 +67,14 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(autoStopSilenceSeconds, forKey: Keys.autoStopSilenceSeconds) }
     }
 
+    /// docs/15 step 13's optional other half: unload the ASR model after this
+    /// many idle minutes (0 = keep resident, the default — the whole point of
+    /// preload is that the day's first dictation matches the tenth, so this
+    /// exists only for memory-constrained Macs).
+    @Published var idleUnloadMinutes: Int {
+        didSet { Self.defaults.set(idleUnloadMinutes, forKey: Keys.idleUnloadMinutes) }
+    }
+
     /// Per-bundle-ID insertion strategy overrides (docs/03 §3.2: tier choice is
     /// configuration-driven, not failure-driven). Keys are bundle IDs, values
     /// are strategy names owned by the insertion layer.
@@ -130,6 +138,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         lockCapMinutes = defaults.object(forKey: Keys.lockCapMinutes) as? Int ?? 15
         autoStopSilenceSeconds =
             defaults.object(forKey: Keys.autoStopSilenceSeconds) as? Int ?? 0
+        idleUnloadMinutes = defaults.object(forKey: Keys.idleUnloadMinutes) as? Int ?? 0
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
@@ -227,6 +236,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let showTimingsToast = "settings.showTimingsToast"
         static let lockCapMinutes = "settings.lockCapMinutes"
         static let autoStopSilenceSeconds = "settings.autoStopSilenceSeconds"
+        static let idleUnloadMinutes = "settings.idleUnloadMinutes"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
         static let whisperKitModel = "settings.whisperKitModel"
