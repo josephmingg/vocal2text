@@ -60,6 +60,27 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(lockCapMinutes, forKey: Keys.lockCapMinutes) }
     }
 
+    /// Hands-free auto-stop (the docs/15 step 22 follow-up): a locked take
+    /// ends on its own after this many seconds of trailing silence. 0 = off
+    /// (ships off, like every behavior-changing feature here).
+    @Published var autoStopSilenceSeconds: Int {
+        didSet { Self.defaults.set(autoStopSilenceSeconds, forKey: Keys.autoStopSilenceSeconds) }
+    }
+
+    /// docs/15 step 13's optional other half: unload the ASR model after this
+    /// many idle minutes (0 = keep resident, the default — the whole point of
+    /// preload is that the day's first dictation matches the tenth, so this
+    /// exists only for memory-constrained Macs).
+    @Published var idleUnloadMinutes: Int {
+        didSet { Self.defaults.set(idleUnloadMinutes, forKey: Keys.idleUnloadMinutes) }
+    }
+
+    /// docs/15 step 36 remainder: capture from this device's stable hardware
+    /// UID instead of the system default input. Empty = follow the default.
+    @Published var inputDeviceUID: String {
+        didSet { Self.defaults.set(inputDeviceUID, forKey: Keys.inputDeviceUID) }
+    }
+
     /// Per-bundle-ID insertion strategy overrides (docs/03 §3.2: tier choice is
     /// configuration-driven, not failure-driven). Keys are bundle IDs, values
     /// are strategy names owned by the insertion layer.
@@ -121,6 +142,10 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         soundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
         showTimingsToast = defaults.object(forKey: Keys.showTimingsToast) as? Bool ?? false
         lockCapMinutes = defaults.object(forKey: Keys.lockCapMinutes) as? Int ?? 15
+        autoStopSilenceSeconds =
+            defaults.object(forKey: Keys.autoStopSilenceSeconds) as? Int ?? 0
+        idleUnloadMinutes = defaults.object(forKey: Keys.idleUnloadMinutes) as? Int ?? 0
+        inputDeviceUID = defaults.string(forKey: Keys.inputDeviceUID) ?? ""
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
@@ -217,6 +242,9 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let soundsEnabled = "settings.soundsEnabled"
         static let showTimingsToast = "settings.showTimingsToast"
         static let lockCapMinutes = "settings.lockCapMinutes"
+        static let autoStopSilenceSeconds = "settings.autoStopSilenceSeconds"
+        static let idleUnloadMinutes = "settings.idleUnloadMinutes"
+        static let inputDeviceUID = "settings.inputDeviceUID"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
         static let whisperKitModel = "settings.whisperKitModel"

@@ -246,6 +246,12 @@ public enum DiskSpaceGuard {
 
 #if canImport(AVFoundation)
 import AVFoundation
+#if os(macOS)
+// AudioUnitSetProperty + kAudioOutputUnitProperty_CurrentDevice for the
+// input-device selection below (docs/15 step 36 remainder).
+import AudioToolbox
+import CoreModels
+#endif
 
 /// Platform capability probe: true where AVFoundation-backed capture compiles.
 public enum AudioPipelineInfo {
@@ -438,6 +444,11 @@ public actor MicrophoneCapture {
     /// delivered, not lost to a silently dead tap.
     private var configurationChangeHandler: (@Sendable () -> Void)?
     private var configurationObserver: (any NSObjectProtocol)?
+    /// docs/15 step 36 remainder: capture from this device instead of the
+    /// system default. Stored as the stable hardware UID; nil/empty follows
+    /// the default input like before. A UID that no longer resolves (device
+    /// unplugged) silently falls back to the default — never a failed take.
+    private var preferredInputDeviceUID: String?
     /// An engine built and prepared ahead of the press (docs/15 step 50):
     /// instantiating the input audio unit is the expensive part of capture
     /// start, and every millisecond between key-down and mic-open is speech
@@ -487,6 +498,38 @@ public actor MicrophoneCapture {
         configurationChangeHandler = handler
     }
 
+    /// Selects the capture device for future takes (see
+    /// `preferredInputDeviceUID`); nil or empty returns to the system default.
+    public func setPreferredInputDevice(uid: String?) {
+        preferredInputDeviceUID = (uid?.isEmpty == true) ? nil : uid
+    }
+
+    /// Points the engine's input unit at the preferred device, when one is
+    /// set and connected. Must run before the hardware format is read — the
+    /// format belongs to the device. macOS only: iOS input routing goes
+    /// through the audio session.
+    private func applyPreferredInputDevice(to engine: AVAudioEngine) {
+        #if os(macOS)
+        guard let uid = preferredInputDeviceUID,
+            var deviceID = AudioInputDevices.deviceID(forUID: uid),
+            let unit = engine.inputNode.audioUnit
+        else { return }
+        let status = AudioUnitSetProperty(
+            unit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status != noErr {
+            VocalLog.audio.error(
+                "input device select failed (\(status, privacy: .public)) — using default"
+            )
+        }
+        #endif
+    }
+
     /// Begin capturing. The returned session's `chunks` yields converted audio
     /// as it arrives; call `finish` to stop and receive the concatenated take.
     public func start() async throws -> MicrophoneSession {
@@ -522,10 +565,14 @@ public actor MicrophoneCapture {
         } else {
             engine = AVAudioEngine()
         }
+        // Device selection precedes the format read: the hardware format
+        // belongs to whichever device the input unit points at.
+        applyPreferredInputDevice(to: engine)
         var input = engine.inputNode
         var hardwareFormat = input.outputFormat(forBus: 0)
         if hardwareFormat.sampleRate <= 0, cameFromPreheat {
             engine = AVAudioEngine()
+            applyPreferredInputDevice(to: engine)
             input = engine.inputNode
             hardwareFormat = input.outputFormat(forBus: 0)
         }

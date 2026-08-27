@@ -346,6 +346,7 @@ final class AppState: ObservableObject {
         // captured so far is transcribed and delivered, and the user is told
         // why the recording stopped. Routed through the relay because `self`
         // cannot be captured by a concurrent closure from inside init.
+        let initialInputDeviceUID = settings.inputDeviceUID
         Task {
             await microphone.setLowDiskHandler {
                 Task { @MainActor in
@@ -370,6 +371,9 @@ final class AppState: ObservableObject {
             }
             // Build and prepare the first take's audio engine now (docs/15
             // step 50), so the first press finds the allocation already paid.
+            // docs/15 step 36 remainder: point capture at the chosen input
+            // device before anything records.
+            await microphone.setPreferredInputDevice(uid: initialInputDeviceUID)
             // Touches no microphone hardware — no permission prompt, no
             // privacy indicator. Ordered after the handlers so a press racing
             // launch never records without its guards installed.
@@ -386,6 +390,15 @@ final class AppState: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] mode in
                 self?.preloadEngineIfWarmedBefore(mode: mode)
+            }
+            .store(in: &settingsSinks)
+        // Changing the input device applies to the next take (docs/15 step
+        // 36 remainder) — a take in flight keeps the device it started on.
+        settings.$inputDeviceUID
+            .dropFirst()
+            .removeDuplicates()
+            .sink { uid in
+                Task { await microphone.setPreferredInputDevice(uid: uid) }
             }
             .store(in: &settingsSinks)
         // Turning the Parakeet route on warms it right away (docs/15 step
@@ -435,6 +448,45 @@ final class AppState: ObservableObject {
             levels.removeFirst(levels.count - WaveformView.barCount)
         }
         hudState.levels = levels
+        feedAutoStopGate(level)
+    }
+
+    // MARK: - Hands-free auto-stop on trailing silence (docs/15 step 22 follow-up)
+
+    private var autoStopGate: TrailingSilenceGate?
+    private var autoStopEpoch: ContinuousClock.Instant?
+    private var pendingAutoStopNotice = false
+
+    /// AppDelegate reports lock-mode transitions so the gate exists exactly
+    /// while a hands-free take runs. Off (0 s) means no gate at all — the
+    /// level path stays a plain waveform feed.
+    func handsFreeLockChanged(active: Bool) {
+        guard active, settings.autoStopSilenceSeconds > 0 else {
+            autoStopGate = nil
+            autoStopEpoch = nil
+            return
+        }
+        autoStopGate = TrailingSilenceGate(
+            holdSeconds: Double(settings.autoStopSilenceSeconds)
+        )
+        autoStopEpoch = ContinuousClock.now
+    }
+
+    private func feedAutoStopGate(_ level: Float) {
+        guard let epoch = autoStopEpoch, case .listening = hudState.mode else { return }
+        let seconds = Self.seconds(epoch.duration(to: ContinuousClock.now))
+        guard autoStopGate?.ingest(level: level, at: seconds) == true else { return }
+        autoStopGate = nil
+        autoStopEpoch = nil
+        pendingAutoStopNotice = true
+        // Same forced-stop path as the mid-take guards: lock bookkeeping is
+        // cleared and the truthful isLockMode reaches the deliverer.
+        stopDictation(isLockMode: endLockModeForForcedStop?() ?? true)
+    }
+
+    private static func seconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) / 1e18
     }
 
     /// Streaming-preview line for the HUD's partial row (docs/15 step 22).
@@ -732,7 +784,16 @@ final class AppState: ObservableObject {
                             transcriptionSeconds: Double(elapsed.components.seconds)
                                 + Double(elapsed.components.attoseconds) / 1e18
                         ),
-                        importedFilename: url.lastPathComponent
+                        importedFilename: url.lastPathComponent,
+                        // FR-6's timestamps: where in the recording each
+                        // stretch came from, when the engine reports them.
+                        segments: result.segments.isEmpty
+                            ? nil
+                            : result.segments.map {
+                                TranscriptRecord.Segment(
+                                    text: $0.text, start: $0.start, end: $0.end
+                                )
+                            }
                     )
                     return (record, decoded.wasTruncated)
                 }.value
@@ -920,6 +981,9 @@ final class AppState: ObservableObject {
     private func handle(phase: DictationSession.Phase, session: DictationSession) async {
         switch phase {
         case .arming:
+            // A press is live again — a scheduled idle unload must not pull
+            // the model out from under it.
+            idleUnloadTask?.cancel()
             hudState.mode = .listening(startedAt: Date())
         case .recording:
             // Keep the arming timestamp: resetting it here visibly restarted
@@ -942,6 +1006,7 @@ final class AppState: ObservableObject {
             // A device change queued its notice for a take the user then
             // cancelled — the flag must not survive to caption the next take.
             pendingDeviceChangeNotice = false
+            pendingAutoStopNotice = false
             hudState.mode = .hidden
             hudState.partialText = ""
             hudState.levels = []
@@ -960,6 +1025,7 @@ final class AppState: ObservableObject {
             if let error = await session.lastError {
                 pendingLowDiskNotice = false
                 pendingDeviceChangeNotice = false
+                pendingAutoStopNotice = false
                 DeliverySounds.playError(enabled: settings.soundsEnabled)
                 hudState.mode = .error(Self.message(for: error))
                 scheduleErrorDismiss()
@@ -975,6 +1041,10 @@ final class AppState: ObservableObject {
             } else if case .notice = hudState.mode {
                 // A delivery notice (clipboard fallback / secure block) is
                 // already showing; let its own dismiss timer run.
+                pendingAutoStopNotice = false
+            } else if pendingAutoStopNotice {
+                pendingAutoStopNotice = false
+                showNotice("Stopped after silence — take delivered")
             } else if settings.showTimingsToast, let timings = await session.lastTimings {
                 // FR-11.4 opt-in: show where the time went after each take.
                 showNotice(Self.timingsSummary(timings))
@@ -983,6 +1053,27 @@ final class AppState: ObservableObject {
             }
             hudState.partialText = ""
             hudState.levels = []
+            scheduleIdleUnload()
+        }
+    }
+
+    // MARK: - Idle model unload (docs/15 step 13, the optional other half)
+
+    private var idleUnloadTask: Task<Void, Never>?
+
+    /// Arms (or re-arms) the idle unload countdown when a take settles.
+    /// Keep-resident (0) is the default — this exists for memory-constrained
+    /// Macs, and the next press simply pays the model load again.
+    private func scheduleIdleUnload() {
+        idleUnloadTask?.cancel()
+        let minutes = settings.idleUnloadMinutes
+        guard minutes > 0 else { return }
+        let engine = routedEngine
+        idleUnloadTask = Task {
+            try? await Task.sleep(for: .seconds(min(24 * 60, max(1, minutes)) * 60))
+            guard !Task.isCancelled else { return }
+            await engine.unload()
+            VocalLog.session.info("idle unload: ASR model released after \(minutes) min")
         }
     }
 

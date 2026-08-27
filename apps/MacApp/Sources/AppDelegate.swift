@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.appState.discardProvisionalDictation()
                 self.isLockModeActive = true
                 self.startLockCapTimer()
+                self.appState.handsFreeLockChanged(active: true)
             }
         }
         appState.hotkeyArmed = monitor.start()
@@ -183,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isLockModeActive = false
         lockCapTask?.cancel()
         lockCapTask = nil
+        appState.handsFreeLockChanged(active: false)
         // Keep the decision core's Escape watch in sync — when lock ends via
         // the cap timer (rather than a tap the core saw), the core would
         // otherwise keep emitting no-op cancels on every Escape (docs/11 G5).

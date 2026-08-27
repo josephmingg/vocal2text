@@ -37,7 +37,7 @@ public final class DatabaseStore: @unchecked Sendable {
     private static let transcriptColumns =
         "id, createdAt, source, language, rawText, deliveredText, durationSeconds, "
         + "targetAppBundleID, targetAppName, profileName, routeKind, cleanup, timings, "
-        + "audioPath, isCancelled, importedFilename"
+        + "audioPath, isCancelled, importedFilename, segments"
 
     public init(path: String) throws {
         let queue = try DatabaseQueue(path: path)
@@ -139,9 +139,19 @@ public final class DatabaseStore: @unchecked Sendable {
                 """)
             // Ordered by the existing rowid so the surrogate numbers follow
             // insertion order, keeping `ORDER BY rowid` tie-breaks meaningful.
+            //
+            // The column list is frozen as of v2 — NOT `transcriptColumns`,
+            // which describes the *current* schema and grows with later
+            // migrations (v3 added `segments`); a migration that borrows it
+            // would reference columns that do not exist yet and fail on
+            // every database that has not passed this point.
+            let v2Columns =
+                "id, createdAt, source, language, rawText, deliveredText, durationSeconds, "
+                + "targetAppBundleID, targetAppName, profileName, routeKind, cleanup, timings, "
+                + "audioPath, isCancelled, importedFilename"
             try db.execute(sql: """
-                INSERT INTO transcript_v2 (\(Self.transcriptColumns))
-                    SELECT \(Self.transcriptColumns) FROM transcript ORDER BY rowid
+                INSERT INTO transcript_v2 (\(v2Columns))
+                    SELECT \(v2Columns) FROM transcript ORDER BY rowid
                 """)
             try db.execute(sql: "DROP TABLE transcript")
             try db.execute(sql: "ALTER TABLE transcript_v2 RENAME TO transcript")
@@ -156,6 +166,12 @@ public final class DatabaseStore: @unchecked Sendable {
             try db.execute(
                 sql: "INSERT INTO transcript_fts_tri(transcript_fts_tri) VALUES('rebuild')"
             )
+        }
+
+        migrator.registerMigration("v3-import-segments") { db in
+            // Nullable, decoded leniently: rows without segments (all live
+            // dictations, every pre-v3 row) stay fully readable.
+            try db.execute(sql: "ALTER TABLE transcript ADD COLUMN segments TEXT")
         }
 
         try migrator.migrate(queue)
@@ -214,6 +230,7 @@ public final class DatabaseStore: @unchecked Sendable {
     public func save(_ record: TranscriptRecord) throws {
         let cleanupJSON = try Self.encodeJSON(record.cleanup, column: "cleanup")
         let timingsJSON = try Self.encodeJSON(record.timings, column: "timings")
+        let segmentsJSON = try record.segments.map { try Self.encodeJSON($0, column: "segments") }
         try dbQueue.write { db in
             try db.execute(
                 sql: "DELETE FROM transcript WHERE id = ?",
@@ -224,8 +241,9 @@ public final class DatabaseStore: @unchecked Sendable {
                     INSERT INTO transcript (
                         id, createdAt, source, language, rawText, deliveredText,
                         durationSeconds, targetAppBundleID, targetAppName, profileName,
-                        routeKind, cleanup, timings, audioPath, isCancelled, importedFilename
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        routeKind, cleanup, timings, audioPath, isCancelled, importedFilename,
+                        segments
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                 arguments: [
                     record.id.uuidString,
@@ -243,7 +261,8 @@ public final class DatabaseStore: @unchecked Sendable {
                     timingsJSON,
                     record.audioPath,
                     record.isCancelled,
-                    record.importedFilename
+                    record.importedFilename,
+                    segmentsJSON
                 ]
             )
         }
@@ -554,6 +573,11 @@ public final class DatabaseStore: @unchecked Sendable {
         let createdAtInterval: Double = row["createdAt"]
         let cleanup = try decodeJSON(CleanupOutcome.self, from: row["cleanup"], column: "cleanup")
         let timings = try decodeJSON(TimingBreakdown.self, from: row["timings"], column: "timings")
+        // Absent or unreadable segments degrade to nil — they are extra
+        // detail, never a reason to hide the row.
+        let segments: [TranscriptRecord.Segment]? = (row["segments"] as String?).flatMap {
+            try? decodeJSON([TranscriptRecord.Segment].self, from: $0, column: "segments")
+        }
         return TranscriptRecord(
             id: id,
             createdAt: Date(timeIntervalSince1970: createdAtInterval),
@@ -570,7 +594,8 @@ public final class DatabaseStore: @unchecked Sendable {
             timings: timings,
             audioPath: row["audioPath"],
             isCancelled: row["isCancelled"],
-            importedFilename: row["importedFilename"]
+            importedFilename: row["importedFilename"],
+            segments: segments
         )
     }
 }

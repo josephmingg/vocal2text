@@ -71,6 +71,45 @@ private func makeRecord(
     #expect(try store.transcript(id: UUID()) == nil)
 }
 
+@Test func importSegmentsRoundTripAndStayOptional() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+
+    let timed = TranscriptRecord(
+        createdAt: Date(timeIntervalSince1970: 1_723_222_222),
+        source: .fileImport,
+        language: .english,
+        rawText: "hello world",
+        deliveredText: "Hello world.",
+        durationSeconds: 90,
+        profileName: "Import",
+        routeKind: .defaultRoute,
+        cleanup: .skipped(reason: .profileDisabled),
+        importedFilename: "podcast.mp3",
+        segments: [
+            .init(text: "hello", start: 0, end: 41.5),
+            .init(text: "world", start: 41.5, end: 90),
+        ]
+    )
+    try store.save(timed)
+    #expect(try store.transcript(id: timed.id)?.segments == timed.segments)
+
+    // A live dictation carries none — and reads back as none, not [].
+    let plain = TranscriptRecord(
+        createdAt: Date(timeIntervalSince1970: 1_723_222_223),
+        source: .dictation,
+        language: .english,
+        rawText: "hi",
+        deliveredText: "Hi.",
+        durationSeconds: 1,
+        profileName: "Default",
+        routeKind: .defaultRoute,
+        cleanup: .skipped(reason: .masterSwitchOff)
+    )
+    try store.save(plain)
+    #expect(try store.transcript(id: plain.id)?.segments == nil)
+}
+
 @Test func saveReplacesExistingRecordById() throws {
     let (store, path) = try makeStore()
     defer { try? FileManager.default.removeItem(atPath: path) }

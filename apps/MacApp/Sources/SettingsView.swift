@@ -51,12 +51,30 @@ private struct GeneralPane: View {
     let appState: AppState
     @State private var launchAtLogin = false
     @State private var loginItemError: String?
+    @State private var inputDevices: [AudioInputDevice] = []
 
     var body: some View {
         Form {
             Section("Push-to-talk key") {
                 // Same control onboarding shows, so the two cannot drift.
                 HotkeyPickerView(appState: appState)
+            }
+            Section("Microphone") {
+                // docs/15 step 36 remainder: capture from a specific device
+                // instead of following the system default. Applies to the
+                // next take; a disconnected saved device falls back to the
+                // default rather than failing the take.
+                Picker("Input device", selection: $settings.inputDeviceUID) {
+                    Text("System default").tag("")
+                    ForEach(inputDevices) { device in
+                        Text(device.name).tag(device.uid)
+                    }
+                    if !settings.inputDeviceUID.isEmpty,
+                        !inputDevices.contains(where: { $0.uid == settings.inputDeviceUID }) {
+                        Text("Saved device (disconnected)").tag(settings.inputDeviceUID)
+                    }
+                }
+                .onAppear { inputDevices = AudioInputDevices.available() }
             }
             Section {
                 Toggle("Launch at login", isOn: launchAtLoginBinding)
@@ -75,6 +93,23 @@ private struct GeneralPane: View {
                     Text("15 minutes").tag(15)
                     Text("30 minutes").tag(30)
                     Text("60 minutes").tag(60)
+                }
+                // The step 22 follow-up: end a hands-free take when the
+                // speaker has clearly stopped, not only at the hard cap.
+                Picker("Hands-free stop on silence", selection: $settings.autoStopSilenceSeconds) {
+                    Text("Off").tag(0)
+                    Text("2 seconds").tag(2)
+                    Text("3 seconds").tag(3)
+                    Text("5 seconds").tag(5)
+                    Text("10 seconds").tag(10)
+                }
+            }
+            Section("Setup") {
+                // docs/15 step 40: permissions and the key can rot after a
+                // macOS update or TCC reset — the assistant is re-runnable,
+                // with its final page doubling as the health check.
+                Button("Run Setup Assistant Again…") {
+                    WindowManager.shared.showOnboarding(appState: appState)
                 }
             }
         }
@@ -152,6 +187,19 @@ private struct ModelsPane: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                // docs/15 step 13's optional other half. Keep-resident stays
+                // the default; unloading trades the next take's speed for RAM.
+                Picker("Release model when idle for", selection: $settings.idleUnloadMinutes) {
+                    Text("Never (keep loaded)").tag(0)
+                    Text("15 minutes").tag(15)
+                    Text("30 minutes").tag(30)
+                    Text("60 minutes").tag(60)
+                }
+                if settings.idleUnloadMinutes > 0 {
+                    Text("The first dictation after an idle stretch will pay the model load again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("English fast path") {
                 Toggle(

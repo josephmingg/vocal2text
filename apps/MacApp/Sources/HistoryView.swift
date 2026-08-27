@@ -143,6 +143,24 @@ struct HistoryView: View {
                     Divider()
                     transcriptColumn(title: "Delivered", text: record.deliveredText)
                 }
+                // FR-6 timestamps: imports show where in the recording each
+                // stretch came from. Selectable so a "[12:34] …" line can be
+                // copied straight into show notes.
+                if let segments = record.segments, !segments.isEmpty {
+                    Divider()
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                                Text("[\(Self.timestampLabel(segment.start))] \(segment.text)")
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(8)
+                    }
+                    .frame(maxHeight: 140)
+                }
                 Divider()
                 timingsFooter(record.timings)
             }
@@ -206,6 +224,15 @@ struct HistoryView: View {
         } catch {
             errorText = "Could not play recording: \(error.localizedDescription)"
         }
+    }
+
+    /// "3:07" / "1:02:33" — segment offsets into the imported recording.
+    static func timestampLabel(_ seconds: Double) -> String {
+        let whole = max(0, Int(seconds.rounded()))
+        if whole >= 3600 {
+            return String(format: "%d:%02d:%02d", whole / 3600, (whole % 3600) / 60, whole % 60)
+        }
+        return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 
     /// The FR-11.4 per-stage breakdown — every row has carried these numbers

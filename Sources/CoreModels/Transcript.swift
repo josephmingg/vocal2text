@@ -113,6 +113,25 @@ public struct TranscriptRecord: Codable, Sendable, Hashable, Identifiable {
     public var isCancelled: Bool
     /// Import source filename (FR-6.3).
     public var importedFilename: String?
+    /// Timestamped segments for imported files (FR-6, docs/15 step 44):
+    /// where in a long recording each stretch of text came from. nil for
+    /// live dictations and for rows written before the field existed —
+    /// optional, so the synthesized decoder stays lenient.
+    public var segments: [Segment]?
+
+    /// One timed stretch of an import's transcript.
+    public struct Segment: Codable, Sendable, Hashable {
+        public var text: String
+        /// Seconds from the start of the source recording.
+        public var start: Double
+        public var end: Double
+
+        public init(text: String, start: Double, end: Double) {
+            self.text = text
+            self.start = start
+            self.end = end
+        }
+    }
 
     public enum RouteKind: String, Codable, Sendable {
         case app
@@ -137,7 +156,8 @@ public struct TranscriptRecord: Codable, Sendable, Hashable, Identifiable {
         timings: TimingBreakdown = .init(),
         audioPath: String? = nil,
         isCancelled: Bool = false,
-        importedFilename: String? = nil
+        importedFilename: String? = nil,
+        segments: [Segment]? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -155,5 +175,6 @@ public struct TranscriptRecord: Codable, Sendable, Hashable, Identifiable {
         self.audioPath = audioPath
         self.isCancelled = isCancelled
         self.importedFilename = importedFilename
+        self.segments = segments
     }
 }
