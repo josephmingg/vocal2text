@@ -34,7 +34,7 @@ let sherpaOnnxProducts: [Target.Dependency] = []
 // written against v0.9.1's AsrModels/AsrManager signatures.
 #if canImport(Darwin)
 let fluidAudioDependencies: [Package.Dependency] = [
-    .package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.9.1")
+    .package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.15.6")
 ]
 let fluidAudioProducts: [Target.Dependency] = [
     .product(name: "FluidAudio", package: "FluidAudio", condition: .when(platforms: [.macOS, .iOS]))
