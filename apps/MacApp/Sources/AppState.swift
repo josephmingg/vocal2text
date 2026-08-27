@@ -771,7 +771,16 @@ final class AppState: ObservableObject {
                             transcriptionSeconds: Double(elapsed.components.seconds)
                                 + Double(elapsed.components.attoseconds) / 1e18
                         ),
-                        importedFilename: url.lastPathComponent
+                        importedFilename: url.lastPathComponent,
+                        // FR-6's timestamps: where in the recording each
+                        // stretch came from, when the engine reports them.
+                        segments: result.segments.isEmpty
+                            ? nil
+                            : result.segments.map {
+                                TranscriptRecord.Segment(
+                                    text: $0.text, start: $0.start, end: $0.end
+                                )
+                            }
                     )
                     return (record, decoded.wasTruncated)
                 }.value
