@@ -51,12 +51,30 @@ private struct GeneralPane: View {
     let appState: AppState
     @State private var launchAtLogin = false
     @State private var loginItemError: String?
+    @State private var inputDevices: [AudioInputDevice] = []
 
     var body: some View {
         Form {
             Section("Push-to-talk key") {
                 // Same control onboarding shows, so the two cannot drift.
                 HotkeyPickerView(appState: appState)
+            }
+            Section("Microphone") {
+                // docs/15 step 36 remainder: capture from a specific device
+                // instead of following the system default. Applies to the
+                // next take; a disconnected saved device falls back to the
+                // default rather than failing the take.
+                Picker("Input device", selection: $settings.inputDeviceUID) {
+                    Text("System default").tag("")
+                    ForEach(inputDevices) { device in
+                        Text(device.name).tag(device.uid)
+                    }
+                    if !settings.inputDeviceUID.isEmpty,
+                        !inputDevices.contains(where: { $0.uid == settings.inputDeviceUID }) {
+                        Text("Saved device (disconnected)").tag(settings.inputDeviceUID)
+                    }
+                }
+                .onAppear { inputDevices = AudioInputDevices.available() }
             }
             Section {
                 Toggle("Launch at login", isOn: launchAtLoginBinding)

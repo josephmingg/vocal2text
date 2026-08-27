@@ -346,6 +346,7 @@ final class AppState: ObservableObject {
         // captured so far is transcribed and delivered, and the user is told
         // why the recording stopped. Routed through the relay because `self`
         // cannot be captured by a concurrent closure from inside init.
+        let initialInputDeviceUID = settings.inputDeviceUID
         Task {
             await microphone.setLowDiskHandler {
                 Task { @MainActor in
@@ -370,6 +371,9 @@ final class AppState: ObservableObject {
             }
             // Build and prepare the first take's audio engine now (docs/15
             // step 50), so the first press finds the allocation already paid.
+            // docs/15 step 36 remainder: point capture at the chosen input
+            // device before anything records.
+            await microphone.setPreferredInputDevice(uid: initialInputDeviceUID)
             // Touches no microphone hardware — no permission prompt, no
             // privacy indicator. Ordered after the handlers so a press racing
             // launch never records without its guards installed.
@@ -386,6 +390,15 @@ final class AppState: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] mode in
                 self?.preloadEngineIfWarmedBefore(mode: mode)
+            }
+            .store(in: &settingsSinks)
+        // Changing the input device applies to the next take (docs/15 step
+        // 36 remainder) — a take in flight keeps the device it started on.
+        settings.$inputDeviceUID
+            .dropFirst()
+            .removeDuplicates()
+            .sink { uid in
+                Task { await microphone.setPreferredInputDevice(uid: uid) }
             }
             .store(in: &settingsSinks)
         // Turning the Parakeet route on warms it right away (docs/15 step

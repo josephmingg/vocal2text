@@ -75,6 +75,12 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(idleUnloadMinutes, forKey: Keys.idleUnloadMinutes) }
     }
 
+    /// docs/15 step 36 remainder: capture from this device's stable hardware
+    /// UID instead of the system default input. Empty = follow the default.
+    @Published var inputDeviceUID: String {
+        didSet { Self.defaults.set(inputDeviceUID, forKey: Keys.inputDeviceUID) }
+    }
+
     /// Per-bundle-ID insertion strategy overrides (docs/03 §3.2: tier choice is
     /// configuration-driven, not failure-driven). Keys are bundle IDs, values
     /// are strategy names owned by the insertion layer.
@@ -139,6 +145,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         autoStopSilenceSeconds =
             defaults.object(forKey: Keys.autoStopSilenceSeconds) as? Int ?? 0
         idleUnloadMinutes = defaults.object(forKey: Keys.idleUnloadMinutes) as? Int ?? 0
+        inputDeviceUID = defaults.string(forKey: Keys.inputDeviceUID) ?? ""
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
@@ -237,6 +244,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let lockCapMinutes = "settings.lockCapMinutes"
         static let autoStopSilenceSeconds = "settings.autoStopSilenceSeconds"
         static let idleUnloadMinutes = "settings.idleUnloadMinutes"
+        static let inputDeviceUID = "settings.inputDeviceUID"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
         static let whisperKitModel = "settings.whisperKitModel"
