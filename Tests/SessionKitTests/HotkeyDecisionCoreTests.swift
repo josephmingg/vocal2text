@@ -39,7 +39,7 @@ private struct Driver {
     mutating func lock() {
         #expect(fnDown() == .pressBegan)
         advance(0.1)
-        #expect(fnUp() == .pressEnded)
+        #expect(fnUp() == .shortTap)
         advance(0.1)
         #expect(fnDown() == .pressBegan)
         advance(0.1)
@@ -122,19 +122,20 @@ private let aKey: UInt16 = 0
 }
 
 @Test func shortTapEndsThePressSoTheSpeechOverrideCanDecide() {
-    // FR-1.5: a sub-500 ms take is reported as ended, not cancelled — the
-    // has-speech heuristic in SessionKit is what discards it.
+    // FR-1.5 × docs/15 W10: a sub-500 ms take is reported as a provisional
+    // short tap, not a cancel — the has-speech heuristic in SessionKit still
+    // decides, but the monitor holds delivery through the double-tap window.
     var driver = Driver(spec: .fnGlobe)
     #expect(driver.fnDown() == .pressBegan)
     driver.advance(0.2)
-    #expect(driver.fnUp() == .pressEnded)
+    #expect(driver.fnUp() == .shortTap)
 }
 
 @Test func doubleTapTogglesTheHandsFreeLock() {
     var driver = Driver(spec: .fnGlobe)
     #expect(driver.fnDown() == .pressBegan)
     driver.advance(0.1)
-    #expect(driver.fnUp() == .pressEnded)
+    #expect(driver.fnUp() == .shortTap)
     driver.advance(0.1)
     #expect(driver.fnDown() == .pressBegan)
     driver.advance(0.1)
@@ -145,11 +146,11 @@ private let aKey: UInt16 = 0
     var driver = Driver(spec: .fnGlobe)
     #expect(driver.fnDown() == .pressBegan)
     driver.advance(0.1)
-    #expect(driver.fnUp() == .pressEnded)
+    #expect(driver.fnUp() == .shortTap)
     driver.advance(0.5)  // past the 0.35 s double-tap window
     #expect(driver.fnDown() == .pressBegan)
     driver.advance(0.1)
-    #expect(driver.fnUp() == .pressEnded)
+    #expect(driver.fnUp() == .shortTap)
 }
 
 @Test func aThirdTapDoesNotChainOffTheLockToggle() {
@@ -166,6 +167,8 @@ private let aKey: UInt16 = 0
     driver.advance(0.1)
     #expect(driver.fnDown() == .pressBegan)
     driver.advance(0.1)
+    // Lock is active, so this tap finishes the take immediately — a real
+    // pressEnded, never a provisional shortTap (docs/15 W10).
     #expect(driver.fnUp() == .pressEnded)
 }
 
@@ -173,7 +176,7 @@ private let aKey: UInt16 = 0
     var driver = Driver(spec: .fnGlobe)
     _ = driver.fnDown()
     driver.advance(0.1)
-    #expect(driver.fnUp() == .pressEnded)
+    #expect(driver.fnUp() == .shortTap)
     driver.advance(0.1)
     _ = driver.fnDown()
     driver.advance(0.6)  // held long enough to be push-to-talk
@@ -419,7 +422,7 @@ private let f13 = HotkeySpec(kind: .key(keyCode: HotkeyKeyCode.f13, requiredFlag
     var driver = Driver(spec: f13)
     #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.f13) == .pressBegan)
     driver.advance(0.1)
-    #expect(driver.send(.keyUp, keyCode: HotkeyKeyCode.f13) == .pressEnded)
+    #expect(driver.send(.keyUp, keyCode: HotkeyKeyCode.f13) == .shortTap)
     driver.advance(0.1)
     #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.f13) == .pressBegan)
     driver.advance(0.1)
@@ -615,7 +618,7 @@ private let f13 = HotkeySpec(kind: .key(keyCode: HotkeyKeyCode.f13, requiredFlag
         driver.advance(0.5)
         _ = driver.press(spec)
         driver.advance(0.1)
-        #expect(driver.release(spec) == .pressEnded, "first tap: \(spec.label)")
+        #expect(driver.release(spec) == .shortTap, "first tap: \(spec.label)")
         driver.advance(0.1)
         _ = driver.press(spec)
         driver.advance(0.1)
@@ -693,7 +696,7 @@ private let f13 = HotkeySpec(kind: .key(keyCode: HotkeyKeyCode.f13, requiredFlag
     var driver = Driver(spec: spec)
     _ = driver.press(spec)
     driver.advance(0.1)
-    #expect(driver.release(spec) == .pressEnded)
+    #expect(driver.release(spec) == .shortTap)
     driver.advance(0.1)
     _ = driver.press(spec)
     driver.advance(0.1)

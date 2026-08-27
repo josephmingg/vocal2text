@@ -84,12 +84,44 @@ private actor FailThenSucceedEngine: TranscriptionEngine {
 
 private let fixedNow = Date(timeIntervalSince1970: 1_723_000_000)
 
+/// One-shot latch for scripting suspension points (e.g. a profile resolution
+/// that must not have completed before the microphone started).
+private actor Gate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        isOpen = true
+        let waiting = waiters
+        waiters = []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
 private struct Harness {
     let session: DictationSession
     let engine: FakeTranscriptionEngine
     let deliverer: RecordingTextDeliverer
     let store: InMemoryStore
     let captureLog: CaptureLog
+
+    /// Delivery/save now happen on the detached pipeline (chained per take);
+    /// awaiting the latest pipeline task drains every queued take.
+    func drainPipeline() async {
+        if let task = await session.pipelineTask {
+            await task.value
+        }
+        // The archive + history write settle after the pipeline (docs/15
+        // step 49); tests that assert on saved records must see them land.
+        if let task = await session.persistenceTask {
+            await task.value
+        }
+    }
 }
 
 private func makeHarness(
@@ -97,6 +129,7 @@ private func makeHarness(
         text: "let's meet on saturday", detectedLanguage: .english
     ),
     engineFailure: TranscriptionError? = nil,
+    engineDelay: Duration = .zero,
     audioSeconds: Double = 2.0,
     profile: Profile = Profile(name: "Default"),
     config: StaticConfig = StaticConfig(),
@@ -106,7 +139,11 @@ private func makeHarness(
     /// so existing tests read unchanged.
     selectCleanup: DictationSession.CleanupSelecting? = nil,
     prewarm: @escaping @Sendable () async -> Void = {},
-    deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes")
+    deliveryOutcome: DeliveryOutcome = .inserted(method: .paste, appBundleID: "com.example.notes"),
+    profileResolution: (@Sendable () async -> DictationSession.ResolvedRoute)? = nil,
+    analyzeSpeech: DictationSession.SpeechAnalyzing? = nil,
+    readPrecedingContext: DictationSession.PrecedingContextReading? = nil,
+    preserveFailedAudio: DictationSession.FailedAudioPreserving? = nil
 ) -> Harness {
     let captureLog = CaptureLog()
     let sampleCount = max(0, Int(audioSeconds * Double(PCMChunk.sampleRate)))
@@ -114,7 +151,9 @@ private func makeHarness(
         chunk: PCMChunk(samples: [Float](repeating: 0, count: sampleCount)),
         log: captureLog
     )
-    let engine = FakeTranscriptionEngine(result: engineResult, failure: engineFailure)
+    let engine = FakeTranscriptionEngine(
+        result: engineResult, delay: engineDelay, failure: engineFailure
+    )
     let deliverer = RecordingTextDeliverer(outcome: deliveryOutcome)
     let store = InMemoryStore()
     let dependencies = DictationSession.Dependencies(
@@ -128,11 +167,14 @@ private func makeHarness(
                     )
                 }
             },
+        analyzeSpeech: analyzeSpeech,
+        readPrecedingContext: readPrecedingContext,
+        preserveFailedAudio: preserveFailedAudio,
         prewarmCleanup: prewarm,
         deliverer: deliverer,
         store: store,
         config: config,
-        profileResolution: { (profile, .app, "com.example.pressapp") },
+        profileResolution: profileResolution ?? { (profile, .app, "com.example.pressapp") },
         now: { fixedNow }
     )
     return Harness(
@@ -173,6 +215,7 @@ struct DictationSessionTests {
         let harness = makeHarness()
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         // Stage 1 capitalizes and adds the terminal period; stages 2/4 are
         // no-ops here (no entries, fresh insertion point).
@@ -222,6 +265,7 @@ struct DictationSessionTests {
         await harness.session.finishPress(
             isLockMode: false, heldDurationOverride: .milliseconds(200)
         )
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered.isEmpty)
@@ -240,6 +284,7 @@ struct DictationSessionTests {
         await harness.session.finishPress(
             isLockMode: false, heldDurationOverride: .milliseconds(200)
         )
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Let's meet on saturday."])
@@ -273,6 +318,7 @@ struct DictationSessionTests {
         let harness = makeHarness(engineFailure: .modelNotInstalled)
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered.isEmpty)
@@ -288,7 +334,9 @@ struct DictationSessionTests {
         let provider = ScriptedCleanupProvider(script: .uppercase)
         let harness = makeHarness(
             engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
-            profile: Profile(name: "Notes", cleanupEnabled: true),
+            // The TASK prompt keeps the step-20 skip heuristic out of this
+            // test's way: with instructions in effect, stage 3 always runs.
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
             config: StaticConfig(masterSwitch: true),
             cleanup: CleanupPipeline(provider: provider),
             prewarm: { await provider.prewarm() }
@@ -299,6 +347,7 @@ struct DictationSessionTests {
             await task.value
         }
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let prewarmCount = await provider.prewarmCount
         #expect(prewarmCount == 1)
@@ -334,6 +383,7 @@ struct DictationSessionTests {
             profile: Profile(
                 name: "Notes",
                 cleanupEnabled: true,
+                promptText: "Tidy this.",
                 providerOverride: .ollama(model: "sailor2:8b")
             ),
             config: StaticConfig(masterSwitch: true),
@@ -356,6 +406,7 @@ struct DictationSessionTests {
 
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let profiles = await seen.profiles
         #expect(profiles.count == 1)
@@ -383,6 +434,7 @@ struct DictationSessionTests {
 
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         #expect(await seen.profiles.isEmpty)
         let record = try #require(await harness.store.records.first)
@@ -392,13 +444,14 @@ struct DictationSessionTests {
     @Test func aNilSelectionRecordsProviderUnavailableAndStillDelivers() async throws {
         let harness = makeHarness(
             engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
-            profile: Profile(name: "Notes", cleanupEnabled: true),
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
             config: StaticConfig(masterSwitch: true),
             selectCleanup: { _ in nil }
         )
 
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let record = try #require(await harness.store.records.first)
         #expect(record.cleanup == .skipped(reason: .providerUnavailable))
@@ -414,12 +467,13 @@ struct DictationSessionTests {
         )
         let harness = makeHarness(
             engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
-            profile: Profile(name: "Notes", cleanupEnabled: true),
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
             config: StaticConfig(masterSwitch: true),
             cleanup: CleanupPipeline(provider: provider)
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Meet on saturday."])
@@ -442,6 +496,7 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let cleanupCallCount = await provider.cleanupCallCount
         #expect(cleanupCallCount == 0)
@@ -464,6 +519,7 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let cleanupCallCount = await provider.cleanupCallCount
         #expect(cleanupCallCount == 0)
@@ -471,6 +527,279 @@ struct DictationSessionTests {
         let records = await harness.store.records
         let record = try #require(records.first)
         #expect(record.cleanup == .skipped(reason: .profileDisabled))
+    }
+
+    @Test func aCleanTakeSkipsTheModelEntirely() async throws {
+        // docs/15 step 20: no fillers, no correction cues, punctuation sane,
+        // no instructions — the model would round-trip the text unchanged,
+        // so the session never even builds a provider.
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "meet on saturday", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 0)
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .notNeeded))
+        // The deterministic stages still ran.
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Meet on saturday."])
+    }
+
+    @Test func aFillerBearingTakeStillRunsTheModel() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "um meet on saturday", detectedLanguage: .english
+            ),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: StaticConfig(masterSwitch: true),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 1)
+    }
+
+    // MARK: - Failed-take audio preservation (docs/15 step 35)
+
+    @Test func aTranscriptionFailurePreservesTheAudio() async throws {
+        let preserved = LockedStrings()
+        let harness = makeHarness(
+            engineFailure: .engineUnavailable("model missing"),
+            preserveFailedAudio: { audio in
+                preserved.append("\(audio.samples.count)")
+            }
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        // The 2 s take's exact samples reached the preservation seam.
+        #expect(preserved.snapshot() == ["\(2 * PCMChunk.sampleRate)"])
+        let error = await harness.session.lastError
+        #expect(error != nil)
+    }
+
+    @Test func aSuccessfulTakePreservesNothing() async throws {
+        let preserved = LockedStrings()
+        let harness = makeHarness(
+            preserveFailedAudio: { _ in preserved.append("called") }
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        #expect(preserved.snapshot().isEmpty)
+    }
+
+    // MARK: - Preceding context (docs/15 step 29, FR-3.3)
+
+    @Test func smartSpacingFormatsAgainstTheReadContext() async throws {
+        // The platform can see "Done." before the caret: the new sentence
+        // arrives space-prefixed instead of gluing onto the period.
+        let harness = makeHarness(readPrecedingContext: { "Done." })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == [" Let's meet on saturday."])
+    }
+
+    @Test func theLastInsertRecordStandsInWhenAXCannotSee() async throws {
+        // Same app, seconds apart, AX blind: the session's own record of what
+        // it just inserted provides the context. The delivery target must
+        // match the next press's frontmost app for the record to apply.
+        let harness = makeHarness(
+            deliveryOutcome: .inserted(method: .paste, appBundleID: "com.example.pressapp"),
+            readPrecedingContext: { nil }
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.count == 2)
+        #expect(delivered.first == "Let's meet on saturday.")
+        #expect(delivered.last == " Let's meet on saturday.")
+    }
+
+    @Test func noContextSeamMeansFreshInsertionFormatting() async throws {
+        // Platforms that provide no reader (iOS today, every existing test)
+        // keep the exact old behavior.
+        let harness = makeHarness()
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday.", "Let's meet on saturday."])
+    }
+
+    // MARK: - Streaming preview (docs/15 step 22)
+
+    @Test func streamingPreviewCommitsThePrefixAcrossHypotheses() async throws {
+        // The preview loop consumes the live chunk stream, re-decodes once at
+        // least a second of new audio exists, and displays a prefix-committed
+        // line — while the take's own batch path stays untouched.
+        let feed = ChunkFeed()
+        let partials = LockedStrings()
+        let script = ScriptedHypotheses(["hello there", "hello there friend"])
+
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: StreamingAudioCapturing(
+                    finishChunk: PCMChunk(
+                        samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)
+                    ),
+                    feed: feed
+                ),
+                engine: FakeTranscriptionEngine(
+                    result: TranscriptionResult(
+                        text: "hello there friend", detectedLanguage: .english
+                    )
+                ),
+                previewTranscribe: { _ in await script.next() },
+                onPartial: { partials.append($0) },
+                previewInterval: .milliseconds(10),
+                deliverer: deliverer,
+                store: store,
+                config: StaticConfig(),
+                profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        let second = PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate))
+        await feed.push(second)
+        try await waitUntil("first partial") { partials.snapshot().count >= 1 }
+        await feed.push(second)
+        try await waitUntil("second partial") { partials.snapshot().count >= 2 }
+
+        await session.pressEnded()
+        if let task = await session.pipelineTask { await task.value }
+        if let task = await session.persistenceTask { await task.value }
+
+        let seen = partials.snapshot()
+        // First hypothesis: nothing agreed yet, all tail. Second: the shared
+        // prefix committed, the new word rides as tail.
+        #expect(seen.first == "hello there")
+        #expect(seen.contains("hello there friend"))
+        // The batch path delivered normally, independent of the preview.
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered == ["Hello there friend."])
+    }
+
+    @Test func previewStopsWhenCaptureEnds() async throws {
+        let feed = ChunkFeed()
+        let partials = LockedStrings()
+        let script = ScriptedHypotheses(["hello"])
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: StreamingAudioCapturing(
+                    finishChunk: PCMChunk(
+                        samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)
+                    ),
+                    feed: feed
+                ),
+                engine: FakeTranscriptionEngine(
+                    result: TranscriptionResult(text: "hello", detectedLanguage: .english)
+                ),
+                previewTranscribe: { _ in await script.next() },
+                onPartial: { partials.append($0) },
+                previewInterval: .milliseconds(10),
+                deliverer: RecordingTextDeliverer(),
+                store: InMemoryStore(),
+                config: StaticConfig(),
+                profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        await session.pressEnded()
+        if let task = await session.pipelineTask { await task.value }
+        // Push audio after the take ended: the loop is cancelled, so no
+        // partial may surface for it.
+        await feed.push(PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate)))
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(partials.snapshot().isEmpty)
+    }
+
+    // MARK: - VAD gate + trim (docs/15 step 16)
+
+    @Test func aSilentTakeDeliversAndSavesNothing() async throws {
+        // FR-1.5's real has-speech answer: the analyzer found no speech, so
+        // the engine never runs — transcribing silence can only hallucinate.
+        let harness = makeHarness(analyzeSpeech: { _ in nil })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let transcribeCount = await harness.engine.transcribeCount
+        #expect(transcribeCount == 0)
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.isEmpty)
+        let records = await harness.store.records
+        #expect(records.isEmpty)
+        // Not an error: nothing was said, so nothing happening is correct.
+        let error = await harness.session.lastError
+        #expect(error == nil)
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+    }
+
+    @Test func theEngineOnlyHearsTheSpeechSpan() async throws {
+        // 2 s take, speech span covering the middle half: the engine's input
+        // shrinks, the delivered text and history are untouched, and history
+        // still records the full take's duration.
+        let totalSamples = 2 * PCMChunk.sampleRate
+        let span = (totalSamples / 4)..<(3 * totalSamples / 4)
+        let harness = makeHarness(analyzeSpeech: { _ in span })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let heard = await harness.engine.lastAudioSampleCount
+        #expect(heard == span.count)
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday."])
+        let record = try #require(await harness.store.records.first)
+        #expect(abs(record.durationSeconds - 2.0) < 0.01)
+    }
+
+    @Test func anUnavailableAnalyzerFallsBackToTheFullTake() async throws {
+        // The analyzer's "cannot run" contract is the full range — the take
+        // must be transcribed whole, never dropped.
+        let harness = makeHarness(analyzeSpeech: { audio in audio.samples.indices })
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let heard = await harness.engine.lastAudioSampleCount
+        #expect(heard == 2 * PCMChunk.sampleRate)
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday."])
     }
 
     @Test func dictionaryEntryAppearsInDeliveredText() async {
@@ -483,6 +812,7 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Use Claude Code to review."])
@@ -544,6 +874,12 @@ struct DictationSessionTests {
 
         await session.pressBegan()
         await session.pressEnded()
+        if let pipeline = await session.pipelineTask {
+            await pipeline.value
+        }
+        if let persistence = await session.persistenceTask {
+            await persistence.value
+        }
 
         // "Serialized" would mean the press awaited resolution before opening
         // the mic — the leading-speech-loss bug.
@@ -565,12 +901,117 @@ struct DictationSessionTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         // The deliverer ran (and blocked), and per FR-3.2 nothing is persisted.
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Let's meet on saturday."])
         let records = await harness.store.records
         #expect(records.isEmpty)
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+    }
+
+    @Test func microphoneStartsBeforeProfileResolutionCompletes() async throws {
+        // W1 regression: a hung browser AppleScript (up to 1.5 s inside
+        // profile resolution) must never delay audio start. The gate keeps
+        // resolution suspended; recording must begin anyway.
+        let gate = Gate()
+        let profile = Profile(name: "Default")
+        let harness = makeHarness(profileResolution: {
+            await gate.wait()
+            return (profile, .app, "com.example.pressapp")
+        })
+
+        await harness.session.pressBegan()
+        guard case .recording = await harness.session.phase else {
+            Issue.record("expected recording while resolution is still blocked")
+            return
+        }
+
+        // Release with resolution still pending: capture stops, the pipeline
+        // waits on the resolution instead of the microphone having waited.
+        await harness.session.pressEnded()
+        await gate.open()
+        await harness.drainPipeline()
+
+        let deliveredTexts = await harness.deliverer.deliveredTexts
+        #expect(deliveredTexts == ["Let's meet on saturday."])
+        let records = await harness.store.records
+        #expect(records.first?.profileName == "Default")
+    }
+
+    @Test func provisionalTapWithSpeechDeliversOnlyAfterCommit() async {
+        // W10/FR-1.5: a short tap with real audio ends provisionally — held
+        // through the double-tap window, delivered only on commit.
+        let harness = makeHarness(audioSeconds: 2.0)
+        await harness.session.pressBegan()
+        await harness.session.finishPress(
+            isLockMode: false, heldDurationOverride: .milliseconds(200), provisional: true
+        )
+        await harness.drainPipeline()
+
+        let heldBack = await harness.deliverer.deliveredTexts
+        #expect(heldBack.isEmpty)
+
+        await harness.session.commitProvisionalTake()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Let's meet on saturday."])
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+    }
+
+    @Test func provisionalTapDiscardedByLockGestureDeliversNothing() async {
+        // W10 regression: the first tap of a double-tap must never paste —
+        // the lock gesture discards the held take.
+        let harness = makeHarness(audioSeconds: 2.0)
+        await harness.session.pressBegan()
+        await harness.session.finishPress(
+            isLockMode: false, heldDurationOverride: .milliseconds(200), provisional: true
+        )
+        await harness.session.discardProvisionalTake()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.isEmpty)
+        let records = await harness.store.records
+        #expect(records.isEmpty)
+        let phase = await harness.session.phase
+        #expect(phase == .idle)
+
+        // A late commit after the discard is a no-op.
+        await harness.session.commitProvisionalTake()
+        await harness.drainPipeline()
+        let deliveredAfter = await harness.deliverer.deliveredTexts
+        #expect(deliveredAfter.isEmpty)
+    }
+
+    @Test func newPressAcceptedWhilePreviousTakeStillProcessing() async {
+        // W3 regression: rapid-fire dictation — the second press must start
+        // recording while the first take's pipeline (slowed engine) is still
+        // transcribing, and both takes must deliver.
+        let harness = makeHarness(engineDelay: .milliseconds(300))
+
+        await harness.session.pressBegan()
+        await harness.session.finishPress(isLockMode: false, heldDurationOverride: .seconds(1))
+
+        // Pipeline 1 is in flight; the next press is accepted immediately.
+        await harness.session.pressBegan()
+        guard case .recording = await harness.session.phase else {
+            Issue.record("expected recording while the first take is processing")
+            return
+        }
+        await harness.session.finishPress(isLockMode: false, heldDurationOverride: .seconds(1))
+        await harness.drainPipeline()
+
+        let deliveredTexts = await harness.deliverer.deliveredTexts
+        #expect(deliveredTexts.count == 2)
+        let records = await harness.store.records
+        #expect(records.count == 2)
+        let transcribeCount = await harness.engine.transcribeCount
+        #expect(transcribeCount == 2)
         let phase = await harness.session.phase
         #expect(phase == .idle)
     }
@@ -594,6 +1035,7 @@ struct BurmeseCleanupGateTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let calls = await provider.cleanupCallCount
         #expect(calls == 0)
@@ -616,6 +1058,7 @@ struct BurmeseCleanupGateTests {
             profile: Profile(
                 name: "Burmese notes",
                 cleanupEnabled: true,
+                promptText: "Tidy this.",
                 languageOverride: .pinned(.burmese)
             ),
             config: StaticConfig(masterSwitch: true),
@@ -623,6 +1066,7 @@ struct BurmeseCleanupGateTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let calls = await provider.cleanupCallCount
         #expect(calls == 1)
@@ -657,6 +1101,7 @@ struct BurmeseCleanupGateTests {
         )
         await harness.session.pressBegan()
         await harness.session.pressEnded()
+        await harness.drainPipeline()
 
         let delivered = await harness.deliverer.deliveredTexts
         // The terminal ။ was appended — no English capitalization or period.
@@ -680,6 +1125,7 @@ struct CancelledTakeRecoveryTests {
 
         let consumed = await harness.session.recover(audio: Self.recoverableAudio())
         #expect(consumed)
+        await harness.drainPipeline()
 
         // Identical to a take that was never cancelled: same normalization,
         // same delivery, same history row.
@@ -746,6 +1192,7 @@ struct CancelledTakeRecoveryTests {
 
         // The live take is untouched and still completes normally.
         await harness.session.pressEnded()
+        await harness.drainPipeline()
         let records = await harness.store.records
         #expect(records.count == 1)
         #expect(records.first?.source == .dictation)
@@ -790,6 +1237,9 @@ struct CancelledTakeRecoveryTests {
         // reported it unconsumed, so the same audio comes back.
         let secondAttempt = await session.recover(audio: audio)
         #expect(secondAttempt)
+        if let persistence = await session.persistenceTask {
+            await persistence.value
+        }
         let errorAfterSuccess = await session.lastError
         #expect(errorAfterSuccess == nil)
 

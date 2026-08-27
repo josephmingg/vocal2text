@@ -92,6 +92,49 @@ struct OpenAICompatibleProviderTests {
         #expect(body.stream == false)
     }
 
+    // MARK: - Transport efficiency (docs/15 step 19)
+
+    /// The prewarm must send the same system prompt the take's own request
+    /// will send — a server-side prompt cache reuses the longest common token
+    /// prefix, and a `"hi"` warmup shares no prefix with anything.
+    @Test func prewarmSendsTheRealSystemPrompt() {
+        let request = CleanupRequest(
+            text: "",
+            language: .english,
+            stylePrompt: "Use British spelling.",
+            protectedTerms: ["Kubernetes"]
+        )
+        let body = provider("http://localhost:11434").makePrewarmBody(for: request)
+        #expect(body.maxTokens == 1)
+        #expect(body.messages.first?.role == "system")
+        #expect(
+            body.messages.first?.content == PromptAssembler().systemPrompt(for: request)
+        )
+    }
+
+    @Test func ollamaRequestsCarryKeepAlive() throws {
+        let ollama = OpenAICompatibleProvider(
+            baseURL: URL(string: "http://localhost:11434")!,
+            model: "qwen2.5:3b-instruct",
+            id: .ollama(model: "qwen2.5:3b-instruct")
+        )
+        let body = ollama.makeRequestBody(for: CleanupRequest(text: "hello", language: .english))
+        #expect(body.keepAlive != nil)
+        let json = try #require(String(data: JSONEncoder().encode(body), encoding: .utf8))
+        #expect(json.contains("\"keep_alive\""))
+    }
+
+    /// Strict OpenAI-compatible servers reject unknown arguments, so the
+    /// Ollama-only field must vanish from the wire entirely for other ids.
+    @Test func nonOllamaRequestsOmitKeepAlive() throws {
+        let body = provider("https://api.openai.com/v1").makeRequestBody(
+            for: CleanupRequest(text: "hello", language: .english)
+        )
+        #expect(body.keepAlive == nil)
+        let json = try #require(String(data: JSONEncoder().encode(body), encoding: .utf8))
+        #expect(!json.contains("keep_alive"))
+    }
+
     @Test func maxTokensNeverStarvesAShortDictation() {
         // The floor is what makes reasoning models usable — see
         // `maxTokensLeavesRoomForAReasoningModelToThink` in CleanupPipelineTests

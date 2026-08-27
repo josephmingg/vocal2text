@@ -30,8 +30,12 @@ final class HotkeyMonitor {
     /// Release after a hold ≥ 0.5 s (push-to-talk), or a synthesized release
     /// when the tap was force-disabled mid-press (docs/03 §3.1).
     var onPressEnded: (() -> Void)?
-    /// Short tap (< 0.5 s — SessionKit separately applies the has-speech
-    /// override, FR-1.5), chord abort, or Escape while holding.
+    /// Short tap (< 0.5 s) that may still become the first half of a lock
+    /// double-tap (docs/15 W10) — the caller ends the take provisionally and
+    /// commits it only if `onLockToggle` doesn't fire within the double-tap
+    /// window (SessionKit separately applies the has-speech override, FR-1.5).
+    var onShortTap: (() -> Void)?
+    /// Chord abort, or Escape while holding.
     var onCancel: (() -> Void)?
     /// Second tap of a double-tap: hands-free lock toggle (FR-1.3).
     var onLockToggle: (() -> Void)?
@@ -136,6 +140,8 @@ final class HotkeyMonitor {
             onPressBegan?()
         case .pressEnded:
             onPressEnded?()
+        case .shortTap:
+            onShortTap?()
         case .cancelled:
             onCancel?()
         case .lockToggled:
@@ -245,7 +251,14 @@ private final class HotkeyTapMachine: @unchecked Sendable {
         tapThread.name = "com.vocal.hotkey-tap"
         tapThread.qualityOfService = .userInteractive
         tapThread.start()
-        _ = ready.wait(timeout: .now() + .seconds(2))
+        if ready.wait(timeout: .now() + .seconds(2)) == .timedOut {
+            // The tap thread never came up (docs/15 W9). Reporting success
+            // here would leave the hotkey silently dead with the caller's
+            // retry loop stopped; tear down and let the caller keep retrying.
+            VocalLog.hotkey.error("tap thread did not come up within 2 s — reporting unarmed")
+            stopTap()
+            return false
+        }
         thread = tapThread
         return true
     }
@@ -309,6 +322,8 @@ private final class HotkeyTapMachine: @unchecked Sendable {
             // Re-enable only from inside the callback (docs/03 §3.1). Never poll
             // CGEventTapIsEnabled from outside — documented IPC-voucher leak that
             // kernel-panics macOS 26.5.2 (docs/03 §3.1).
+            Diagnostics.shared.increment(.hotkeyTapReenables)
+            VocalLog.hotkey.warning("event tap was disabled by the system — re-enabling")
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }

@@ -9,8 +9,8 @@ struct WaveformView: View {
     static let barCount = 28
 
     private static let barSpacing: CGFloat = 2
-    /// Baseline drawn when no levels are available (live level plumbing from
-    /// AppState is a follow-up).
+    /// Baseline drawn when no levels are available — before the first chunk
+    /// arrives, and under Reduce Motion (the caller passes empty levels).
     private static let idleLevel: CGFloat = 0.08
 
     var body: some View {

@@ -28,6 +28,22 @@ let sherpaOnnxDependencies: [Package.Dependency] = []
 let sherpaOnnxProducts: [Target.Dependency] = []
 #endif
 
+// FluidAudio (the Parakeet TDT fast path, docs/15 step 14) is Apple-only —
+// CoreML models on the Neural Engine — so it gets the same host-conditioned
+// treatment as sherpa-onnx, and the same deliberate exact pin: the adapter is
+// written against v0.9.1's AsrModels/AsrManager signatures.
+#if canImport(Darwin)
+let fluidAudioDependencies: [Package.Dependency] = [
+    .package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.9.1")
+]
+let fluidAudioProducts: [Target.Dependency] = [
+    .product(name: "FluidAudio", package: "FluidAudio", condition: .when(platforms: [.macOS, .iOS]))
+]
+#else
+let fluidAudioDependencies: [Package.Dependency] = []
+let fluidAudioProducts: [Target.Dependency] = []
+#endif
+
 let package = Package(
     name: "DictationCore",
     platforms: [
@@ -45,6 +61,9 @@ let package = Package(
         .library(name: "ProfileKit", targets: ["ProfileKit"]),
         .library(name: "ModelStore", targets: ["ModelStore"]),
         .library(name: "ASRKit", targets: ["ASRKit"]),
+        // Pure metrics (WER/CER, percentiles, usage stats) — exposed so the
+        // Mac app's About pane can render UsageStats (docs/15 step 54).
+        .library(name: "BenchKit", targets: ["BenchKit"]),
         .library(name: "SessionKit", targets: ["SessionKit"]),
         .library(name: "BridgeKit", targets: ["BridgeKit"]),
         .library(name: "AudioPipeline", targets: ["AudioPipeline"]),
@@ -52,11 +71,13 @@ let package = Package(
         .library(name: "ASREngineWhisperKit", targets: ["ASREngineWhisperKit"]),
         .library(name: "ASREngineAppleSpeech", targets: ["ASREngineAppleSpeech"]),
         .library(name: "ASREngineSherpaOnnx", targets: ["ASREngineSherpaOnnx"]),
+        .library(name: "ASREngineParakeet", targets: ["ASREngineParakeet"]),
+        .executable(name: "vocal-bench", targets: ["VocalBench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.0.0"),
-    ] + sherpaOnnxDependencies,
+    ] + sherpaOnnxDependencies + fluidAudioDependencies,
     targets: [
         // ── Pure targets (Linux + Apple) ────────────────────────────────
         .target(name: "CoreModels"),
@@ -102,10 +123,28 @@ let package = Package(
             name: "ASREngineSherpaOnnx",
             dependencies: ["CoreModels", "ASRKit", "ModelStore"] + sherpaOnnxProducts
         ),
+        // Parakeet TDT fast path (docs/15 step 14): FluidAudio's CoreML
+        // models on the Neural Engine, routed for pinned-English takes.
+        .target(
+            name: "ASREngineParakeet",
+            dependencies: ["CoreModels", "ASRKit"] + fluidAudioProducts
+        ),
 
         // ── Eval tooling (pure; the CLI needs a live model, the core does not)
         .target(name: "CleanupEval", dependencies: ["CoreModels", "CleanupKit"]),
         .executableTarget(name: "eval-cleanup", dependencies: ["CleanupEval", "CleanupKit"]),
+
+        // ── Benchmark harness (docs/06 M0, Phase 0.2) ───────────────────
+        // BenchKit is pure (WAV decode, WER/CER, percentiles) so it tests on
+        // Linux; the vocal-bench executable runs real ASR on Apple only.
+        .target(name: "BenchKit", dependencies: ["CoreModels"]),
+        .executableTarget(
+            name: "VocalBench",
+            dependencies: [
+                "BenchKit", "CoreModels", "TextPipeline", "ASRKit", "ASREngineWhisperKit",
+                "PersistenceKit",
+            ]
+        ),
 
         // ── Tests ───────────────────────────────────────────────────────
         .testTarget(name: "CoreModelsTests", dependencies: ["CoreModels"]),
@@ -141,6 +180,7 @@ let package = Package(
             name: "ASREngineSherpaOnnxTests",
             dependencies: ["ASREngineSherpaOnnx", "ASRKit", "ModelStore"]
         ),
+        .testTarget(name: "BenchKitTests", dependencies: ["BenchKit"]),
     ],
     swiftLanguageModes: [.v6]
 )

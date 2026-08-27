@@ -20,9 +20,16 @@ public struct HotkeyDecisionCore: Sendable {
     public enum Decision: Sendable, Hashable {
         /// Hotkey down edge: pre-arm the session (docs/03 §2).
         case pressBegan
-        /// Release after a hold, a short tap (SessionKit applies the FR-1.5
-        /// has-speech override), or a synthetic release after tap interruption.
+        /// Release after a hold, a lock-finishing tap, or a synthetic release
+        /// after tap interruption.
         case pressEnded
+        /// Short tap (< the hold threshold) that may still become the first
+        /// half of a lock double-tap (docs/15 W10). The monitor ends the take
+        /// provisionally and commits it only if no `.lockToggled` follows
+        /// within the double-tap window — SessionKit still applies the FR-1.5
+        /// has-speech override, but the first tap of a lock gesture can never
+        /// paste text before the second tap locks.
+        case shortTap
         /// Second tap of a double-tap: hands-free lock toggle (FR-1.3).
         case lockToggled
         /// Chord abort or Escape while holding (FR-1.6).
@@ -315,14 +322,22 @@ public struct HotkeyDecisionCore: Sendable {
             isLockActive = true
             return .lockToggled
         }
-        // Short tap: report it as an ended press so SessionKit's FR-1.5
-        // heuristic decides (a sub-500 ms take WITH speech transcribes; without
-        // speech it discards silently — docs/03 §3.1). Routing it to cancel
-        // would make the has-speech override a dead path.
+        if isLockActive {
+            // During lock this tap is the finishing one — a real, immediate
+            // release (the app stops the take on its pressEnded), so the
+            // Escape watch disarms with it. No provisional hold: ending a
+            // hands-free take must not lag the double-tap window.
+            lastShortTapDownTime = pressStartTime
+            isLockActive = false
+            return .pressEnded
+        }
+        // Short tap: reported as `.shortTap` so the monitor ends the take
+        // provisionally — SessionKit's FR-1.5 heuristic still decides (a
+        // sub-500 ms take WITH speech transcribes; without speech it discards
+        // silently — docs/03 §3.1), but delivery waits out the double-tap
+        // window so the first tap of a lock gesture can never paste (W10).
+        // Routing it to cancel would make the has-speech override a dead path.
         lastShortTapDownTime = pressStartTime
-        // During lock this tap is the finishing one (the app stops the take on
-        // its pressEnded), so the Escape watch disarms with it.
-        isLockActive = false
-        return .pressEnded
+        return .shortTap
     }
 }

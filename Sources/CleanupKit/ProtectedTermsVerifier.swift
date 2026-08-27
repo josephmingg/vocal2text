@@ -48,20 +48,31 @@ public enum ProtectedTermsVerifier {
         in output: [Character],
         loweredOutput: [Character]? = nil
     ) -> Bool {
-        guard !term.isEmpty, !output.isEmpty else { return false }
+        !mutationCandidates(of: term, in: output, loweredOutput: loweredOutput).isEmpty
+    }
+
+    /// Every window that reads as the term in altered spelling — the ranges
+    /// the detector flags and the repairer (docs/15 step 25) rewrites.
+    static func mutationCandidates(
+        of term: [Character],
+        in output: [Character],
+        loweredOutput: [Character]? = nil
+    ) -> [Range<Int>] {
+        guard !term.isEmpty, !output.isEmpty else { return [] }
         let exactRanges = exactOccurrenceRanges(of: term, in: output)
         let loweredTerm = lowercasedCharacters(term[...])
+        var candidates: [Range<Int>] = []
         // Single-character terms: only a pure case mutation can be "altered
         // spelling"; any other character is unrelated content, not a mutation
         // (a substitution rule here would flag essentially every output).
         if term.count == 1 {
             let exact = term[0]
-            for character in output where character != exact {
+            for (index, character) in output.enumerated() where character != exact {
                 if lowercasedCharacters([character][...]) == loweredTerm {
-                    return true
+                    candidates.append(index..<(index + 1))
                 }
             }
-            return false
+            return candidates
         }
         for length in max(2, term.count - 1)...(term.count + 1) where length <= output.count {
             for start in 0...(output.count - length) {
@@ -79,11 +90,82 @@ public enum ProtectedTermsVerifier {
                     continue
                 }
                 if isWithinDistanceOne(window, loweredTerm) {
-                    return true
+                    candidates.append(windowRange)
                 }
             }
         }
-        return false
+        return candidates
+    }
+
+    // MARK: - Repair (docs/15 step 25)
+
+    /// Rewrites every mutated occurrence back to the exact term — repair
+    /// instead of reject, so one mangled spelling no longer costs the user an
+    /// otherwise-good cleanup. Overlapping candidate windows around one
+    /// mutation collapse to a single replacement, preferring the window whose
+    /// length matches the term (a pure case fix or substitution) over the
+    /// insertion/deletion variants. The caller re-verifies the result and
+    /// still falls back if the repair did not converge.
+    public static func repaired(
+        output: String, input: String, protectedTerms: [String]
+    ) -> String {
+        guard !protectedTerms.isEmpty else { return output }
+        var characters = Array(output)
+        for term in protectedTerms {
+            guard !term.isEmpty, input.contains(term) else { continue }
+            characters = repairing(term: Array(term), in: characters)
+        }
+        return String(characters)
+    }
+
+    private static func repairing(term: [Character], in output: [Character]) -> [Character] {
+        let lowered = lowercasedCharacters(output[...])
+        let aligned = lowered.count == output.count ? lowered : nil
+        // Repair is held to a stricter standard than detection: rewriting a
+        // window that is glued to adjacent letters/digits corrupts the
+        // neighboring word ("ai" inside "Wait" → "WAIt"; "Claud " repaired
+        // against a following word glues them together) and the corrupted
+        // text then *passes* re-verification. Such windows stay flagged by
+        // verify() — the pipeline falls back instead, which is never worse
+        // than what shipped before repair existed. This also means a term
+        // embedded in contiguous CJK prose is not repaired, only rejected.
+        let candidates = mutationCandidates(of: term, in: output, loweredOutput: aligned)
+            .filter { range in
+                let before = range.lowerBound > 0 ? output[range.lowerBound - 1] : nil
+                let after = range.upperBound < output.count ? output[range.upperBound] : nil
+                func isWordCharacter(_ character: Character?) -> Bool {
+                    character.map { $0.isLetter || $0.isNumber } ?? false
+                }
+                return !isWordCharacter(before) && !isWordCharacter(after)
+            }
+        guard !candidates.isEmpty else { return output }
+
+        // Cluster overlapping windows (the n−1/n/n+1 scans flag the same
+        // mutation up to three times), then pick one range per cluster.
+        let sorted = candidates.sorted {
+            ($0.lowerBound, $0.upperBound) < ($1.lowerBound, $1.upperBound)
+        }
+        var clusters: [[Range<Int>]] = []
+        var clusterEnd = -1
+        for range in sorted {
+            if range.lowerBound < clusterEnd, !clusters.isEmpty {
+                clusters[clusters.count - 1].append(range)
+            } else {
+                clusters.append([range])
+            }
+            clusterEnd = max(clusterEnd, range.upperBound)
+        }
+
+        var repaired = output
+        for cluster in clusters.reversed() {
+            let best = cluster.min {
+                (abs($0.count - term.count), $0.lowerBound)
+                    < (abs($1.count - term.count), $1.lowerBound)
+            }
+            guard let best else { continue }
+            repaired.replaceSubrange(best, with: term)
+        }
+        return repaired
     }
 
     /// True when `candidate` appears as a contiguous run inside `whole`.

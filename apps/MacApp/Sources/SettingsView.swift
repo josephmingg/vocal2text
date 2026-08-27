@@ -1,6 +1,8 @@
 import AppKit
 import AudioPipeline
+import BenchKit
 import CoreModels
+import ModelStore
 import PersistenceKit
 import ServiceManagement
 import SwiftUI
@@ -24,13 +26,15 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             ProfilesPane(profileStore: appState.profileStore)
                 .tabItem { Label("Profiles", systemImage: "person.2") }
+            ModelsPane(settings: settings)
+                .tabItem { Label("Models", systemImage: "cpu") }
             CleanupPane(settings: settings)
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
             DictionaryPane(database: appState.database)
                 .tabItem { Label("Dictionary", systemImage: "character.book.closed") }
             HistoryPrivacyPane(settings: settings, database: appState.database)
                 .tabItem { Label("History & Privacy", systemImage: "clock.arrow.circlepath") }
-            AboutPane()
+            AboutPane(database: appState.database)
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
         // Sized for the Profiles master–detail pane; the Form panes are
@@ -63,6 +67,15 @@ private struct GeneralPane: View {
                 }
                 Toggle("Play sounds", isOn: $settings.soundsEnabled)
                 Toggle("Show HUD while dictating", isOn: $settings.hudEnabled)
+                Toggle("Show latency after each dictation", isOn: $settings.showTimingsToast)
+                // docs/15 step 33: the FR-1.3 hands-free cap, no longer
+                // hardcoded at 15 minutes.
+                Picker("Hands-free auto-stop after", selection: $settings.lockCapMinutes) {
+                    Text("5 minutes").tag(5)
+                    Text("15 minutes").tag(15)
+                    Text("30 minutes").tag(30)
+                    Text("60 minutes").tag(60)
+                }
             }
         }
         .formStyle(.grouped)
@@ -91,6 +104,163 @@ private struct GeneralPane: View {
         }
         // Reflect what the system actually recorded, not what was requested.
         launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+}
+
+// MARK: - Models (docs/15 step 15)
+
+/// Settings → Models: the resurrected ModelStore. The primary EN/ZH model is
+/// a picker instead of a hardcoded name; the locally managed models
+/// (Burmese, VAD) show their real on-disk footprint with a delete that goes
+/// through `ModelStore`'s hardened path checks.
+@MainActor
+private struct ModelsPane: View {
+    @ObservedObject var settings: SettingsStore
+
+    /// One locally managed catalog entry's measured state.
+    private struct LocalModelRow: Identifiable {
+        var spec: ModelSpec
+        var state: InstalledState
+        var bytes: Int64
+        var id: String { spec.id }
+    }
+
+    @State private var localRows: [LocalModelRow] = []
+    @State private var statusText: String?
+
+    /// WhisperKit-served choices, from the catalog — the pane never invents
+    /// model names.
+    private var primaryChoices: [ModelSpec] {
+        ModelCatalog.builtIn.filter { $0.engine == "whisperkit" && $0.engineModelName != nil }
+    }
+
+    var body: some View {
+        Form {
+            Section("Primary model (English / 中文)") {
+                Picker("Model", selection: $settings.whisperKitModel) {
+                    ForEach(primaryChoices, id: \.id) { spec in
+                        Text("\(spec.displayName) (~\(Self.formatBytes(spec.approximateBytes)))")
+                            .tag(spec.engineModelName ?? spec.id)
+                    }
+                }
+                Text(
+                    """
+                    Applies immediately: the current model is released and the \
+                    chosen one loads in the background. A model that has never \
+                    been used downloads first (WhisperKit manages its own files).
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Section("English fast path") {
+                Toggle(
+                    "Use Parakeet v2 for pinned English",
+                    isOn: $settings.parakeetEnglishEnabled
+                )
+                Text(
+                    """
+                    Parakeet TDT runs on the Neural Engine at roughly 100× \
+                    real time — the docs/15 raw-speed lever — and enables the \
+                    live text preview in the HUD while you speak. Applies to \
+                    the next dictation with the language pinned to English; \
+                    Auto, 中文, and မြန်မာ keep their engines. First use \
+                    downloads ~600 MB (FluidAudio manages its own files).
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Section("Downloaded models") {
+                if localRows.isEmpty {
+                    Text("No locally managed models are installed yet.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(localRows) { row in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.spec.displayName)
+                            Text(Self.stateLabel(row.state, bytes: row.bytes))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if row.state != .notInstalled {
+                            Button("Delete", role: .destructive) {
+                                delete(row.spec)
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                Text(
+                    """
+                    Deleted models re-download automatically the next time a \
+                    dictation needs them.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            if let statusText {
+                Section {
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { reload() }
+    }
+
+    /// The catalog entries whose files live inside Vocal's own models tree —
+    /// exactly what `ModelStore` can measure and safely delete.
+    private var locallyManagedSpecs: [ModelSpec] {
+        ModelCatalog.builtIn.filter { $0.engine == "sherpa-onnx" }
+    }
+
+    private func reload() {
+        guard let root = AppState.modelsDirectory() else { return }
+        let specs = locallyManagedSpecs
+        Task {
+            let store = ModelStore(rootDirectory: root)
+            var rows: [LocalModelRow] = []
+            for spec in specs {
+                let state = await store.installedState(of: spec)
+                let bytes = await store.downloadedBytes(of: spec)
+                rows.append(LocalModelRow(spec: spec, state: state, bytes: bytes))
+            }
+            localRows = rows
+        }
+    }
+
+    private func delete(_ spec: ModelSpec) {
+        guard let root = AppState.modelsDirectory() else { return }
+        Task {
+            let store = ModelStore(rootDirectory: root)
+            do {
+                try await store.delete(spec)
+                statusText = "Deleted \(spec.displayName)."
+            } catch {
+                statusText = "Could not delete \(spec.displayName): \(error)"
+            }
+            reload()
+        }
+    }
+
+    private static func stateLabel(_ state: InstalledState, bytes: Int64) -> String {
+        switch state {
+        case .notInstalled: return "Not downloaded"
+        case .partial: return "Partial download (\(formatBytes(bytes)) on disk)"
+        case .installed: return "\(formatBytes(bytes)) on disk"
+        }
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 
@@ -176,11 +346,27 @@ private struct DictionaryPane: View {
                         }
                     }
                 }
-                HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
                     TextField("Heard (spoken form)", text: $spoken)
-                    TextField("Should appear (written form)", text: $written)
+                    // Multi-line written forms are snippets (docs/15 step 26):
+                    // "sign off" → a whole closing block.
+                    TextField(
+                        "Should appear (written form — snippets may span lines)",
+                        text: $written,
+                        axis: .vertical
+                    )
+                    .lineLimit(1...5)
                     Button("Add") { add() }
                         .disabled(!canAdd)
+                }
+                HStack(spacing: 8) {
+                    Button("Import CSV…") { importCSV() }
+                    Button("Export CSV…") { exportCSV() }
+                        .disabled(entries.isEmpty)
+                    Spacer()
+                    Text("Columns: spoken, written, enabled")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 if let errorText {
                     Text(errorText)
@@ -234,6 +420,72 @@ private struct DictionaryPane: View {
             reload()
         } catch {
             errorText = "Could not delete entry: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - CSV import/export (docs/15 step 26)
+
+    private func exportCSV() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "vocal-dictionary.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try DictionaryCSV.export(entries).write(to: url, atomically: true, encoding: .utf8)
+            errorText = nil
+        } catch {
+            errorText = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Merge semantics: an imported row whose spoken form matches an existing
+    /// entry (case-insensitively) updates that entry in place; new spoken
+    /// forms become new entries. Nothing is deleted by an import.
+    private func importCSV() {
+        guard let database else { return }
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let imported = DictionaryCSV.parse(text)
+            guard !imported.isEmpty else {
+                errorText = "Nothing imported — expected columns: spoken, written, enabled"
+                return
+            }
+            var existingBySpoken: [String: DictionaryEntry] = [:]
+            for entry in entries {
+                existingBySpoken[entry.spoken.lowercased()] = entry
+            }
+            var updated = 0
+            var added = 0
+            for row in imported {
+                if var existing = existingBySpoken[row.spoken.lowercased()] {
+                    existing.written = row.written
+                    existing.isEnabled = row.isEnabled
+                    try database.save(existing)
+                    existingBySpoken[row.spoken.lowercased()] = existing
+                    updated += 1
+                } else {
+                    let entry = DictionaryEntry(
+                        spoken: row.spoken,
+                        written: row.written,
+                        isEnabled: row.isEnabled,
+                        createdAt: Date()
+                    )
+                    try database.save(entry)
+                    // Registered immediately: a file with the same spoken
+                    // form twice (merged exports) must update the row it
+                    // just created, not insert a competing duplicate.
+                    existingBySpoken[row.spoken.lowercased()] = entry
+                    added += 1
+                }
+            }
+            errorText = nil
+            reload()
+            errorText = "Imported \(added) new, updated \(updated)."
+        } catch {
+            errorText = "Import failed: \(error.localizedDescription)"
         }
     }
 }
@@ -317,6 +569,10 @@ private struct HistoryPrivacyPane: View {
 
 @MainActor
 private struct AboutPane: View {
+    let database: DatabaseStore?
+    @State private var counters: [(counter: Diagnostics.Counter, count: Int)] = []
+    @State private var usage = UsageStats()
+
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "mic.circle.fill")
@@ -338,8 +594,88 @@ private struct AboutPane: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 400)
+
+            // docs/15 step 54, the modest cut: numbers the stored history
+            // already supports — no charts, no "hours saved" guesswork.
+            if usage.takeCount > 0 {
+                GroupBox("Usage") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        usageRow("Dictations", "\(usage.takeCount)")
+                        usageRow("Words dictated", "\(usage.wordCount)")
+                        usageRow("Time speaking", Self.durationLabel(usage.speakingSeconds))
+                        usageRow("Average pace", "\(Int(usage.wordsPerMinute.rounded())) WPM")
+                        usageRow("Day streak", "\(usage.streakDays)")
+                        if usage.medianFeltLatencySeconds > 0 {
+                            usageRow(
+                                "Median wait after release",
+                                String(format: "%.1f s", usage.medianFeltLatencySeconds)
+                            )
+                        }
+                    }
+                    .padding(4)
+                }
+                .frame(maxWidth: 340)
+            }
+
+            GroupBox("Diagnostics") {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(counters, id: \.counter) { entry in
+                        HStack {
+                            Text(entry.counter.label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(entry.count)")
+                                .font(.caption)
+                                .monospacedDigit()
+                        }
+                    }
+                    HStack {
+                        Spacer()
+                        Button("Reset Counters") {
+                            Diagnostics.shared.reset()
+                            counters = Diagnostics.shared.snapshot()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .padding(4)
+            }
+            .frame(maxWidth: 340)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            counters = Diagnostics.shared.snapshot()
+            // The decode runs off the main actor (nonisolated async), because
+            // computing over the whole history decodes every row, including
+            // multi-hundred-KB import transcripts.
+            if let database {
+                Task { usage = await Self.computeUsage(database: database) }
+            }
+        }
+    }
+
+    private static nonisolated func computeUsage(database: DatabaseStore) async -> UsageStats {
+        UsageStats.compute(records: (try? database.allTranscripts()) ?? [])
+    }
+
+    private func usageRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.caption)
+                .monospacedDigit()
+        }
+    }
+
+    /// "42 s" / "18 min" / "3.4 h" — the size of the number is the message.
+    static func durationLabel(_ seconds: Double) -> String {
+        if seconds < 60 { return "\(Int(seconds.rounded())) s" }
+        if seconds < 3600 { return "\(Int((seconds / 60).rounded())) min" }
+        return String(format: "%.1f h", seconds / 3600)
     }
 
     private static var versionString: String {

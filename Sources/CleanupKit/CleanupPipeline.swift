@@ -37,14 +37,24 @@ public struct CleanupPipeline: Sendable {
         case .rejected(let rule):
             return .fellBack(reason: "validator: \(rule)")
         case .accepted(let cleaned):
-            guard
-                ProtectedTermsVerifier.verify(
-                    output: cleaned, input: request.text, protectedTerms: request.protectedTerms
-                )
-            else {
-                return .fellBack(reason: "protected-terms")
+            if ProtectedTermsVerifier.verify(
+                output: cleaned, input: request.text, protectedTerms: request.protectedTerms
+            ) {
+                return .cleaned(cleaned, model: response.modelName)
             }
-            return .cleaned(cleaned, model: response.modelName)
+            // docs/15 step 25: repair instead of reject — rewrite the mutated
+            // spelling back to the exact term and keep the cleanup. Falling
+            // back remains the answer only when the repair doesn't converge.
+            let repaired = ProtectedTermsVerifier.repaired(
+                output: cleaned, input: request.text, protectedTerms: request.protectedTerms
+            )
+            if repaired != cleaned,
+                ProtectedTermsVerifier.verify(
+                    output: repaired, input: request.text, protectedTerms: request.protectedTerms
+                ) {
+                return .cleaned(repaired, model: response.modelName)
+            }
+            return .fellBack(reason: "protected-terms")
         }
     }
 

@@ -263,6 +263,8 @@ private struct ProfileEditorForm: View {
             Toggle("Fix punctuation and capitalization", isOn: field(\.formatting.autoPunctuation))
             Toggle("Smart spacing around insertions", isOn: field(\.formatting.smartSpacing))
             Toggle("Allow paragraphs and bullet lists", isOn: field(\.formatting.structureAllowed))
+            // docs/15 step 31: the Terminal/Code profile upgrade.
+            Toggle("Code mode (spoken symbols & casing)", isOn: field(\.formatting.codeMode))
         }
     }
 

@@ -131,6 +131,29 @@ public enum RecoveryStore {
     public static func discard(at url: URL) {
         try? FileManager.default.removeItem(at: url)
     }
+
+    /// Writes a failed take's samples back as a recovery sidecar (docs/15
+    /// step 35): transcription failed after capture already deleted its
+    /// crash-recovery copy, and these samples are the only copy left. The
+    /// file joins the ordinary 24-hour recovery window and shows up through
+    /// the same menu offer as a cancelled take.
+    @discardableResult
+    public static func preserve(
+        samples: [Float],
+        in directory: URL = FileManager.default.temporaryDirectory
+    ) -> URL? {
+        guard !samples.isEmpty else { return nil }
+        let url = directory.appendingPathComponent(
+            RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32"
+        )
+        let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
 }
 
 /// Converts captured audio into the 0…1 levels the HUD waveform draws
@@ -396,6 +419,9 @@ public actor MicrophoneCapture {
     private var processingTask: Task<Void, Never>?
     private var recoveryURL: URL?
     private var recoveryHandle: FileHandle?
+    /// Set when the lazy sidecar create failed for this take; recording
+    /// continues without crash recovery rather than retrying on every chunk.
+    private var recoveryFileUnavailable = false
     private var isCapturing = false
     /// FR-1.3 (docs/11 G4): invoked at most once per take when free space
     /// drops below the `DiskSpaceGuard` floor mid-recording. The composition
@@ -406,8 +432,45 @@ public actor MicrophoneCapture {
     private var lowDiskTripped = false
     /// Per-chunk microphone level for the HUD waveform (FR-4.1), ~12×/second.
     private var levelHandler: (@Sendable (Float) -> Void)?
+    /// docs/15 step 36: fired when the engine's configuration changes
+    /// mid-take (AirPods connect, input device switch). The composition root
+    /// finishes the take through the normal stop path — captured audio is
+    /// delivered, not lost to a silently dead tap.
+    private var configurationChangeHandler: (@Sendable () -> Void)?
+    private var configurationObserver: (any NSObjectProtocol)?
+    /// An engine built and prepared ahead of the press (docs/15 step 50):
+    /// instantiating the input audio unit is the expensive part of capture
+    /// start, and every millisecond between key-down and mic-open is speech
+    /// the user already spoke. Consumed by `start()`, replenished after each
+    /// take. Preparing does not touch the microphone — no privacy indicator,
+    /// no permission prompt — only allocation.
+    private var preparedEngine: AVAudioEngine?
+    /// Cached free-space probe (docs/15 step 50): the FR-1.3 refuse-to-start
+    /// guard needed a filesystem stat on the press path. A probe this recent
+    /// answers it; the mid-take checks and `preheat()` keep it fresh.
+    private var lastDiskProbe: (at: Date, availableBytes: Int64?)?
+    private static let diskProbeMaxAge: TimeInterval = 60
 
     public init() {}
+
+    /// Builds and prepares the next take's engine, and refreshes the disk
+    /// probe — everything capture start needs that can be paid for while no
+    /// one is speaking. Called at app launch and after each take ends.
+    public func preheat() {
+        lastDiskProbe = (
+            at: Date(),
+            availableBytes: DiskSpaceGuard.availableBytes(
+                at: FileManager.default.temporaryDirectory
+            )
+        )
+        guard !isCapturing, preparedEngine == nil else { return }
+        let engine = AVAudioEngine()
+        // Touching the input node instantiates the underlying audio unit —
+        // the slow part of a cold start.
+        _ = engine.inputNode.outputFormat(forBus: 0)
+        engine.prepare()
+        preparedEngine = engine
+    }
 
     /// Installs the low-disk callback (see `lowDiskHandler`).
     public func setLowDiskHandler(_ handler: @escaping @Sendable () -> Void) {
@@ -419,24 +482,53 @@ public actor MicrophoneCapture {
         levelHandler = handler
     }
 
+    /// Installs the device-change callback (see `configurationChangeHandler`).
+    public func setConfigurationChangeHandler(_ handler: @escaping @Sendable () -> Void) {
+        configurationChangeHandler = handler
+    }
+
     /// Begin capturing. The returned session's `chunks` yields converted audio
     /// as it arrives; call `finish` to stop and receive the concatenated take.
     public func start() async throws -> MicrophoneSession {
         guard !isCapturing else { throw CaptureError.alreadyCapturing }
-        // FR-1.3: refuse to start a recording the disk cannot hold.
-        if DiskSpaceGuard.isCritical(
-            availableBytes: DiskSpaceGuard.availableBytes(
+        // FR-1.3: refuse to start a recording the disk cannot hold. Answered
+        // from the cached probe when one is fresh (docs/15 step 50); the
+        // synchronous stat only runs when nothing primed it.
+        let availableBytes: Int64?
+        if let probe = lastDiskProbe, Date().timeIntervalSince(probe.at) < Self.diskProbeMaxAge {
+            availableBytes = probe.availableBytes
+        } else {
+            availableBytes = DiskSpaceGuard.availableBytes(
                 at: FileManager.default.temporaryDirectory
             )
-        ) {
+            lastDiskProbe = (at: Date(), availableBytes: availableBytes)
+        }
+        if DiskSpaceGuard.isCritical(availableBytes: availableBytes) {
             throw CaptureError.insufficientDiskSpace
         }
         ingestsSinceDiskCheck = 0
         lowDiskTripped = false
 
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let hardwareFormat = input.outputFormat(forBus: 0)
+        // Use the engine prepared ahead of the press when there is one
+        // (docs/15 step 50). A prepared engine created before the microphone
+        // existed (or before permission) reports a zero-rate format — fall
+        // back to a fresh engine rather than failing the take.
+        var engine: AVAudioEngine
+        var cameFromPreheat = false
+        if let prepared = preparedEngine {
+            preparedEngine = nil
+            engine = prepared
+            cameFromPreheat = true
+        } else {
+            engine = AVAudioEngine()
+        }
+        var input = engine.inputNode
+        var hardwareFormat = input.outputFormat(forBus: 0)
+        if hardwareFormat.sampleRate <= 0, cameFromPreheat {
+            engine = AVAudioEngine()
+            input = engine.inputNode
+            hardwareFormat = input.outputFormat(forBus: 0)
+        }
         // Tap extraction takes channel 0 only, so the converter's input side is
         // mono at the hardware rate — never the (possibly multichannel) native format.
         guard hardwareFormat.sampleRate > 0,
@@ -466,27 +558,32 @@ public actor MicrophoneCapture {
             RecoveryFileReaper.reapExpiredRecoveryFiles()
         }
 
+        // The sidecar file itself is created lazily by the first ingest
+        // (docs/15 step 50): the create + open are two file-I/O calls that
+        // sat between key-down and mic-open, and the first converted chunk —
+        // which runs on the processing task, off the press path — is the
+        // earliest moment anything needs the file to exist.
         let recoveryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32")
-        _ = FileManager.default.createFile(atPath: recoveryURL.path, contents: Data())
-        let handle: FileHandle
-        do {
-            handle = try FileHandle(forWritingTo: recoveryURL)
-        } catch {
-            // Do not leave the just-created empty file behind.
-            try? FileManager.default.removeItem(at: recoveryURL)
-            throw error
-        }
 
         let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: [Float].self)
-        let (chunkStream, chunkContinuation) = AsyncStream.makeStream(of: PCMChunk.self)
+        // The live-chunk stream feeds the streaming preview (docs/15 step 22);
+        // the take itself is `accumulated`. The buffer is bounded so an
+        // unconsumed stream never retains the whole take a second time, but
+        // deep enough (~5 s at ~12 chunks/s) that the preview's reader — which
+        // drains promptly but shares an actor with decodes — never drops audio
+        // out of its window in practice.
+        let (chunkStream, chunkContinuation) = AsyncStream.makeStream(
+            of: PCMChunk.self, bufferingPolicy: .bufferingNewest(64)
+        )
 
         self.engine = engine
         self.converter = converter
         self.monoInputFormat = monoInput
         self.targetFormat = target
         self.recoveryURL = recoveryURL
-        self.recoveryHandle = handle
+        self.recoveryHandle = nil
+        self.recoveryFileUnavailable = false
         self.nativeContinuation = nativeContinuation
         self.chunkContinuation = chunkContinuation
         self.accumulated = []
@@ -508,6 +605,19 @@ public actor MicrophoneCapture {
             for await samples in nativeStream {
                 await self?.ingest(samples)
             }
+        }
+
+        // docs/15 step 36: a route change (AirPods connecting, an interface
+        // unplugged) reconfigures the engine under the tap; the take must end
+        // gracefully instead of recording silence. Registered before start so
+        // an immediate change is not missed; removed in stopEngineAndDrain.
+        let changeHandler = configurationChangeHandler
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { _ in
+            changeHandler?()
         }
 
         engine.prepare()
@@ -538,6 +648,24 @@ public actor MicrophoneCapture {
     }
 
     // MARK: - Private
+
+    /// Opens the crash-recovery sidecar on first use (docs/15 step 50). A
+    /// failed create degrades to "no crash recovery for this take" — losing
+    /// the sidecar must not lose the recording that is working fine in memory.
+    private func ensureRecoveryHandle() -> FileHandle? {
+        if let recoveryHandle { return recoveryHandle }
+        guard !recoveryFileUnavailable, let recoveryURL else { return nil }
+        _ = FileManager.default.createFile(atPath: recoveryURL.path, contents: Data())
+        do {
+            let handle = try FileHandle(forWritingTo: recoveryURL)
+            recoveryHandle = handle
+            return handle
+        } catch {
+            try? FileManager.default.removeItem(at: recoveryURL)
+            recoveryFileUnavailable = true
+            return nil
+        }
+    }
 
     private func ingest(_ nativeSamples: [Float]) {
         guard let converter,
@@ -584,7 +712,7 @@ public actor MicrophoneCapture {
         chunkContinuation?.yield(PCMChunk(samples: converted))
         levelHandler?(AudioLevelMeter.level(for: converted))
         let data = converted.withUnsafeBufferPointer { Data(buffer: $0) }
-        try? recoveryHandle?.write(contentsOf: data)
+        try? ensureRecoveryHandle()?.write(contentsOf: data)
 
         // FR-1.3 mid-take guard (docs/11 G4): a long (locked) take must not
         // record until the disk fills. Fires the handler once; the app
@@ -593,13 +721,12 @@ public actor MicrophoneCapture {
         ingestsSinceDiskCheck += 1
         if ingestsSinceDiskCheck >= DiskSpaceGuard.checkInterval {
             ingestsSinceDiskCheck = 0
-            if !lowDiskTripped,
-                DiskSpaceGuard.isCritical(
-                    availableBytes: DiskSpaceGuard.availableBytes(
-                        at: FileManager.default.temporaryDirectory
-                    )
-                )
-            {
+            let available = DiskSpaceGuard.availableBytes(
+                at: FileManager.default.temporaryDirectory
+            )
+            // Keep the start-path probe cache fresh for the next take.
+            lastDiskProbe = (at: Date(), availableBytes: available)
+            if !lowDiskTripped, DiskSpaceGuard.isCritical(availableBytes: available) {
                 lowDiskTripped = true
                 lowDiskHandler?()
             }
@@ -611,6 +738,10 @@ public actor MicrophoneCapture {
     private func stopEngineAndDrain() async {
         guard isCapturing else { return }
         isCapturing = false
+        if let observer = configurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configurationObserver = nil
+        }
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -621,6 +752,26 @@ public actor MicrophoneCapture {
             await task.value
         }
         processingTask = nil
+        // Converter tail flush (docs/15 step 36): resampling holds a few
+        // milliseconds of internal frames; hand them to the take instead of
+        // clipping the last syllable's edge. Harmless on cancel — the
+        // accumulated audio is discarded right after.
+        if let converter, let outputFormat = targetFormat,
+            let outBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 1_024) {
+            var conversionError: NSError?
+            let status = converter.convert(to: outBuffer, error: &conversionError) { _, inputStatus in
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            if status != .error, outBuffer.frameLength > 0,
+                let channels = outBuffer.floatChannelData {
+                accumulated.append(
+                    contentsOf: UnsafeBufferPointer(
+                        start: channels[0], count: Int(outBuffer.frameLength)
+                    )
+                )
+            }
+        }
         chunkContinuation?.finish()
         chunkContinuation = nil
         try? recoveryHandle?.close()
@@ -638,6 +789,7 @@ public actor MicrophoneCapture {
             try? FileManager.default.removeItem(at: url)
         }
         clearFormats()
+        scheduleRepreheat()
         return PCMChunk(samples: samples)
     }
 
@@ -646,6 +798,16 @@ public actor MicrophoneCapture {
         accumulated = []
         // Recovery file intentionally kept: cancelled takes stay recoverable (FR-1.6).
         clearFormats()
+        scheduleRepreheat()
+    }
+
+    /// Replenishes the prepared engine after a take, off the caller's path —
+    /// `finish` is awaited by the transcription pipeline, and preparing the
+    /// next engine is exactly the work that must not sit on it.
+    private func scheduleRepreheat() {
+        Task { [weak self] in
+            await self?.preheat()
+        }
     }
 
     private func clearFormats() {

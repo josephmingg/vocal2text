@@ -8,11 +8,10 @@ import Foundation
 /// and a hung browser all look identical from the outside — routing silently
 /// falls back to the `.app` route for the frontmost bundle ID.
 ///
-/// Blocking by design: the call waits up to 1.5 s for osascript (a hung
-/// browser must not stall dictation — docs/03 §3.3), then `terminate()`s the
-/// child and returns nil. Never call this on the main thread;
-/// `FrontmostContext.snapshot()` invokes it from the background context that
-/// runs profile resolution.
+/// Async, non-blocking: the call awaits the osascript child for up to 1.5 s
+/// (a hung browser must not stall dictation — docs/03 §3.3), then
+/// `terminate()`s it and returns nil. No thread is parked while waiting; the
+/// session overlaps this await with recording.
 enum BrowserURLFetcher {
 
     /// Hard deadline for the osascript round-trip (docs/03 §3.3).
@@ -53,9 +52,9 @@ enum BrowserURLFetcher {
 
     /// Returns the active tab's URL string for a supported browser, or nil on
     /// any failure (unsupported bundle ID, spawn failure, Automation denial,
-    /// non-zero exit, timeout, empty output). Blocks the calling thread for up
-    /// to 1.5 s — background threads only.
-    static func activeTabURL(browserBundleID: String) -> String? {
+    /// non-zero exit, timeout, empty output). Suspends — never blocks a
+    /// thread — for at most 1.5 s.
+    static func activeTabURL(browserBundleID: String) async -> String? {
         guard let script = scriptsByBundleID[browserBundleID] else { return nil }
 
         let process = Process()
@@ -68,30 +67,63 @@ enum BrowserURLFetcher {
         // can back up a pipe buffer.
         process.standardError = FileHandle.nullDevice
 
-        // The termination handler retains the semaphore, so signaling after a
-        // timed-out wait is safe (the semaphore only ever ends above its
-        // initial value).
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in finished.signal() }
+        return await withCheckedContinuation { continuation in
+            // Exactly one resume: the termination handler and the timeout
+            // race, and `terminate()` fires the handler again.
+            let once = ResumeOnce(continuation)
 
-        do {
-            try process.run()
-        } catch {
-            return nil
+            process.terminationHandler = { finished in
+                guard finished.terminationStatus == 0 else {
+                    once.resume(returning: nil)
+                    return
+                }
+                // A tab URL is far below the 64 KB pipe buffer, so the child
+                // can never have blocked on a full pipe before exiting;
+                // reading after termination is safe.
+                let data = stdout.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                once.resume(returning: (output?.isEmpty ?? true) ? nil : output)
+            }
+
+            do {
+                try process.run()
+            } catch {
+                once.resume(returning: nil)
+                return
+            }
+
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + timeoutSeconds
+            ) {
+                if once.resume(returning: nil) {
+                    // A hung browser must not stall dictation (docs/03 §3.3);
+                    // the handler this fires is swallowed by `once`.
+                    process.terminate()
+                }
+            }
         }
+    }
+}
 
-        if finished.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            process.terminate()
-            return nil
-        }
-        guard process.terminationStatus == 0 else { return nil }
+/// Wraps a continuation so racing completion paths resume it exactly once.
+/// `resume` reports whether this call was the one that resumed.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String?, Never>?
 
-        // A tab URL is far below the 64 KB pipe buffer, so the child can never
-        // have blocked on a full pipe before exiting; reading after
-        // termination is safe.
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return nil }
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+    init(_ continuation: CheckedContinuation<String?, Never>) {
+        self.continuation = continuation
+    }
+
+    @discardableResult
+    func resume(returning value: String?) -> Bool {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        guard let continuation else { return false }
+        continuation.resume(returning: value)
+        return true
     }
 }

@@ -6,7 +6,9 @@ focus. All speech recognition and AI cleanup runs on-device.
 
 **Status: v1.1.** macOS and iOS apps build and run; the shared engine is covered by tests on
 Linux and Apple platforms. Milestones live in [`docs/06-roadmap.md`](docs/06-roadmap.md);
-deliberate gaps are tracked in [`docs/11-known-gaps.md`](docs/11-known-gaps.md).
+deliberate gaps are tracked in [`docs/11-known-gaps.md`](docs/11-known-gaps.md); the
+active improvement plan (a deep review against the 2026 dictation market) is
+[`docs/15-deep-review-and-improvement-plan.md`](docs/15-deep-review-and-improvement-plan.md).
 
 ### Languages
 

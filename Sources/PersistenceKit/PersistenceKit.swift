@@ -19,8 +19,20 @@ public enum DatabaseStoreError: Error, Sendable, Equatable {
 /// (docs/03 §5). Search is dual FTS5 — `unicode61` for Latin keywords and
 /// `trigram` for Chinese substrings — with a LIKE fallback for 1–2-character
 /// CJK queries that neither tokenizer can serve.
-public final class DatabaseStore: Sendable {
+///
+/// `@unchecked` covers exactly one thing: the lock-guarded dictionary cache
+/// below. Everything else is the thread-safe `DatabaseQueue`.
+public final class DatabaseStore: @unchecked Sendable {
     private let dbQueue: DatabaseQueue
+
+    /// In-memory dictionary snapshot (docs/15 step 48). The session reads the
+    /// dictionary on every take's critical path, for data that changes on the
+    /// scale of months — so the SQLite read runs once, and every write below
+    /// invalidates. Guarded by `dictionaryCacheLock`; the generation counter
+    /// keeps a slow read that raced a write from resurrecting stale entries.
+    private let dictionaryCacheLock = NSLock()
+    private var dictionaryCache: [DictionaryEntry]?
+    private var dictionaryCacheGeneration = 0
 
     private static let transcriptColumns =
         "id, createdAt, source, language, rawText, deliveredText, durationSeconds, "
@@ -260,6 +272,23 @@ public final class DatabaseStore: Sendable {
         }
     }
 
+    /// The newest rows only — for callers that need "the latest take", not
+    /// the whole history decoded (a 4 h import's transcript is hundreds of
+    /// KB; `allTranscripts()` on the main thread is a beachball).
+    public func recentTranscripts(limit: Int) throws -> [TranscriptRecord] {
+        try dbQueue.read { db -> [TranscriptRecord] in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT \(Self.transcriptColumns) FROM transcript
+                    ORDER BY createdAt DESC LIMIT ?
+                    """,
+                arguments: [limit]
+            )
+            return Self.decodedRecords(from: rows)
+        }
+    }
+
     public func deleteTranscript(id: UUID) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM transcript WHERE id = ?", arguments: [id.uuidString])
@@ -362,10 +391,22 @@ public final class DatabaseStore: Sendable {
                 arguments: [entry.id.uuidString, document]
             )
         }
+        invalidateDictionaryCache()
     }
 
+    /// Served from the in-memory snapshot after the first read (docs/15
+    /// step 48); `save`/`delete` invalidate it, so an edit is visible on the
+    /// very next take.
     public func dictionaryEntries() throws -> [DictionaryEntry] {
-        try dbQueue.read { db -> [DictionaryEntry] in
+        dictionaryCacheLock.lock()
+        if let cached = dictionaryCache {
+            dictionaryCacheLock.unlock()
+            return cached
+        }
+        let generation = dictionaryCacheGeneration
+        dictionaryCacheLock.unlock()
+
+        let entries = try dbQueue.read { db -> [DictionaryEntry] in
             let rows = try Row.fetchAll(
                 db,
                 sql: "SELECT id, document FROM dictionary_entry ORDER BY rowid"
@@ -374,6 +415,16 @@ public final class DatabaseStore: Sendable {
                 DictionaryEntry.self, from: rows, column: "dictionary_entry.document"
             )
         }
+
+        dictionaryCacheLock.lock()
+        // Only cache what is still current: a write that landed while this
+        // read was in flight bumped the generation, and caching over it would
+        // pin pre-write entries until the next edit.
+        if dictionaryCacheGeneration == generation {
+            dictionaryCache = entries
+        }
+        dictionaryCacheLock.unlock()
+        return entries
     }
 
     public func deleteDictionaryEntry(id: UUID) throws {
@@ -383,6 +434,14 @@ public final class DatabaseStore: Sendable {
                 arguments: [id.uuidString]
             )
         }
+        invalidateDictionaryCache()
+    }
+
+    private func invalidateDictionaryCache() {
+        dictionaryCacheLock.lock()
+        dictionaryCache = nil
+        dictionaryCacheGeneration &+= 1
+        dictionaryCacheLock.unlock()
     }
 
     // MARK: - Profiles

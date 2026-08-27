@@ -32,6 +32,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// First run: Accessibility isn't granted yet, so the tap fails to arm;
     /// this poll re-arms the moment the user grants it during onboarding.
     private var armRetryTimer: Timer?
+    /// Pending commit of a short-tap take (FR-1.5 × FR-1.3, docs/15 W10):
+    /// fires once the double-tap window closes; a lock gesture cancels it and
+    /// discards the held take so the first tap can never paste before the
+    /// second tap locks.
+    private var shortTapCommitTask: Task<Void, Never>?
+    /// The decision core's double-tap window (0.35 s) plus margin for the
+    /// tap-thread → main-actor hop.
+    private static let shortTapCommitDelay = Duration.milliseconds(400)
 
     override init() {
         appState = AppState()
@@ -39,6 +47,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Warm the ASR model now, in the background, so the day's first
+        // dictation doesn't pay the model load inside the take (docs/15
+        // step 13). Skipped until the model has downloaded once.
+        appState.preloadEngineIfWarmedBefore()
+
+        // A mid-take guard (low disk, device change) that force-ends a locked
+        // take must end lock mode with it: report the truthful isLockMode to
+        // the deliverer and clear the bookkeeping — a dangling
+        // `isLockModeActive` would swallow the next press and let the cap
+        // timer fire a bogus notice later.
+        appState.endLockModeForForcedStop = { [weak self] in
+            guard let self, self.isLockModeActive else { return false }
+            self.endLockMode(stopping: false)
+            return true
+        }
+
         let monitor = HotkeyMonitor(spec: appState.settings.hotkeySpec)
         monitor.onPressBegan = { [weak self] in
             guard let self else { return }
@@ -56,6 +80,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: wasLocked)
         }
+        monitor.onShortTap = { [weak self] in
+            guard let self, !self.appState.isHotkeyTestModeActive else { return }
+            // End the take now (mic off); deliver only if no second tap
+            // upgrades this into the lock gesture within the window. (The
+            // decision core reports a lock-finishing tap as pressEnded, so a
+            // shortTap here is never part of an active lock.)
+            self.appState.endDictationProvisionally()
+            self.shortTapCommitTask?.cancel()
+            self.shortTapCommitTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.shortTapCommitDelay)
+                guard !Task.isCancelled else { return }
+                self?.appState.commitProvisionalDictation()
+            }
+        }
         monitor.onCancel = { [weak self] in
             guard let self, !self.appState.isHotkeyTestModeActive else { return }
             if self.isLockModeActive {
@@ -70,13 +108,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.isLockModeActive {
                 self.endLockMode(stopping: true)
             } else {
-                // The second tap's down-edge already started the recording;
-                // it now runs hands-free until the next tap (FR-1.3).
+                // The tap pair was the lock gesture: drop the first tap's
+                // held take (docs/15 W10), then run the second tap's
+                // recording hands-free until the next tap (FR-1.3).
+                self.shortTapCommitTask?.cancel()
+                self.shortTapCommitTask = nil
+                self.appState.discardProvisionalDictation()
                 self.isLockModeActive = true
                 self.startLockCapTimer()
             }
         }
-        if !monitor.start() {
+        appState.hotkeyArmed = monitor.start()
+        if !appState.hotkeyArmed {
             scheduleArmRetry()
         }
         hotkeyMonitor = monitor
@@ -93,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 monitor.updateSpec(spec)
                 // Re-arming can fail if Accessibility was revoked since launch;
                 // without this the new key would be silently dead forever.
+                self.appState.hotkeyArmed = monitor.isArmed
                 if !monitor.isArmed {
                     self.scheduleArmRetry()
                 }
@@ -115,6 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         workspaceObservers = []
         lockCapTask?.cancel()
+        shortTapCommitTask?.cancel()
         armRetryTimer?.invalidate()
     }
 
@@ -122,12 +167,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startLockCapTimer() {
         lockCapTask?.cancel()
+        // Configurable (docs/15 step 33); clamped so a corrupted default can
+        // neither disable the cap nor make it fire instantly.
+        let minutes = min(120, max(1, appState.settings.lockCapMinutes))
         lockCapTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(15 * 60))
+            try? await Task.sleep(for: .seconds(minutes * 60))
             guard !Task.isCancelled, let self, self.isLockModeActive else { return }
             self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: true)
-            self.appState.showNotice("Hands-free capped at 15 min — take saved")
+            self.appState.showNotice("Hands-free capped at \(minutes) min — take saved")
         }
     }
 
@@ -149,7 +197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// not cost the user their hotkey until the next relaunch.
     private func rearmOrRetry() {
         guard let monitor = hotkeyMonitor else { return }
-        if !monitor.rearm() {
+        appState.hotkeyArmed = monitor.rearm()
+        if !appState.hotkeyArmed {
             scheduleArmRetry()
         }
     }
@@ -160,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if self.hotkeyMonitor?.start() == true {
+                    self.appState.hotkeyArmed = true
                     self.armRetryTimer?.invalidate()
                     self.armRetryTimer = nil
                 }

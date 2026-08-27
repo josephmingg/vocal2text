@@ -133,6 +133,32 @@ public enum AudioFileDecoder {
             }
         }
 
+        // Drain the converter's internal tail after EOF — the resampler holds
+        // back a few frames of state, and dropping them clips the end of every
+        // import (the same defect the live-capture stop path flushes for).
+        if !truncated {
+            let tailCapacity = AVAudioFrameCount(4_096)
+            if let tailBuffer = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: tailCapacity) {
+                var conversionError: NSError?
+                let status = converter.convert(to: tailBuffer, error: &conversionError) { _, inputStatus in
+                    inputStatus.pointee = .endOfStream
+                    return nil
+                }
+                if status != .error, tailBuffer.frameLength > 0,
+                    let channels = tailBuffer.floatChannelData {
+                    samples.append(
+                        contentsOf: UnsafeBufferPointer(
+                            start: channels[0], count: Int(tailBuffer.frameLength)
+                        )
+                    )
+                    if samples.count > maximumOutputSamples {
+                        samples.removeLast(samples.count - maximumOutputSamples)
+                        truncated = true
+                    }
+                }
+            }
+        }
+
         if let onProgress { _ = onProgress(1) }
         return Decoded(
             audio: PCMChunk(samples: samples),

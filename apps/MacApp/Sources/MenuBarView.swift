@@ -40,6 +40,26 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 10) {
             statusLine
 
+            if !appState.hotkeyArmed {
+                Label(
+                    "Hotkey not armed — grant Accessibility in System Settings",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
+            // docs/15 step 37: a revoked microphone permission (TCC reset)
+            // must warn here, not surface as silent empty takes.
+            if appState.microphonePermissionDenied {
+                Label(
+                    "Microphone access is off — enable it in System Settings → Privacy",
+                    systemImage: "mic.slash.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+
             Divider()
 
             VStack(alignment: .leading, spacing: 4) {
@@ -85,6 +105,46 @@ struct MenuBarView: View {
                 )
             }
 
+            // docs/15 step 27: propose, never auto-apply — the entry the last
+            // re-dictation implied, one click away.
+            if let suggestion = appState.vocabularySuggestion {
+                HStack(spacing: 6) {
+                    Button("Add “\(suggestion.written)” to Dictionary") {
+                        appState.acceptVocabularySuggestion()
+                    }
+                    Button {
+                        appState.dismissVocabularySuggestion()
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Dismiss this suggestion")
+                }
+            }
+
+            // docs/15 step 28: cheap, loved, and the safety net that makes
+            // aggressive cleanup acceptable.
+            Button("Paste Last Transcript Again") {
+                appState.pasteLastTranscriptAgain()
+            }
+            .help("Insert the most recent transcript where you are typing now.")
+            Button("Undo Last Insertion") {
+                appState.undoLastInsertion(replaceWithRaw: false)
+            }
+            .help("Remove the text the last dictation inserted (where the app allows it).")
+            Button("Replace Last with Raw Transcription") {
+                appState.undoLastInsertion(replaceWithRaw: true)
+            }
+            .help("Swap the cleaned-up text for exactly what was transcribed.")
+
+            Divider()
+
+            // docs/15 step 44 (FR-6): a podcast in, a transcript in History.
+            Button("Import Audio File…") {
+                appState.importAudioFile()
+            }
+            .help("Transcribe an audio file into History (no text is inserted anywhere).")
+
             Button("Open History") {
                 WindowManager.shared.showHistory(appState: appState)
             }
@@ -101,8 +161,12 @@ struct MenuBarView: View {
         .padding(12)
         .frame(width: 280)
         // The sidecar can appear or expire while the menu is closed — and a
-        // crash leaves one behind with no phase change to notice it.
-        .onAppear { appState.refreshRecoverableTake() }
+        // crash leaves one behind with no phase change to notice it. The
+        // permission probe rides the same moment (docs/15 step 37).
+        .onAppear {
+            appState.refreshRecoverableTake()
+            appState.refreshPermissionHealth()
+        }
     }
 
     /// "12s" / "1:24" — enough for the user to tell which take is on offer.

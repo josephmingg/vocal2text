@@ -1,6 +1,8 @@
 import ASRKit
+import ASREngineParakeet
 import ASREngineSherpaOnnx
 import ASREngineWhisperKit
+import AVFoundation
 import AppKit
 import AudioPipeline
 import CleanupKit
@@ -10,16 +12,27 @@ import Foundation
 import PersistenceKit
 import ProfileKit
 import SessionKit
+import TextPipeline
+import UniformTypeIdentifiers
 
 /// What the HUD (and menu-bar icon) renders. Owned by AppState; views only read it.
 struct HUDState: Equatable {
     enum Mode: Equatable {
         case hidden
         case listening(startedAt: Date)
-        case processing
+        case processing(stage: ProcessingStage)
         case error(String)
         /// Non-error transient message (clipboard fallback, secure-field block).
         case notice(String)
+    }
+
+    /// Which pipeline stage the processing HUD is in (docs/15 step 23): the
+    /// delivering flash makes the paste moment visible instead of the whole
+    /// post-release stretch reading as one undifferentiated spinner.
+    enum ProcessingStage: Equatable {
+        case transcribing
+        case cleaning
+        case delivering
     }
 
     var mode: Mode
@@ -43,6 +56,10 @@ final class AppState: ObservableObject {
     let settings: SettingsStore
     let database: DatabaseStore?
     @Published var hudState: HUDState
+    /// Whether the global hotkey tap is armed (docs/15 W9): false when
+    /// Accessibility is missing or the tap failed to start — the menu bar
+    /// shows a warning instead of the app looking alive with a dead hotkey.
+    @Published var hotkeyArmed = true
 
     /// Set by `AppDelegate` once the tap is built. Settings needs it to suspend
     /// the global hotkey while the user records a replacement — otherwise
@@ -79,6 +96,12 @@ final class AppState: ObservableObject {
     /// overrides. Warm-up goes through this too, so it prepares whichever
     /// engine the current language mode routes to.
     private let routedEngine: LanguageRoutingEngine
+    /// The docs/15 step 16 VAD; retained so the launch preload can fetch its
+    /// (~0.6 MB) model before the first take needs it.
+    private let speechDetector: SileroVoiceActivityDetector
+    /// Parakeet fast path (docs/15 step 14); retained for the first-run
+    /// download hint when the pinned-English toggle is on.
+    private let parakeetEngine: ParakeetEngine
 
     /// Whether the configured cleanup provider sends text off-device — drives
     /// the HUD privacy badge (FR-7.4). Ollama at localhost: false. Computed
@@ -92,6 +115,7 @@ final class AppState: ObservableObject {
     }
 
     private var phaseTask: Task<Void, Never>?
+    private var settingsSinks: Set<AnyCancellable> = []
     /// Hotkey edges must reach the session actor in order; independent
     /// unstructured Tasks give no FIFO guarantee, so each control call chains
     /// on the previous one.
@@ -103,6 +127,9 @@ final class AppState: ObservableObject {
     /// Set when the FR-1.3 low-disk guard finished a take early, so the notice
     /// shows after delivery instead of being overwritten by phase changes.
     private var pendingLowDiskNotice = false
+    /// Set when a mid-take audio-device change ended the take (docs/15
+    /// step 36), so the explanation lands once the HUD settles.
+    private var pendingDeviceChangeNotice = false
     /// Live profile set (docs/11 G17): persisted, seeded from the built-ins on
     /// first run, and edited by Settings → Profiles. One instance, so the
     /// resolver, the menu-bar pin picker, and the editor agree on UUIDs
@@ -124,28 +151,34 @@ final class AppState: ObservableObject {
         let frontmost = FrontmostContext()
         let relay = ResolutionRelay()
 
-        // Rebuilt per take from the live settings (docs/11 G15) and the take's
-        // profile (docs/11 G3) — see `selectCleanup` below. This one is only
-        // for the press-time prewarm, which needs *a* provider before the
-        // profile is known; a model changed since launch still prewarms the
-        // old one, which costs nothing but a wasted keep-alive ping.
-        let prewarmProvider = OpenAICompatibleProvider(
-            baseURL: AppState.ollamaBaseURL(),
-            model: settings.ollamaModel,
-            id: .ollama(model: settings.ollamaModel)
-        )
-
-        let engine = WhisperKitEngine()
+        // The primary model is a setting now (docs/15 step 15), not a
+        // hardcoded name; Settings → Models switches it live.
+        let engine = WhisperKitEngine(modelName: settings.whisperKitModel)
         // Pinned မြန်မာ routes to the Burmese engine (Omnilingual CTC 1B,
         // 10.78% CER on FLEURS my_mm — docs/11 G13); everything else,
         // including auto mode, stays on WhisperKit. The routing contract is
         // documented on LanguageRoutingEngine.
         let burmeseEngine = SherpaOnnxEngine(variant: .omnilingual1B)
+        // docs/15 step 14: pinned-English can route to Parakeet TDT v2 on
+        // the Neural Engine (~100× real time). Behind a live toggle read
+        // straight from defaults so a Settings flip applies to the next
+        // dictation; auto mode and pinned ZH stay on WhisperKit, so
+        // code-switching accuracy is untouched.
+        let parakeetEngine = ParakeetEngine()
+        let englishRoute = SwitchedEngine(
+            isOn: { UserDefaults.standard.bool(forKey: SettingsStore.parakeetEnglishDefaultsKey) },
+            on: parakeetEngine,
+            off: engine
+        )
         let routedEngine = LanguageRoutingEngine(
             primary: engine,
-            overrides: [.burmese: burmeseEngine]
+            overrides: [.burmese: burmeseEngine, .english: englishRoute]
         )
         let microphone = MicrophoneCapture()
+        // docs/15 step 16: Silero VAD gates and trims each finished take —
+        // silence delivers nothing instead of hallucinated text, and the
+        // engine only decodes the speech envelope.
+        let speechDetector = SileroVoiceActivityDetector()
         let dependencies = DictationSession.Dependencies(
             audio: MicrophoneCaptureAdapter(microphone: microphone),
             engine: routedEngine,
@@ -181,12 +214,78 @@ final class AppState: ObservableObject {
                     audio.samples, forTranscript: transcriptID, in: directory
                 )
             },
+            analyzeSpeech: { audio in
+                await speechDetector.analyze(audio)
+            },
+            // docs/15 step 29: the AX caret read that makes smart spacing
+            // format against what is really before the insertion point.
+            readPrecedingContext: {
+                await MainActor.run { AXInserter.precedingContext() }
+            },
+            // docs/15 step 35: a failed transcription leaves its audio in the
+            // ordinary 24-hour recovery window — the same menu offer as a
+            // cancelled take, so zero silent losses.
+            preserveFailedAudio: { audio in
+                RecoveryStore.preserve(samples: audio.samples)
+            },
+            // Streaming preview (docs/15 step 22), display-only per FR-4.1.
+            // Gated to the Parakeet route on purpose: its decode is fast
+            // enough that a release landing mid-preview waits a fraction of a
+            // second on the engine actor at worst, where Whisper's
+            // multi-second decode would hold the final pass hostage — the
+            // exact latency Phase 2 removed.
+            previewTranscribe: { audio in
+                let eligible = await MainActor.run {
+                    settings.parakeetEnglishEnabled
+                        && settings.languageMode == .pinned(.english)
+                }
+                guard eligible else { return nil }
+                // Never trigger the ~600 MB download from a preview tick; the
+                // preload and the take's own path own that moment.
+                guard await parakeetEngine.isModelLoaded else { return nil }
+                return try? await parakeetEngine.transcribe(
+                    audio, languageMode: .pinned(.english), dictionaryTerms: []
+                ).text
+            },
+            onPartial: { text in
+                Task { @MainActor in
+                    relay.notePartial(text)
+                }
+            },
             prewarmCleanup: {
                 // Fired at press (docs/03 §2); skip the network touch entirely
-                // while the master switch is off.
-                guard await settings.cleanupMasterSwitch else { return }
-                guard await prewarmProvider.isAvailable() else { return }
-                await prewarmProvider.prewarm()
+                // while the master switch is off. No availability preflight:
+                // prewarm already swallows every error, so the probe was a
+                // second HTTP round-trip for nothing (docs/15 step 19). The
+                // provider is rebuilt here (string copies, no network) so a
+                // model or server changed since launch prewarms the right one.
+                let snapshot = await MainActor.run {
+                    settings.cleanupMasterSwitch
+                        ? (
+                            baseURL: AppState.ollamaBaseURL(),
+                            model: settings.ollamaModel,
+                            language: settings.languageMode.pinnedLanguage ?? .english,
+                            stylePrompt: settings.stylePrompt
+                        )
+                        : nil
+                }
+                guard let snapshot else { return }
+                let provider = OpenAICompatibleProvider(
+                    baseURL: snapshot.baseURL,
+                    model: snapshot.model,
+                    id: .ollama(model: snapshot.model)
+                )
+                // Shaped like the take's real request so the server's prompt
+                // cache holds the reusable system-prompt prefix, not a "hi".
+                let terms = await settings.enabledDictionaryEntries().map(\.written)
+                await provider.prewarm(
+                    for: CleanupRequest(
+                        text: "",
+                        language: snapshot.language,
+                        stylePrompt: snapshot.stylePrompt,
+                        protectedTerms: terms
+                    )
+                )
             },
             deliverer: MacTextDelivering(
                 deliverer: TextDeliverer(
@@ -195,7 +294,7 @@ final class AppState: ObservableObject {
                     ),
                     clipboard: ClipboardManager()
                 ),
-                onOutcome: { outcome in relay.noteDelivery(outcome) }
+                onOutcome: { outcome, text in relay.noteDelivery(outcome, text: text) }
             ),
             store: DatabaseTranscriptStore(database: database),
             config: settings,
@@ -209,7 +308,7 @@ final class AppState: ObservableObject {
                 let (pinned, currentProfiles) = await MainActor.run {
                     (PinState.shared.pinnedProfileID, profileStore.profiles)
                 }
-                let snapshot = frontmost.snapshot()
+                let snapshot = await frontmost.snapshot()
                 let resolution = ProfileResolver(profiles: currentProfiles).resolve(
                     frontmostBundleID: snapshot.bundleID,
                     tabHostname: snapshot.tabHostname,
@@ -229,6 +328,8 @@ final class AppState: ObservableObject {
         self.engine = engine
         self.burmeseEngine = burmeseEngine
         self.routedEngine = routedEngine
+        self.speechDetector = speechDetector
+        self.parakeetEngine = parakeetEngine
         self.profileStore = profileStore
         self.hudState = HUDState(
             mode: .hidden,
@@ -259,9 +360,66 @@ final class AppState: ObservableObject {
                     relay.noteLevel(level)
                 }
             }
+            // docs/15 step 36: an AirPods connect or input switch mid-take
+            // reconfigures the engine under the tap; end the take through the
+            // normal stop path so the audio captured so far is delivered.
+            await microphone.setConfigurationChangeHandler {
+                Task { @MainActor in
+                    relay.noteDeviceChange()
+                }
+            }
+            // Build and prepare the first take's audio engine now (docs/15
+            // step 50), so the first press finds the allocation already paid.
+            // Touches no microphone hardware — no permission prompt, no
+            // privacy indicator. Ordered after the handlers so a press racing
+            // launch never records without its guards installed.
+            await microphone.preheat()
         }
         // Enforce the retention window on the recordings already on disk.
         Self.sweepRetainedAudio(retentionDays: settings.audioRetentionDays)
+        // A language-mode change can point the router at a different engine;
+        // warm it when the choice is made, not inside the next take (docs/15
+        // step 13). The new value rides the publisher — @Published emits on
+        // willSet, so reading the property here would see the old mode.
+        settings.$languageMode
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] mode in
+                self?.preloadEngineIfWarmedBefore(mode: mode)
+            }
+            .store(in: &settingsSinks)
+        // Turning the Parakeet route on warms it right away (docs/15 step
+        // 14) so the first pinned-English dictation after the flip doesn't
+        // pay the download inside the take. Gated on modelWarmedOnce like
+        // every background load.
+        settings.$parakeetEnglishEnabled
+            .dropFirst()
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
+                // Deferred one main-actor turn: @Published emits on willSet,
+                // and the router reads the defaults key that didSet writes.
+                Task { @MainActor [weak self] in
+                    guard let self, self.settings.languageMode == .pinned(.english) else { return }
+                    self.preloadEngineIfWarmedBefore()
+                }
+            }
+            .store(in: &settingsSinks)
+        // Settings → Models switches the primary model live (docs/15 step
+        // 15): drop the resident pipe, then warm the chosen model in the
+        // background so the next take doesn't pay the load.
+        settings.$whisperKitModel
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] name in
+                guard let self else { return }
+                let engine = self.engine
+                Task { [weak self] in
+                    await engine.setModel(name: name)
+                    await MainActor.run { self?.preloadEngineIfWarmedBefore() }
+                }
+            }
+            .store(in: &settingsSinks)
         startPhaseMirror()
         // A take interrupted by a crash or a quit leaves its sidecar behind, so
         // the offer has to survive a relaunch to be worth anything (FR-1.6).
@@ -279,11 +437,49 @@ final class AppState: ObservableObject {
         hudState.levels = levels
     }
 
+    /// Streaming-preview line for the HUD's partial row (docs/15 step 22).
+    /// Only while a take is visibly live: a preview that raced the take's end
+    /// must not resurrect text over an idle or error state.
+    func showPreview(_ text: String) {
+        switch hudState.mode {
+        case .listening, .processing:
+            hudState.partialText = text
+        case .hidden, .error, .notice:
+            break
+        }
+    }
+
+    /// Set by AppDelegate. A mid-take guard that force-ends a take must ask
+    /// it whether hands-free lock was active (so `isLockMode` reaches the
+    /// deliverer truthfully and the FR-3.6 wandering-focus guard holds) and
+    /// have it clear its lock bookkeeping — otherwise `isLockModeActive`
+    /// dangles and swallows the next press, while the cap timer later fires
+    /// a bogus notice.
+    var endLockModeForForcedStop: (() -> Bool)?
+
     /// The FR-1.3 mid-take low-disk guard fired: end the take normally and
     /// queue the explanation for when the HUD returns to idle.
     func lowDiskGuardTripped() {
         pendingLowDiskNotice = true
-        stopDictation(isLockMode: false)
+        stopDictation(isLockMode: endLockModeForForcedStop?() ?? false)
+    }
+
+    /// docs/15 step 36: the audio device changed under a live take.
+    func deviceChangedMidTake() {
+        guard case .listening = hudState.mode else { return }
+        pendingDeviceChangeNotice = true
+        stopDictation(isLockMode: endLockModeForForcedStop?() ?? false)
+    }
+
+    // MARK: - Permission health (docs/15 step 37)
+
+    /// True when microphone access is denied or was revoked (a TCC reset) —
+    /// the menu bar warns instead of the app sitting silently deaf.
+    @Published private(set) var microphonePermissionDenied = false
+
+    func refreshPermissionHealth() {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        microphonePermissionDenied = (status == .denied || status == .restricted)
     }
 
     /// Loads (downloading on first run) the ASR model so the first dictation
@@ -291,6 +487,37 @@ final class AppState: ObservableObject {
     /// the router: pinned မြန်မာ warms the Burmese engine instead.
     func warmUp() async throws {
         try await routedEngine.prepare(languageMode: settings.languageMode)
+        settings.modelWarmedOnce = true
+    }
+
+    /// Loads the routed ASR model in the background (docs/15 step 13) so the
+    /// day's first dictation feels identical to the tenth — without this, the
+    /// press after every relaunch paid the multi-second model load inside the
+    /// take itself. Called at launch and again when the language mode changes
+    /// (the router may then point at a different engine).
+    ///
+    /// Gated on a previous successful load: a silent preload must never turn
+    /// into a surprise ~600 MB download on a fresh install — onboarding owns
+    /// that first, explicit download. Utility priority keeps the CoreML
+    /// compile off launch-critical threads; failures only log, because the
+    /// take path retries the load itself and owns user-facing errors.
+    func preloadEngineIfWarmedBefore(mode: LanguageMode? = nil) {
+        guard settings.modelWarmedOnce else { return }
+        let engine = routedEngine
+        let languageMode = mode ?? settings.languageMode
+        let detector = speechDetector
+        Task.detached(priority: .utility) {
+            // The VAD's ~0.6 MB model first, so the very next take is gated;
+            // then the big ASR load.
+            await detector.prepare()
+            do {
+                try await engine.prepare(languageMode: languageMode)
+            } catch {
+                VocalLog.engine.error(
+                    "background model preload failed: \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
     }
 
     // MARK: - Dictation controls
@@ -307,11 +534,19 @@ final class AppState: ObservableObject {
         // with this take's generation and dropped when stale (docs/11 G16).
         let engine = engine
         let burmeseEngine = burmeseEngine
+        let parakeetEngine = parakeetEngine
+        let parakeetOn = settings.parakeetEnglishEnabled
         let mode = settings.languageMode
         hintGeneration += 1
         let generation = hintGeneration
         Task { [weak self] in
-            if mode == .pinned(.burmese) {
+            if mode == .pinned(.english), parakeetOn {
+                let loaded = await parakeetEngine.isModelLoaded
+                guard !loaded else { return }
+                guard let self, self.hintGeneration == generation else { return }
+                self.hudState.partialText =
+                    "First Parakeet run: downloading the fast English model (~600 MB) and preparing it — later dictations are instant."
+            } else if mode == .pinned(.burmese) {
                 let loaded = await burmeseEngine.isModelLoaded
                 guard !loaded else { return }
                 let availability = await burmeseEngine.availability(for: .burmese)
@@ -338,6 +573,23 @@ final class AppState: ObservableObject {
     func stopDictation(isLockMode: Bool) {
         DeliverySounds.playStop(enabled: settings.soundsEnabled)
         enqueueControl { session in await session.pressEnded(isLockMode: isLockMode) }
+    }
+
+    /// Short-tap release (docs/15 W10): the mic stops now, but a
+    /// speech-bearing take is held until the double-tap window closes (see
+    /// AppDelegate's commit / discard calls) so the first tap of a lock
+    /// gesture never pastes.
+    func endDictationProvisionally() {
+        DeliverySounds.playStop(enabled: settings.soundsEnabled)
+        enqueueControl { session in await session.pressEndedProvisionally() }
+    }
+
+    func commitProvisionalDictation() {
+        enqueueControl { session in await session.commitProvisionalTake() }
+    }
+
+    func discardProvisionalDictation() {
+        enqueueControl { session in await session.discardProvisionalTake() }
     }
 
     func cancelDictation() {
@@ -409,6 +661,203 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - File import (docs/15 step 44, FR-6 — scoped)
+
+    /// Imports an audio file into History: decode → transcribe → deterministic
+    /// stages → history row. No delivery (there is no insertion point), no
+    /// cleanup (the prompt is tuned for dictation, and an import has no
+    /// profile). Timestamped segments and the quadratic-pipeline hardening
+    /// FR-6 also calls for remain open in the plan.
+    ///
+    /// Known bound: the import transcribes on the same engine the live
+    /// pipeline uses, and engines are actors — a dictation released while a
+    /// long import is decoding queues behind it. A second engine instance
+    /// would double model memory; until FR-6 gets its own progress/cancel
+    /// UI, the trade is documented rather than half-solved.
+    func importAudioFile() {
+        guard let database else {
+            showNotice("History is unavailable — cannot import")
+            return
+        }
+        // An LSUIElement app opening a modal panel from the menu-bar popover
+        // must activate first, or the panel can appear behind the frontmost
+        // app without key focus.
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        showNotice("Importing \(url.lastPathComponent)…")
+        let engine = routedEngine
+        let mode = settings.languageMode
+        let settings = settings
+        Task { [weak self] in
+            do {
+                let entries = await settings.enabledDictionaryEntries()
+                // Everything heavy — decode, transcription, and the text
+                // stages over what may be hours of transcript — stays off the
+                // main actor; only the save and the notice come back to it.
+                let (record, wasTruncated) = try await Task.detached(priority: .userInitiated) {
+                    () -> (TranscriptRecord, Bool) in
+                    let decoded = try AudioFileDecoder.decode(url: url)
+                    let clock = ContinuousClock()
+                    let start = clock.now
+                    let result = try await engine.transcribe(
+                        decoded.audio, languageMode: mode, dictionaryTerms: entries.map(\.written)
+                    )
+                    let elapsed = start.duration(to: clock.now)
+                    let language = result.detectedLanguage
+                    let formatting = FormattingOptions()
+                    let normalized = Stage1Normalizer.normalize(
+                        result.text, language: language, formatting: formatting
+                    )
+                    let stage2 = DictionaryEngine.apply(
+                        normalized, entries: entries, language: language
+                    ).text
+                    let formatted = Stage4Formatter.format(
+                        stage2, language: language, formatting: formatting, precedingContext: nil
+                    )
+                    let record = TranscriptRecord(
+                        createdAt: Date(),
+                        source: .fileImport,
+                        language: language,
+                        rawText: result.text,
+                        deliveredText: formatted,
+                        durationSeconds: decoded.audio.durationSeconds,
+                        profileName: "Import",
+                        routeKind: .defaultRoute,
+                        // Imports run without a profile, so stage 3 never applies.
+                        cleanup: .skipped(reason: .profileDisabled),
+                        timings: TimingBreakdown(
+                            transcriptionSeconds: Double(elapsed.components.seconds)
+                                + Double(elapsed.components.attoseconds) / 1e18
+                        ),
+                        importedFilename: url.lastPathComponent
+                    )
+                    return (record, decoded.wasTruncated)
+                }.value
+                try database.save(record)
+                let suffix = wasTruncated ? " (truncated at the 4 h cap)" : ""
+                self?.showNotice("Imported \(url.lastPathComponent)\(suffix) — see History")
+            } catch {
+                self?.showNotice("Import failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Auto-learned vocabulary (docs/15 step 27)
+
+    /// The pending "Add 'X' to your dictionary?" proposal, surfaced in the
+    /// menu bar. Replaced by newer proposals; cleared when accepted.
+    @Published private(set) var vocabularySuggestion: VocabularySuggestor.Suggestion?
+    private var lastDeliveryForLearning: (text: String, at: Date)?
+
+    private func noteDeliveredForLearning(_ text: String) {
+        defer { lastDeliveryForLearning = (text, Date()) }
+        guard let previous = lastDeliveryForLearning else { return }
+        guard
+            let suggestion = VocabularySuggestor.suggestion(
+                previousText: previous.text,
+                currentText: text,
+                gapSeconds: Date().timeIntervalSince(previous.at)
+            )
+        else { return }
+        // Skip proposals the dictionary already answers.
+        let existing = (try? database?.dictionaryEntries()) ?? []
+        guard !existing.contains(where: {
+            $0.spoken.lowercased() == suggestion.spoken.lowercased()
+        }) else { return }
+        vocabularySuggestion = suggestion
+        showNotice("New word? The menu bar can add “\(suggestion.written)” to your dictionary")
+    }
+
+    /// The user accepted the proposal: it becomes an ordinary dictionary
+    /// entry, applied by stage 2 from the next take on.
+    func acceptVocabularySuggestion() {
+        guard let suggestion = vocabularySuggestion, let database else { return }
+        let entry = DictionaryEntry(
+            spoken: suggestion.spoken,
+            written: suggestion.written,
+            createdAt: Date()
+        )
+        do {
+            try database.save(entry)
+            vocabularySuggestion = nil
+            showNotice("Added “\(suggestion.written)” to your dictionary")
+        } catch {
+            showNotice("Could not save the entry: \(error.localizedDescription)")
+        }
+    }
+
+    func dismissVocabularySuggestion() {
+        vocabularySuggestion = nil
+    }
+
+    // MARK: - Re-paste + undo (docs/15 step 28)
+
+    /// The newest delivered dictation, or nil when history has none — what
+    /// the menu bar's re-paste and undo act on.
+    private func latestDeliveredRecord() -> TranscriptRecord? {
+        guard let database else { return nil }
+        // A bounded fetch: decoding the whole history (imports included) on
+        // the main thread to find one row is a beachball. 50 covers any
+        // plausible run of cancelled takes and imports at the top.
+        let records = (try? database.recentTranscripts(limit: 50)) ?? []
+        return records.first { !$0.isCancelled && $0.source != .fileImport }
+    }
+
+    /// Menu-bar "Paste Last Transcript Again" (Wispr's ⌘⌃V, docs/15 step 28):
+    /// re-delivers the newest transcript into whatever is frontmost, through
+    /// the same insertion ladder as a live take.
+    func pasteLastTranscriptAgain() {
+        guard let record = latestDeliveredRecord() else {
+            showNotice("Nothing to paste yet")
+            return
+        }
+        NSApp.deactivate()
+        let overrides = settings.insertionStrategyOverrides
+        Task { @MainActor in
+            await Self.yieldFocusToPreviousApp()
+            let deliverer = TextDeliverer(
+                strategies: InsertionStrategyTable(overrides: overrides)
+            )
+            // The text is already fully formatted; the deliverer only routes
+            // by app and mode, so default formatting metadata is fine here.
+            let context = DeliveryContext(
+                pressTimeAppBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                isLockMode: false,
+                formatting: FormattingOptions(),
+                language: record.language
+            )
+            let outcome = await deliverer.deliver(record.deliveredText, context: context)
+            self.showDelivery(outcome: outcome)
+        }
+    }
+
+    /// The undo safety net (docs/15 step 28, Part 2b form): replace the last
+    /// insertion with the raw transcription, or remove it entirely. AX-only —
+    /// where the focused element can't be read and edited, nothing changes
+    /// and the HUD says so, which beats guessing with synthesized keystrokes.
+    func undoLastInsertion(replaceWithRaw: Bool) {
+        guard let record = latestDeliveredRecord() else {
+            showNotice("Nothing to undo yet")
+            return
+        }
+        NSApp.deactivate()
+        Task { @MainActor in
+            await Self.yieldFocusToPreviousApp()
+            let replacement = replaceWithRaw ? record.rawText : ""
+            if AXUndo.replaceLastOccurrence(of: record.deliveredText, with: replacement) {
+                self.showNotice(
+                    replaceWithRaw
+                        ? "Replaced with the raw transcription" : "Last insertion removed"
+                )
+            } else {
+                self.showNotice("Undo isn't available in this app")
+            }
+        }
+    }
+
     /// Hands focus back to the app the user was working in, and waits for the
     /// handoff to actually land.
     ///
@@ -473,13 +922,26 @@ final class AppState: ObservableObject {
         case .arming:
             hudState.mode = .listening(startedAt: Date())
         case .recording:
-            hudState.mode = .listening(startedAt: Date())
+            // Keep the arming timestamp: resetting it here visibly restarted
+            // the HUD's elapsed timer a beat into every take (docs/15 W13).
+            if case .listening = hudState.mode {
+                // already listening since arming
+            } else {
+                hudState.mode = .listening(startedAt: Date())
+            }
             DeliverySounds.playStart(enabled: settings.soundsEnabled)
-        case .transcribing, .cleaning, .delivering:
-            hudState.mode = .processing
+        case .transcribing:
+            hudState.mode = .processing(stage: .transcribing)
+        case .cleaning:
+            hudState.mode = .processing(stage: .cleaning)
+        case .delivering:
+            hudState.mode = .processing(stage: .delivering)
         case .cancelled:
             hintGeneration += 1
             pendingLowDiskNotice = false
+            // A device change queued its notice for a take the user then
+            // cancelled — the flag must not survive to caption the next take.
+            pendingDeviceChangeNotice = false
             hudState.mode = .hidden
             hudState.partialText = ""
             hudState.levels = []
@@ -492,16 +954,30 @@ final class AppState: ObservableObject {
             // (docs/11 G16).
             hintGeneration += 1
             // The session clears lastError at every pressBegan, so any error
-            // visible when it returns to idle belongs to this take.
-            if pendingLowDiskNotice {
+            // visible when it returns to idle belongs to this take. The error
+            // outranks the guards' pending notices — a take a guard ended
+            // whose transcription then failed must not claim "take saved".
+            if let error = await session.lastError {
+                pendingLowDiskNotice = false
+                pendingDeviceChangeNotice = false
+                DeliverySounds.playError(enabled: settings.soundsEnabled)
+                hudState.mode = .error(Self.message(for: error))
+                scheduleErrorDismiss()
+                // docs/15 step 35: a failed take just preserved its audio;
+                // surface the recovery offer without waiting for a relaunch.
+                refreshRecoverableTake()
+            } else if pendingLowDiskNotice {
                 pendingLowDiskNotice = false
                 showNotice("Disk almost full — take saved before recording stopped")
+            } else if pendingDeviceChangeNotice {
+                pendingDeviceChangeNotice = false
+                showNotice("Audio device changed — take saved")
             } else if case .notice = hudState.mode {
                 // A delivery notice (clipboard fallback / secure block) is
                 // already showing; let its own dismiss timer run.
-            } else if let error = await session.lastError {
-                hudState.mode = .error(Self.message(for: error))
-                scheduleErrorDismiss()
+            } else if settings.showTimingsToast, let timings = await session.lastTimings {
+                // FR-11.4 opt-in: show where the time went after each take.
+                showNotice(Self.timingsSummary(timings))
             } else {
                 hudState.mode = .hidden
             }
@@ -510,15 +986,47 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// One-line "where the time went" summary for the latency toast.
+    private static func timingsSummary(_ timings: TimingBreakdown) -> String {
+        var parts = [String(format: "transcribe %.2fs", timings.transcriptionSeconds)]
+        if timings.cleanupSeconds > 0 {
+            parts.append(String(format: "cleanup %.2fs", timings.cleanupSeconds))
+        }
+        parts.append(String(format: "deliver %.2fs", timings.deliverySeconds))
+        let total = String(format: "%.2fs", timings.totalPostReleaseSeconds)
+        return "Delivered in \(total) (\(parts.joined(separator: ", ")))"
+    }
+
     /// Delivery outcomes the user must hear about (FR-3.2/3.4/3.6) — invoked
     /// by the deliverer seam before the session finishes the take.
-    func showDelivery(outcome: DeliveryOutcome) {
+    func showDelivery(outcome: DeliveryOutcome, text: String = "") {
+        // Reaching delivery means transcription ran, so the model is on disk
+        // and loaded — record that, so future launches may preload silently
+        // even if onboarding's "Warm up now" was skipped (docs/15 step 13).
+        if !settings.modelWarmedOnce {
+            settings.modelWarmedOnce = true
+        }
+        // docs/15 step 27: a quick re-dictation that differs by one respelled
+        // span is the user fixing a mis-hearing — propose (never auto-apply)
+        // the dictionary entry. Secure-field takes leave no trace, so they
+        // don't participate.
+        switch outcome {
+        case .blockedSecureField:
+            break
+        case .inserted, .copiedToClipboard:
+            if !text.isEmpty {
+                noteDeliveredForLearning(text)
+            }
+        }
         switch outcome {
         case .inserted:
-            break
+            // docs/15 step 23: the paste landing gets its own sound.
+            DeliverySounds.playDelivered(enabled: settings.soundsEnabled)
         case .copiedToClipboard:
+            Diagnostics.shared.increment(.clipboardFallbacks)
             showNotice("Copied — press ⌘V to paste")
         case .blockedSecureField(let culprit):
+            Diagnostics.shared.increment(.secureFieldBlocks)
             let suffix = culprit.map { " (\($0))" } ?? ""
             showNotice("Secure field\(suffix) — nothing inserted or saved")
         }
@@ -535,13 +1043,24 @@ final class AppState: ObservableObject {
         scheduleErrorDismiss()
     }
 
+    private var dismissGeneration = 0
+
     private func scheduleErrorDismiss() {
-        let shown = hudState.mode
+        // Generation-tokened: comparing modes by value would let take N's
+        // timer dismiss take N+1's *identical* notice almost immediately
+        // (HUDState.Mode is Equatable, and repeated clipboard fallbacks
+        // produce the same string). Only the newest timer may dismiss, and
+        // only while an error/notice is still what's showing.
+        dismissGeneration += 1
+        let generation = dismissGeneration
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
-            guard let self else { return }
-            if self.hudState.mode == shown {
+            guard let self, self.dismissGeneration == generation else { return }
+            switch self.hudState.mode {
+            case .error, .notice:
                 self.hudState.mode = .hidden
+            case .hidden, .listening, .processing:
+                break
             }
         }
     }
@@ -555,7 +1074,7 @@ final class AppState: ObservableObject {
                 for: .applicationSupportDirectory, in: .userDomainMask
             ).first
         else {
-            print("Vocal: Application Support directory unavailable — history disabled")
+            VocalLog.persistence.error("Application Support unavailable — history disabled")
             return nil
         }
         let directory = appSupport.appendingPathComponent("Vocal", isDirectory: true)
@@ -564,7 +1083,9 @@ final class AppState: ObservableObject {
             let path = directory.appendingPathComponent("vocal.sqlite").path
             return try DatabaseStore(path: path)
         } catch {
-            print("Vocal: failed to open database — history disabled: \(error)")
+            VocalLog.persistence.error(
+                "database open failed — history disabled: \(String(describing: error), privacy: .public)"
+            )
             return nil
         }
     }
@@ -580,6 +1101,21 @@ final class AppState: ObservableObject {
         guard case .ollama(let model)? = profile.providerOverride else { return globalModel }
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? globalModel : trimmed
+    }
+
+    /// The ModelStore root: `Application Support/Vocal/models` — the same
+    /// tree `SherpaOnnxEngine` and the VAD install into, so Settings → Models
+    /// measures and deletes exactly what they wrote (docs/15 step 15).
+    nonisolated static func modelsDirectory() -> URL? {
+        let fileManager = FileManager.default
+        guard
+            let appSupport = fileManager.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask
+            ).first
+        else { return nil }
+        return appSupport
+            .appendingPathComponent("Vocal", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
     }
 
     /// Where retained take audio lives: `Application Support/Vocal/audio`,
@@ -604,7 +1140,7 @@ final class AppState: ObservableObject {
         Task.detached(priority: .utility) {
             let removed = AudioArchive.sweep(directory: directory, retentionDays: retentionDays)
             if removed > 0 {
-                print("Vocal: removed \(removed) expired audio recording(s)")
+                VocalLog.persistence.info("removed \(removed) expired audio recording(s)")
             }
         }
     }
@@ -663,12 +1199,20 @@ private final class ResolutionRelay {
         appState?.hudState.profileName = profileName
     }
 
-    func noteDelivery(_ outcome: DeliveryOutcome) {
-        appState?.showDelivery(outcome: outcome)
+    func notePartial(_ text: String) {
+        appState?.showPreview(text)
+    }
+
+    func noteDelivery(_ outcome: DeliveryOutcome, text: String) {
+        appState?.showDelivery(outcome: outcome, text: text)
     }
 
     func noteLowDisk() {
         appState?.lowDiskGuardTripped()
+    }
+
+    func noteDeviceChange() {
+        appState?.deviceChangedMidTake()
     }
 
     func noteLevel(_ level: Float) {
@@ -696,11 +1240,11 @@ private struct MicrophoneCaptureAdapter: AudioCapturing {
 /// + CGEvent synthesis) must run.
 private struct MacTextDelivering: TextDelivering {
     let deliverer: TextDeliverer
-    let onOutcome: @MainActor (DeliveryOutcome) -> Void
+    let onOutcome: @MainActor (DeliveryOutcome, String) -> Void
 
     func deliver(_ text: String, context: DeliveryContext) async -> DeliveryOutcome {
         let outcome = await deliverer.deliver(text, context: context)
-        await onOutcome(outcome)
+        await onOutcome(outcome, text)
         return outcome
     }
 }

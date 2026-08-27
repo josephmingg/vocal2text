@@ -70,6 +70,81 @@ struct ScriptedAudioCapturing: AudioCapturing {
     }
 }
 
+/// `AudioCapturing` fake whose chunk stream is fed externally — the streaming
+/// preview (docs/15 step 22) consumes it live, so tests must be able to push
+/// chunks while the take is recording.
+struct StreamingAudioCapturing: AudioCapturing {
+    let finishChunk: PCMChunk
+    let feed: ChunkFeed
+
+    func start() async throws -> CaptureSession {
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: PCMChunk.self, bufferingPolicy: .unbounded
+        )
+        await feed.store(continuation)
+        let chunk = finishChunk
+        return CaptureSession(
+            chunks: stream,
+            finish: {
+                continuation.finish()
+                return chunk
+            },
+            cancel: {
+                continuation.finish()
+            }
+        )
+    }
+}
+
+/// Holds the live stream's continuation so a test can push chunks mid-take.
+actor ChunkFeed {
+    private var continuation: AsyncStream<PCMChunk>.Continuation?
+
+    func store(_ continuation: AsyncStream<PCMChunk>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func push(_ chunk: PCMChunk) {
+        continuation?.yield(chunk)
+    }
+}
+
+/// Serves preview hypotheses one at a time; the last one repeats, so a loop
+/// that outpaces the script sees a stable hypothesis rather than nil.
+actor ScriptedHypotheses {
+    private var remaining: [String]
+    private var last: String?
+
+    init(_ hypotheses: [String]) {
+        self.remaining = hypotheses
+    }
+
+    func next() -> String? {
+        if remaining.isEmpty { return last }
+        let value = remaining.removeFirst()
+        last = value
+        return value
+    }
+}
+
+/// Thread-safe string recorder for synchronous callback seams (`onPartial`).
+final class LockedStrings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+}
+
 /// `TextDelivering` fake: records every delivered string and its context, then
 /// returns a configurable outcome.
 actor RecordingTextDeliverer: TextDelivering {
@@ -86,6 +161,27 @@ actor RecordingTextDeliverer: TextDelivering {
         contexts.append(context)
         return outcome
     }
+}
+
+/// Polls `condition` until it holds, failing loudly on timeout — for tests
+/// that must observe work done by an interval-driven loop.
+func waitUntil(
+    _ label: String,
+    timeout: Duration = .seconds(3),
+    condition: @Sendable () -> Bool
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while !condition() {
+        if ContinuousClock.now > deadline {
+            throw TimeoutError(label: label)
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+struct TimeoutError: Error, CustomStringConvertible {
+    var label: String
+    var description: String { "timed out waiting for \(label)" }
 }
 
 /// `TranscriptStoring` fake collecting records in memory.

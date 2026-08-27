@@ -1,6 +1,11 @@
 # Vocal — developer entry points. CI and humans use the same commands.
 
-.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup
+.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup bench-latency
+
+# Latency percentiles from the app's own history (docs/15 step 47) — the
+# numbers you actually felt, per stage, bucketed by utterance length.
+bench-latency:
+	swift run -c release vocal-bench latency
 
 # Build + run all package tests (pure targets work on Linux; full graph on macOS).
 test:

@@ -69,6 +69,9 @@ public enum DeliveryOutcome: Sendable, Hashable {
     case blockedSecureField(culpritApp: String?)
 
     public enum InsertionMethod: String, Sendable, Codable {
+        /// Tier 0 (docs/15 step 17): Accessibility-API insertion, verified by
+        /// reading the focused element back — no clipboard, no sleeps.
+        case accessibility
         case paste
         case unicodeTyping
     }

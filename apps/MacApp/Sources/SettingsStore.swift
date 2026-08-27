@@ -1,3 +1,4 @@
+import ASREngineWhisperKit
 import Combine
 import CoreModels
 import Foundation
@@ -47,6 +48,18 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(soundsEnabled, forKey: Keys.soundsEnabled) }
     }
 
+    /// FR-11.4 opt-in: show a per-take latency breakdown toast after delivery.
+    @Published var showTimingsToast: Bool {
+        didSet { Self.defaults.set(showTimingsToast, forKey: Keys.showTimingsToast) }
+    }
+
+    /// FR-1.3 hands-free cap, configurable (docs/15 step 33): a forgotten
+    /// locked take auto-stops after this many minutes instead of recording
+    /// until the disk fills.
+    @Published var lockCapMinutes: Int {
+        didSet { Self.defaults.set(lockCapMinutes, forKey: Keys.lockCapMinutes) }
+    }
+
     /// Per-bundle-ID insertion strategy overrides (docs/03 §3.2: tier choice is
     /// configuration-driven, not failure-driven). Keys are bundle IDs, values
     /// are strategy names owned by the insertion layer.
@@ -62,9 +75,37 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(ollamaModel, forKey: Keys.ollamaModel) }
     }
 
+    /// WhisperKit model identifier for the primary EN/ZH engine (docs/15
+    /// step 15 — Settings → Models kills the hardcoded name). Applies on the
+    /// engine's next load; the composition root observes changes.
+    @Published var whisperKitModel: String {
+        didSet { Self.defaults.set(whisperKitModel, forKey: Keys.whisperKitModel) }
+    }
+
+    /// docs/15 step 14: route pinned-English dictations to Parakeet TDT v2
+    /// on the Neural Engine. Ships OFF until the owner benchmarks it with
+    /// vocal-bench; the routing seam reads the defaults key directly (see
+    /// `parakeetEnglishDefaultsKey`) so a flip applies to the next dictation.
+    @Published var parakeetEnglishEnabled: Bool {
+        didSet { Self.defaults.set(parakeetEnglishEnabled, forKey: Keys.parakeetEnglish) }
+    }
+
+    /// The raw defaults key behind `parakeetEnglishEnabled`, read by the
+    /// engine router off the main actor (UserDefaults is thread-safe).
+    nonisolated static var parakeetEnglishDefaultsKey: String { Keys.parakeetEnglish }
+
     /// Set by the composition root once the database opens; dictionary lookups
     /// degrade to empty when the store is unavailable.
     var database: DatabaseStore?
+
+    /// Whether the ASR model has ever loaded successfully on this machine
+    /// (docs/15 step 13). Gates the silent launch preload: a background warm
+    /// must never turn into a surprise ~600 MB download on a fresh install —
+    /// onboarding owns that first, explicit download.
+    var modelWarmedOnce: Bool {
+        get { Self.defaults.bool(forKey: Keys.modelWarmedOnce) }
+        set { Self.defaults.set(newValue, forKey: Keys.modelWarmedOnce) }
+    }
 
     // MARK: - Init
 
@@ -78,9 +119,14 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
         hudEnabled = defaults.object(forKey: Keys.hudEnabled) as? Bool ?? true
         soundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
+        showTimingsToast = defaults.object(forKey: Keys.showTimingsToast) as? Bool ?? false
+        lockCapMinutes = defaults.object(forKey: Keys.lockCapMinutes) as? Int ?? 15
         insertionStrategyOverrides =
             defaults.object(forKey: Keys.insertionStrategyOverrides) as? [String: String] ?? [:]
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
+        whisperKitModel =
+            defaults.string(forKey: Keys.whisperKitModel) ?? WhisperKitEngine.defaultModelName
+        parakeetEnglishEnabled = defaults.object(forKey: Keys.parakeetEnglish) as? Bool ?? false
 
         // Settle the legacy hotkey migration on first launch so later reads are
         // plain decodes. `didSet` does not fire from `init`, hence the explicit
@@ -104,7 +150,9 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     var cleanupTimeout: Duration { .seconds(6) }
 
     /// Runs off the main actor: the snapshot of the store handle hops to
-    /// MainActor, but the (synchronous, blocking) SQLite read does not.
+    /// MainActor, but the entry read does not. The store serves it from its
+    /// in-memory cache after the first take (docs/15 step 48), so this is a
+    /// SQLite read only immediately after launch or a dictionary edit.
     nonisolated func enabledDictionaryEntries() async -> [DictionaryEntry] {
         let database = await MainActor.run { self.database }
         guard let database else { return [] }
@@ -167,7 +215,12 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let audioRetentionDays = "settings.audioRetentionDays"
         static let hudEnabled = "settings.hudEnabled"
         static let soundsEnabled = "settings.soundsEnabled"
+        static let showTimingsToast = "settings.showTimingsToast"
+        static let lockCapMinutes = "settings.lockCapMinutes"
         static let insertionStrategyOverrides = "settings.insertionStrategyOverrides"
         static let ollamaModel = "settings.ollamaModel"
+        static let whisperKitModel = "settings.whisperKitModel"
+        static let parakeetEnglish = "settings.parakeetEnglish"
+        static let modelWarmedOnce = "settings.modelWarmedOnce"
     }
 }

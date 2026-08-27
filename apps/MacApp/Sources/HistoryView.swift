@@ -143,6 +143,8 @@ struct HistoryView: View {
                     Divider()
                     transcriptColumn(title: "Delivered", text: record.deliveredText)
                 }
+                Divider()
+                timingsFooter(record.timings)
             }
         } else {
             Text("Select a transcript")
@@ -204,6 +206,31 @@ struct HistoryView: View {
         } catch {
             errorText = "Could not play recording: \(error.localizedDescription)"
         }
+    }
+
+    /// The FR-11.4 per-stage breakdown — every row has carried these numbers
+    /// since v0.1; this is where they finally show (docs/15 Phase 0.1).
+    private func timingsFooter(_ timings: TimingBreakdown) -> some View {
+        HStack(spacing: 12) {
+            timingLabel("capture", timings.captureSeconds)
+            timingLabel("transcribe", timings.transcriptionSeconds)
+            timingLabel("dictionary", timings.dictionarySeconds)
+            timingLabel("cleanup", timings.cleanupSeconds)
+            timingLabel("deliver", timings.deliverySeconds)
+            Spacer()
+            Text(String(format: "after release: %.2fs", timings.totalPostReleaseSeconds))
+                .font(.caption.bold())
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+    }
+
+    private func timingLabel(_ name: String, _ seconds: Double) -> some View {
+        Text(String(format: "%@ %.2fs", name, seconds))
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
     }
 
     private func transcriptColumn(title: String, text: String) -> some View {

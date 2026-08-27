@@ -220,12 +220,14 @@ targets:
           - ProfileKit
           - ModelStore
           - ASRKit
+          - BenchKit
           - SessionKit
           - AudioPipeline
           - PersistenceKit
           - ASREngineWhisperKit
           - ASREngineAppleSpeech
           - ASREngineSherpaOnnx
+          - ASREngineParakeet
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vocal.mac

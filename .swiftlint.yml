@@ -1,0 +1,34 @@
+# Lint gate (docs/03 §Process says CI lints; this makes it true).
+# Philosophy: correctness and hygiene rules on; pure style rules that fight
+# the existing, deliberately-commented codebase stay off.
+
+included:
+  - Sources
+  - Tests
+  - apps
+
+analyzer_rules: []
+
+disabled_rules:
+  # The codebase's doc-comment style runs long deliberately.
+  - line_length
+  - file_length
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+  - function_parameter_count
+  - identifier_name
+  - todo
+  - trailing_comma
+  - opening_brace
+  - for_where
+  - large_tuple
+  - nesting
+
+opt_in_rules:
+  - closure_spacing
+  - contains_over_first_not_nil
+  - redundant_nil_coalescing
+
+force_cast: error
+force_try: error

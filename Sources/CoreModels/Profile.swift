@@ -28,6 +28,9 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
     public var panguSpacing: Bool
     /// Burmese: which digit set stage 4 emits (docs/04 Appendix A).
     public var myanmarDigits: MyanmarDigits
+    /// English: spoken symbols and casing commands become code — the
+    /// Terminal/Code profile upgrade (docs/15 step 31). Ships OFF.
+    public var codeMode: Bool
     /// Burmese: turn spoken punctuation commands into marks ("full stop" → ။,
     /// "comma" → ၊). Ships OFF. The Myanmar-script command words were removed
     /// in review — ပုဒ်မ is the everyday word for "section", and a substring
@@ -43,7 +46,8 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         enforceFullWidthZhPunctuation: Bool = true,
         panguSpacing: Bool = false,
         myanmarDigits: MyanmarDigits = .asRecognized,
-        myanmarSpokenPunctuation: Bool = false
+        myanmarSpokenPunctuation: Bool = false,
+        codeMode: Bool = false
     ) {
         self.autoPunctuation = autoPunctuation
         self.smartSpacing = smartSpacing
@@ -52,6 +56,7 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         self.panguSpacing = panguSpacing
         self.myanmarDigits = myanmarDigits
         self.myanmarSpokenPunctuation = myanmarSpokenPunctuation
+        self.codeMode = codeMode
     }
 
     /// Declared rather than synthesized because `init(from:)` below is hand
@@ -64,6 +69,7 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         case panguSpacing
         case myanmarDigits
         case myanmarSpokenPunctuation
+        case codeMode
     }
 
     /// Decodes leniently: every key falls back to its default when absent.
@@ -76,22 +82,28 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = FormattingOptions()
-        func flag(_ key: CodingKeys, _ fallback: Bool) throws -> Bool {
-            try container.decodeIfPresent(Bool.self, forKey: key) ?? fallback
+        // try? throughout: a present-but-unreadable value (a raw value or
+        // type written by a newer app version) falls back to the default the
+        // same way an absent key does — a partially foreign profile must
+        // never fail the whole decode and cost the user their profiles.
+        func flag(_ key: CodingKeys, _ fallback: Bool) -> Bool {
+            (try? container.decodeIfPresent(Bool.self, forKey: key))
+                .flatMap { $0 } ?? fallback
         }
-        self.autoPunctuation = try flag(.autoPunctuation, defaults.autoPunctuation)
-        self.smartSpacing = try flag(.smartSpacing, defaults.smartSpacing)
-        self.structureAllowed = try flag(.structureAllowed, defaults.structureAllowed)
-        self.enforceFullWidthZhPunctuation = try flag(
+        self.autoPunctuation = flag(.autoPunctuation, defaults.autoPunctuation)
+        self.smartSpacing = flag(.smartSpacing, defaults.smartSpacing)
+        self.structureAllowed = flag(.structureAllowed, defaults.structureAllowed)
+        self.enforceFullWidthZhPunctuation = flag(
             .enforceFullWidthZhPunctuation, defaults.enforceFullWidthZhPunctuation
         )
-        self.panguSpacing = try flag(.panguSpacing, defaults.panguSpacing)
+        self.panguSpacing = flag(.panguSpacing, defaults.panguSpacing)
         self.myanmarDigits =
-            try container.decodeIfPresent(MyanmarDigits.self, forKey: .myanmarDigits)
-            ?? defaults.myanmarDigits
-        self.myanmarSpokenPunctuation = try flag(
+            (try? container.decodeIfPresent(MyanmarDigits.self, forKey: .myanmarDigits))
+            .flatMap { $0 } ?? defaults.myanmarDigits
+        self.myanmarSpokenPunctuation = flag(
             .myanmarSpokenPunctuation, defaults.myanmarSpokenPunctuation
         )
+        self.codeMode = flag(.codeMode, defaults.codeMode)
     }
 
     /// Verbatim mode: nothing is reshaped; only artifacts + dictionary apply.
@@ -102,7 +114,8 @@ public struct FormattingOptions: Codable, Sendable, Hashable {
         enforceFullWidthZhPunctuation: false,
         panguSpacing: false,
         myanmarDigits: .asRecognized,
-        myanmarSpokenPunctuation: false
+        myanmarSpokenPunctuation: false,
+        codeMode: false
     )
 }
 
