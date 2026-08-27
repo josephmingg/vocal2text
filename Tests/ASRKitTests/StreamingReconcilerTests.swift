@@ -19,9 +19,10 @@ struct StreamingReconcilerTests {
             inserted: "meet me at noon",
             final: "meet me at New Orleans"
         )
-        // Common prefix "meet me at n" ends inside the changed word: only
-        // "oon" is deleted, never the agreed prefix.
-        #expect(plan == .init(deleteCount: 3, append: "ew Orleans"))
+        // The comparison is case-sensitive, so the common prefix ends at
+        // "meet me at " ('n' ≠ 'N'): "noon" is deleted, the agreed prefix
+        // never is.
+        #expect(plan == .init(deleteCount: 4, append: "New Orleans"))
     }
 
     @Test func aShorterFinalDeletesTheExcess() {
