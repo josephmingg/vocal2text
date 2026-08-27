@@ -22,20 +22,11 @@ public actor ParakeetEngine: TranscriptionEngine {
     /// catalog's convention of honest approximations.
     static let approximateDownloadBytes: Int64 = 600_000_000
 
-    // AsrManager is a non-Sendable class whose work methods are async, so
-    // plain actor storage cannot call them: awaiting `transcribe` would send
-    // a self-isolated value into a nonisolated method, which Swift 6 rejects.
-    // The box smuggles it across that boundary — the standard unchecked-
-    // Sendable escape hatch — and records the actual discipline: the manager
-    // is created once behind the load-coalescing gate below and only touched
-    // through this actor's methods; take-level serialization comes from the
-    // session's chained pipeline, the same contract WhisperKitEngine relies
-    // on.
-    private struct ManagerBox: @unchecked Sendable {
-        let manager: AsrManager
-    }
-
-    private var managerBox: ManagerBox?
+    // AsrManager became an actor in FluidAudio 0.15 (it was a non-Sendable
+    // class in 0.9, which needed an @unchecked Sendable box here), so plain
+    // actor storage is now simply correct. Take-level serialization still
+    // comes from the session's chained pipeline.
+    private var manager: AsrManager?
     private var isLoading = false
     private var loadWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -45,7 +36,7 @@ public actor ParakeetEngine: TranscriptionEngine {
         guard language == .english else {
             return .unsupported(reason: "Parakeet v2 is English-only; other languages use their own engines")
         }
-        if managerBox != nil { return .ready }
+        if manager != nil { return .ready }
         let cache = AsrModels.defaultCacheDirectory(for: .v2)
         return AsrModels.modelsExist(at: cache, version: .v2)
             ? .ready
@@ -53,23 +44,26 @@ public actor ParakeetEngine: TranscriptionEngine {
     }
 
     public func prepare(languageMode: LanguageMode) async throws {
-        _ = try await loadedManagerBox()
+        _ = try await loadedManager()
     }
 
     /// True once the models are resident — the first-run HUD hint reads this,
     /// mirroring the other engines.
-    public var isModelLoaded: Bool { managerBox != nil }
+    public var isModelLoaded: Bool { manager != nil }
 
     public func transcribe(
         _ audio: PCMChunk,
         languageMode: LanguageMode,
         dictionaryTerms: [String]
     ) async throws -> ASRKit.TranscriptionResult {
-        let box = try await loadedManagerBox()
+        let loaded = try await loadedManager()
         try Task.checkCancellation()
         let result: ASRResult
         do {
-            result = try await box.manager.transcribe(audio.samples, source: .microphone)
+            // Fresh decoder state per utterance: each take is an independent
+            // batch decode, not a continuation of the last one.
+            var decoderState = TdtDecoderState.make()
+            result = try await loaded.transcribe(audio.samples, decoderState: &decoderState)
         } catch {
             throw TranscriptionError.engineUnavailable(String(describing: error))
         }
@@ -121,16 +115,16 @@ public actor ParakeetEngine: TranscriptionEngine {
     }
 
     public func unload() async {
-        managerBox = nil
+        manager = nil
     }
 
     // MARK: - Loading
 
-    private func loadedManagerBox() async throws -> ManagerBox {
+    private func loadedManager() async throws -> AsrManager {
         while isLoading {
             await withCheckedContinuation { loadWaiters.append($0) }
         }
-        if let managerBox { return managerBox }
+        if let manager { return manager }
         isLoading = true
         defer {
             isLoading = false
@@ -143,12 +137,12 @@ public actor ParakeetEngine: TranscriptionEngine {
                 "loading Parakeet TDT v2 — first run downloads ~600 MB of CoreML models"
             )
             let models = try await AsrModels.downloadAndLoad(version: .v2)
-            let loaded = AsrManager(config: .default)
-            try await loaded.initialize(models: models)
+            // 0.15 API: models ride in at init; the separate initialize(models:)
+            // step no longer exists.
+            let loaded = AsrManager(config: .default, models: models)
             VocalLog.engine.info("Parakeet TDT v2 ready")
-            let box = ManagerBox(manager: loaded)
-            managerBox = box
-            return box
+            manager = loaded
+            return loaded
         } catch {
             VocalLog.engine.error(
                 "Parakeet model load failed: \(String(describing: error), privacy: .public)"
