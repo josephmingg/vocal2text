@@ -74,6 +74,30 @@
 > segments yet. Steps 45–46 untouched: 45 needs real hardware and 46 hangs on open
 > owner decisions 2/4.
 >
+> **Deferred-round status (2026-08-27, this branch):** the items the addendum
+> above recorded as open were built to the extent buildable without the owner's
+> credentials or hardware. Hands-free auto-stop on trailing silence shipped
+> (energy gate on the HUD level stream, Off by default; the step 22 follow-up).
+> Step 13's idle-unload setting shipped (Never by default). Step 40 shipped its
+> missing half: a live permission checklist on onboarding's final page and a
+> re-runnable Setup Assistant (the hotkey playground half was already real in
+> v1.1). Step 44 gained timestamped segments (lenient v3 schema migration;
+> History shows [m:ss] lines). Step 36 gained the input-device picker
+> (CoreAudio, stable UIDs, silent fallback to the default). Step 52 shipped as
+> a manually dispatched Cleanup-eval workflow — the eval already exits non-zero
+> below the acceptance criterion, so a red run is the gate; it is not on every
+> push because it needs a live model and ~an hour of CPU inference. Step 45
+> gained its measurable half (`vocal-bench levels`: peak/RMS/speech level and
+> estimated SNR per fixture); the tuning itself still needs real hardware.
+> Step 39 gained the full sign→notarize→staple pipeline as `make release`,
+> which fails up front until the owner's enrollment provides the identity and
+> notary profile; Sparkle stays unwired until distribution begins. Step 46
+> gained its pure reconciliation core (`StreamingReconciler`), explicitly not
+> wired — live insertion still hangs on open owner decision 2. Step 43 remains
+> *not built on purpose*: sync needs the same enrollment for CloudKit plus a
+> deletion-tombstone schema decision, and a merge core written before those
+> would be rewritten, not reused.
+>
 > *Adopted steps*: 47 built (`make bench-latency` renders stage percentiles from real
 > history; the missing arm/delivery marks now recorded). 51 built (deterministic
 > times/years/percents in stage 4, EN only, anchor-worded to stay out of ordinary
