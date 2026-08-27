@@ -32,7 +32,9 @@ public actor ParakeetEngine: TranscriptionEngine {
 
     public init() {}
 
-    public func availability(for language: Language) async -> EngineAvailability {
+    // Qualified: FluidAudio 0.15 exports its own `Language` enum, which makes
+    // the bare name ambiguous in this file.
+    public func availability(for language: CoreModels.Language) async -> EngineAvailability {
         guard language == .english else {
             return .unsupported(reason: "Parakeet v2 is English-only; other languages use their own engines")
         }
