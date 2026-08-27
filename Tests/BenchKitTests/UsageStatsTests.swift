@@ -1,7 +1,7 @@
-import BenchKit
 import CoreModels
 import Foundation
 import Testing
+@testable import BenchKit
 
 @Suite struct UsageStatsTests {
     // Deterministic day boundaries regardless of the CI host's locale.
