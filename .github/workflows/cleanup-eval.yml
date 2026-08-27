@@ -1,0 +1,66 @@
+# docs/15 step 52 — gate a prompt/validator change on the cleanup eval.
+#
+# The 139-check eval needs a live model, so it cannot ride `swift test`
+# (which must stay hermetic) and does not run on every push: this workflow
+# is dispatched manually against a branch when a prompt, validator, or
+# skip-heuristic change should prove itself. eval-cleanup already exits
+# non-zero when the acceptance criterion is missed, so a red run here IS
+# the gate.
+#
+# CPU-only inference on a hosted runner is slow — expect the eval step to
+# take on the order of an hour with the default 3B model. A self-hosted
+# runner with a resident Ollama is the fast path; this file works there
+# unchanged (the install step no-ops when ollama exists).
+name: Cleanup eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Ollama model to evaluate"
+        required: false
+        default: "qwen2.5:3b-instruct"
+      timeout:
+        description: "Per-case timeout in seconds (CPU inference is slow)"
+        required: false
+        default: "180"
+
+jobs:
+  eval:
+    name: Cleanup eval (${{ inputs.model }})
+    runs-on: ubuntu-24.04
+    container: swift:6.0-noble
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-linux-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: spm-linux-
+      - name: Install Ollama
+        run: |
+          command -v ollama || curl -fsSL https://ollama.com/install.sh | sh
+      - name: Start Ollama and pull the model
+        run: |
+          ollama serve &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags && break
+            sleep 1
+          done
+          ollama pull "${{ inputs.model }}"
+      - name: Build eval harness
+        run: swift build --product eval-cleanup
+      - name: Run the eval (non-zero exit = acceptance criterion missed)
+        run: |
+          swift run eval-cleanup \
+            --model "${{ inputs.model }}" \
+            --timeout "${{ inputs.timeout }}" \
+            --out cleanup-eval-report.md
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleanup-eval-report
+          path: cleanup-eval-report.md
+          if-no-files-found: ignore

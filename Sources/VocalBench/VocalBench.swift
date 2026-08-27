@@ -50,6 +50,12 @@ struct VocalBench {
             runLatency(arguments: Array(CommandLine.arguments.dropFirst(2)))
             return
         }
+        // docs/15 step 45's measurable half: signal levels for fixtures, so
+        // "whisper-mode" quietness is a number before it is a tuning target.
+        if CommandLine.arguments.dropFirst().first == "levels" {
+            runLevels(arguments: Array(CommandLine.arguments.dropFirst(2)))
+            return
+        }
         guard let options = parseOptions() else {
             printUsage()
             exit(2)
@@ -62,6 +68,56 @@ struct VocalBench {
         ))
         exit(1)
         #endif
+    }
+
+    // MARK: - Fixture levels (docs/15 step 45)
+
+    /// `vocal-bench levels <wav-or-directory>…` — peak/RMS/speech level and
+    /// estimated SNR per fixture. Pure WAV decode, so it runs anywhere.
+    static func runLevels(arguments: [String]) {
+        guard !arguments.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "usage: vocal-bench levels <fixture.wav | directory>…\n".utf8
+            ))
+            exit(2)
+        }
+        var urls: [URL] = []
+        for argument in arguments {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: argument, isDirectory: &isDirectory),
+                isDirectory.boolValue {
+                let entries =
+                    (try? FileManager.default.contentsOfDirectory(atPath: argument)) ?? []
+                urls += entries.filter { $0.lowercased().hasSuffix(".wav") }.sorted()
+                    .map { URL(fileURLWithPath: argument).appendingPathComponent($0) }
+            } else {
+                urls.append(URL(fileURLWithPath: argument))
+            }
+        }
+        print("| fixture | audio s | peak dBFS | RMS dBFS | speech dBFS | est. SNR dB |")
+        print("|---|---|---|---|---|---|")
+        for url in urls {
+            do {
+                let contents = try WavFile.read(url)
+                guard
+                    let analysis = LevelAnalysis.analyze(
+                        samples: contents.samples, sampleRate: contents.sampleRate
+                    )
+                else { continue }
+                let cells = [
+                    String(format: "%.1f", contents.durationSeconds),
+                    String(format: "%.1f", analysis.peakDBFS),
+                    String(format: "%.1f", analysis.rmsDBFS),
+                    String(format: "%.1f", analysis.activeRMSDBFS),
+                    String(format: "%.1f", analysis.estimatedSNRDecibels),
+                ].joined(separator: " | ")
+                print("| \(url.lastPathComponent) | \(cells) |")
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "skipping \(url.lastPathComponent): \(error)\n".utf8
+                ))
+            }
+        }
     }
 
     // MARK: - Latency-from-history (docs/15 step 47)
