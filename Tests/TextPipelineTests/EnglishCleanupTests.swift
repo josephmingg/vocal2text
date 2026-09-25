@@ -36,6 +36,16 @@ struct EnglishCleanupTests {
         "The ummah gathered today.",
         "Their hummus was great today.",
         "To err is human, they say.",
+        // Acronyms and names that spell a filler: case is the signal.
+        "She's in the ER now.",
+        "I went to UH last year.",
+        "The UM football team won.",
+        "Set HMM to one.",
+        "The Er river is long.",
+        // Interjections that are answers, not hesitation.
+        "Uh oh, the build broke.",
+        "Uh huh, that works.",
+        "Ah, I see what you mean.",
     ])
     func contentWordsThatLookLikeFillersSurvive(input: String) {
         #expect(normalize(input) == input)
@@ -61,6 +71,9 @@ struct EnglishCleanupTests {
         "What it is is a bug.",
         "It was very very good.",
         "No no, that's fine.",
+        "The food was so so.",
+        "He he, that's funny.",
+        "My my, look at that.",
     ])
     func grammaticalDoublesSurvive(input: String) {
         #expect(normalize(input) == input)

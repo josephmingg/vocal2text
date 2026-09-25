@@ -46,3 +46,34 @@ the deterministic cleanup-skip heuristic (step 20) · validator meta-marker fals
 7. **"Scratch that" when stated as its own sentence** could be resolved deterministically,
    like the layout commands. It stays with the model per the docs/15 plan; revisit if
    cleanup-off users ask for it.
+
+## Self-review and QA of this branch
+
+An adversarial pass over this branch's own changes found four bugs, all fixed before merge:
+
+| Bug found | Example | Fix |
+|---|---|---|
+| Acronyms and names that spell a filler were deleted | "She's in the **ER** now" → "She's in the now"; also UH, UM, HMM, "the Er river" | Fillers match case-sensitively: lowercase anywhere, capitalised only at a sentence start, never all-caps |
+| Two-word interjections lost their first word | "Uh oh, the build broke" → "Oh, …"; "Uh huh" → "Huh" | "uh" followed by "oh"/"huh" is left alone |
+| "ah" treated as a filler | "Ah, I see what you mean" → "I see what you mean" | Removed; the filler list now matches the prompt's and `CleanupSkipHeuristic`'s |
+| Expressive doubles collapsed | "so so", "he he", "my my" | Removed from the stutter list |
+
+Regression checks added or run:
+- `ValidatorAcceptsEvalReferencesTests`: all 62 curated references in `evals/cleanup` pass the
+  validator, so no rule (including the new `answered-question` / `rewrite` rules) rejects a
+  known-good cleanup.
+- All 41 English references pass through `EnglishCleanup` unchanged, so clean text is never
+  altered.
+
+Known limitations, accepted:
+- The `rewrite` rule also rejects a user profile that *asks* for translation between two
+  Latin-script languages (EN→ES). Main's `language-mismatch` rule already rejects EN↔ZH and
+  EN↔MY translation, so translation was not a working feature before this branch either.
+- `answered-question` falls back to the raw text when a self-correction legitimately drops the
+  question ("Can we meet Friday? Sorry, no, let's do Saturday."). That is the safe direction:
+  the user gets their own words.
+- The always-on Whisper prefill (R1) replaces a setting that dates from the first commit and
+  never had a stated reason. It is standard Whisper decoding, but it changes every Whisper take
+  and **must be checked with vocal-bench on real audio before merging**.
+- On macOS 26 machines, the Apple fallback probes Ollama once per cleaned take (≤2 s timeout).
+  That is instant on localhost; a slow *remote* Ollama URL would add latency.

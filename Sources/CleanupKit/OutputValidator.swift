@@ -149,7 +149,9 @@ public enum OutputValidator {
         // Rewrite guard for space-separated text: cleanup deletes and repairs,
         // so most output words already appear in the input. More than half new
         // words means a rewrite or an answer, not a cleanup.
-        if !language.isUnspacedScript, !input.containsHanCharacters {
+        if !language.isUnspacedScript, !input.containsHanCharacters,
+            !input.containsMyanmarCharacters
+        {
             let inputWords = Set(latinWords(in: input))
             let outputWords = latinWords(in: cleaned)
             if outputWords.count >= 8 {

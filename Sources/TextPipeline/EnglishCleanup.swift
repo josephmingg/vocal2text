@@ -24,17 +24,28 @@ public enum EnglishCleanup: Sendable {
     // MARK: - Fillers
 
     /// Hesitation sounds only — never words that can carry meaning ("like",
-    /// "so", "well", "you know" are left to the LLM). "uh-huh" and "mhm" are
-    /// answers, not fillers, and the hyphen/letter guards keep them intact.
-    private static let filler = "(?:u+m+|u+h+m*|erm|er|h+m+|a+h+)"
+    /// "so", "well", "ah", "you know" are left to the LLM; the list matches
+    /// the prompt's and `CleanupSkipHeuristic`'s definition of a filler).
+    ///
+    /// Case is significant on purpose. Mid-sentence only the lowercase form
+    /// is a filler: "ER", "UH", "UM" are acronyms (the ER, University of
+    /// Houston) and a capitalised "Er" mid-sentence is a name. The
+    /// capitalised form counts only where a sentence starts.
+    private static let lowerFiller = "(?-i:u+m+|u+h+m*|erm|er|h+m+)"
+    private static let sentenceStartFiller = "(?-i:[Uu]m+|[Uu]h+m*|[Ee]rm|[Ee]r|[Hh]m+)"
     private static let before = "(?<![\\p{L}\\p{N}'’\\-])"
-    private static let after = "(?![\\p{L}\\p{N}'’\\-])"
+    /// Letter/hyphen guards keep "uh-huh", "umbrella" and "hmmm-ish" intact;
+    /// the lookahead keeps the two-word interjections "uh oh" and "uh huh",
+    /// which are answers, not hesitation.
+    private static let wordEnd = "(?![\\p{L}\\p{N}'’\\-])"
+    private static let after = wordEnd + "(?![\\s,]+(?:oh|huh)(?![\\p{L}]))"
     /// Optional punctuation Whisper hangs off a filler: "Um," "Uh..." "Um."
     private static let fillerTail = "(?:,|…|\\.{1,3})?"
 
     static func removeFillers(_ text: String) -> String {
         var result = text
-        let word = before + filler + after
+        let word = before + lowerFiller + after
+        let startWord = before + sentenceStartFiller + after
 
         // "I, uh, think" → "I think"
         result = replace("\\s*,\\s*" + word + "\\s*,(?=\\s)", in: result, with: "")
@@ -43,16 +54,19 @@ public enum EnglishCleanup: Sendable {
         // "Done. So we". The first letter of the next word is re-capitalized
         // because the filler was carrying the sentence start.
         result = replace(
-            "(^|[.!?\\n][\"”’)]?\\s+|\\n)" + word + fillerTail
-                + "(?:\\s+" + word + fillerTail + ")*\\s+(\\p{L})",
+            "(^|[.!?\\n][\"”’)]?\\s+|\\n)" + startWord + fillerTail
+                + "(?:\\s+" + startWord + fillerTail + ")*\\s+(\\p{L})",
             in: result
         ) { groups in
             groups[1] + groups[2].uppercased()
         }
 
-        // Sentence-final: "I think, um." → "I think."; "yes uh" → "yes"
+        // Sentence-final: "I think, um." → "I think."; "yes uh" → "yes";
+        // a whole transcript of "Um." is caught by the start-of-text arm.
         result = replace(
-            "\\s*,?\\s*" + word + fillerTail + "(?=\\s*[.!?]|\\s*$)", in: result, with: ""
+            "\\s*,?\\s*(?:^" + startWord + "|" + word + ")" + fillerTail
+                + "(?=\\s*[.!?]|\\s*$)",
+            in: result, with: ""
         )
 
         // Mid-sentence: "so uh we" / "so uh, we" → "so we"
@@ -69,11 +83,12 @@ public enum EnglishCleanup: Sendable {
 
     /// Function words people stutter on. Words where a doubled form is
     /// grammatical ("that that", "had had", "is is", "do do") or expressive
-    /// ("very very", "no no", "bye bye") are deliberately absent.
+    /// ("very very", "no no", "so so", "my my", "he he") are deliberately
+    /// absent.
     private static let stutterWords = [
         "i", "i'm", "i’m", "i'll", "i’ll", "i've", "i’ve", "i'd", "i’d",
-        "a", "an", "the", "to", "and", "but", "or", "so", "we", "you", "he", "she",
-        "it", "it's", "it’s", "they", "my", "our", "your", "their", "in", "on", "at",
+        "a", "an", "the", "to", "and", "but", "or", "we", "you", "she",
+        "it", "it's", "it’s", "they", "our", "your", "their", "in", "on", "at",
         "of", "for", "with", "this", "what", "if", "can", "just", "are", "was",
     ]
 
@@ -83,7 +98,7 @@ public enum EnglishCleanup: Sendable {
         let alternatives = stutterWords
             .map { NSRegularExpression.escapedPattern(for: $0) }
             .joined(separator: "|")
-        let pattern = before + "(" + alternatives + ")(?:,?\\s+\\1)+" + after
+        let pattern = before + "(" + alternatives + ")(?:,?\\s+\\1)+" + wordEnd
         return replace(pattern, in: text) { groups in groups[1] }
     }
 
