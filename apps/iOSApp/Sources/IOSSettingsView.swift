@@ -66,13 +66,19 @@ struct IOSSettingsView: View {
                     }
                 }
 
-                // Truth pass (docs/15 W16): no cleanup provider is wired on
-                // iPhone yet, so no toggle pretends otherwise. The section
-                // returns when the on-device provider lands.
+                // Truth pass (docs/15 W16): the switch only exists where a
+                // provider can actually run — Apple's on-device model.
                 Section("Cleanup") {
-                    Text("AI cleanup is not available on iPhone yet — transcripts are delivered as recognized. It arrives with Apple's on-device model in a later update.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if IOSAppState.isOnDeviceCleanupAvailable {
+                        Toggle("AI cleanup", isOn: appState.binding(\.cleanupMasterSwitch))
+                        Text("Uses Apple's on-device model. Removing um/uh and repeated words always happens.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("AI cleanup needs iOS 26 with Apple Intelligence. Removing um/uh and repeated words still happens on every dictation.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Delivery") {

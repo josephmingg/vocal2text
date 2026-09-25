@@ -27,6 +27,15 @@ public actor FoundationModelsProvider: CleanupProvider {
         self.assembler = assembler
     }
 
+    /// Synchronous availability for UI gating (Settings shows the switch
+    /// only where the model can run).
+    public static var isSystemModelAvailable: Bool {
+        if case .available = SystemLanguageModel.default.availability {
+            return true
+        }
+        return false
+    }
+
     public func isAvailable() async -> Bool {
         if case .available = SystemLanguageModel.default.availability {
             return true

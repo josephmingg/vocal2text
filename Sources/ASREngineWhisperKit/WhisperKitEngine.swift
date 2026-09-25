@@ -137,55 +137,37 @@ public actor WhisperKitEngine: TranscriptionEngine {
         dictionaryTerms: [String]
     ) async throws -> ASRKit.TranscriptionResult {
         let pipe = try await loadedPipe()
-        var options = DecodingOptions()
-        options.task = .transcribe
-        if case .pinned(let lang) = languageMode {
-            options.language = lang.rawValue
-        }
-        // Anti-hallucination stack per docs/04 §2.
-        options.temperature = 0
-        options.temperatureFallbackCount = 5
-        options.compressionRatioThreshold = 2.4
-        options.logProbThreshold = -1.0
-        options.noSpeechThreshold = 0.6
-        options.usePrefillPrompt = false
-        // docs/15 step 24 (the docs/04 M3 experiment, shipped): dictionary
-        // terms ride in as Whisper's initial prompt, so the model *hears*
-        // "Kubernetes" instead of stage 2 correcting it after the fact.
-        // Prompt biasing requires the prefill path; WhisperKit only reads
-        // promptTokens when usePrefillPrompt is on. The prompt is only
-        // attached when bias-shaped terms exist — term-less takes keep the
-        // prefill-free anti-hallucination shape above. Accuracy is measured
-        // with vocal-bench planted-term fixtures, per the plan.
-        //
-        // Bias terms only: a snippet (multi-line or long written form —
-        // DictionaryCSV's definition of one) would flood Whisper's ~223
-        // prompt-token window with template text, evicting the real terms
-        // and conditioning the decoder on unrelated "context" — a known
-        // repetition trigger. WhisperKit keeps the *suffix* when trimming,
-        // so the cap here also makes which terms survive deterministic.
-        let biasTerms = dictionaryTerms
-            .filter { !$0.contains(where: \.isNewline) && $0.count <= 40 }
-            .prefix(24)
-        if !biasTerms.isEmpty, let tokenizer = pipe.tokenizer {
-            let prompt = " " + biasTerms.joined(separator: ", ")
-            let tokens = tokenizer.encode(text: prompt)
-                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-            if !tokens.isEmpty {
-                options.promptTokens = tokens
-                options.usePrefillPrompt = true
-                // DecodingOptions() derives detectLanguage from the *initial*
-                // usePrefillPrompt (false above), so flipping prefill on here
-                // leaves detection off and the prefill would force <|en|>.
-                // Auto mode must detect explicitly; the detect loop then
-                // re-prefills with the detected language.
-                if case .auto = languageMode {
-                    options.detectLanguage = true
-                }
-            }
+        let promptTokens = Self.biasPromptTokens(for: dictionaryTerms, tokenizer: pipe.tokenizer)
+
+        var results = try await pipe.transcribe(
+            audioArray: audio.samples,
+            decodeOptions: Self.decodingOptions(
+                language: languageMode.pinnedLanguage?.rawValue, promptTokens: promptTokens
+            )
+        )
+
+        // Auto mode only ever serves the app's languages. Whisper's detector
+        // spans 99, and on short or accented takes it picks a neighbour
+        // (English → "nl"/"cy", Mandarin → "ja"); with the prefill on, that
+        // language token is then *forced*, producing translated or garbled
+        // text. One re-decode pinned to the closest supported language.
+        if case .auto = languageMode,
+            let reported = results.first?.language,
+            Language(rawValue: reported) == nil
+        {
+            let text = results.map(\.text).joined()
+            let fallback: Language =
+                Self.hanLikeLanguageTags.contains(reported) || text.containsHanCharacters
+                ? .chinese : .english
+            print("Vocal: Whisper detected '\(reported)'; re-decoding as \(fallback.rawValue)")
+            results = try await pipe.transcribe(
+                audioArray: audio.samples,
+                decodeOptions: Self.decodingOptions(
+                    language: fallback.rawValue, promptTokens: promptTokens
+                )
+            )
         }
 
-        let results = try await pipe.transcribe(audioArray: audio.samples, decodeOptions: options)
         let text = results.map(\.text).joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let detected = Self.detectLanguage(
@@ -237,6 +219,54 @@ public actor WhisperKitEngine: TranscriptionEngine {
 
     public func unload() async {
         pipe = nil
+    }
+
+    /// Tags whose misdetection almost always means Mandarin speech.
+    private static let hanLikeLanguageTags: Set<String> = ["ja", "yue", "wuu"]
+
+    /// Decoding options for one pass; `language` nil means detect.
+    ///
+    /// The prefill prompt stays ON for every take. With `usePrefillPrompt =
+    /// false` WhisperKit never forces the language token — a pinned language
+    /// was silently ignored on every take without dictionary terms, and the
+    /// result was merely *labelled* with the pin. `DecodingOptions()` derives
+    /// `detectLanguage` from the initial prefill flag, so it is set
+    /// explicitly: detect in auto mode (the detect loop then re-prefills
+    /// with its answer), never when pinned.
+    static func decodingOptions(language: String?, promptTokens: [Int]?) -> DecodingOptions {
+        var options = DecodingOptions()
+        options.task = .transcribe
+        options.language = language
+        options.usePrefillPrompt = true
+        options.detectLanguage = language == nil
+        options.promptTokens = promptTokens
+        // Anti-hallucination stack per docs/04 §2.
+        options.temperature = 0
+        options.temperatureFallbackCount = 5
+        options.compressionRatioThreshold = 2.4
+        options.logProbThreshold = -1.0
+        options.noSpeechThreshold = 0.6
+        return options
+    }
+
+    /// docs/15 step 24: dictionary terms ride in as Whisper's initial prompt,
+    /// so the model *hears* "Kubernetes" instead of stage 2 correcting it
+    /// after the fact. Bias terms only: a snippet (multi-line or long written
+    /// form — DictionaryCSV's definition of one) would flood Whisper's ~223
+    /// prompt-token window with template text, evicting the real terms and
+    /// conditioning the decoder on unrelated "context" — a known repetition
+    /// trigger. WhisperKit keeps the *suffix* when trimming, so the cap also
+    /// makes which terms survive deterministic. No terms → no prompt.
+    static func biasPromptTokens(
+        for dictionaryTerms: [String], tokenizer: (any WhisperTokenizer)?
+    ) -> [Int]? {
+        let biasTerms = dictionaryTerms
+            .filter { !$0.contains(where: \.isNewline) && $0.count <= 40 }
+            .prefix(24)
+        guard !biasTerms.isEmpty, let tokenizer else { return nil }
+        let tokens = tokenizer.encode(text: " " + biasTerms.joined(separator: ", "))
+            .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+        return tokens.isEmpty ? nil : tokens
     }
 
     private nonisolated static func detectLanguage(

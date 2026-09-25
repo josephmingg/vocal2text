@@ -326,8 +326,11 @@ private struct CleanupPane: View {
                 Text(
                     """
                     Ships off. When on, cleanup-enabled profiles send text to the \
-                    local Ollama model below; if it fails or times out, the plain \
-                    transcription is delivered unchanged.
+                    local Ollama model below — or, when Ollama is not running, to \
+                    Apple's on-device model (macOS 26 with Apple Intelligence). If \
+                    cleanup fails or times out, the plain transcription is \
+                    delivered unchanged. Removing um/uh and repeated words always \
+                    happens, even with this off.
                     """
                 )
                 .font(.caption)
