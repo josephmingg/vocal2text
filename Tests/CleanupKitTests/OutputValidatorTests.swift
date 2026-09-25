@@ -460,3 +460,60 @@ func theSpellingRuleAndTheStyleSectionAreExclusive(style: String) {
     #expect(languageLine != nil)
     #expect(languageLine?.contains("  ") == false)
 }
+
+struct OutputValidatorPackagingAndAnswerTests {
+
+    @Test func echoedTranscriptTagsAreStripped() {
+        let result = OutputValidator.validate(
+            output: "<TRANSCRIPT>\nMeet on Saturday.\n</TRANSCRIPT>",
+            input: "meet on friday sorry saturday",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: "Meet on Saturday."))
+    }
+
+    @Test func wrappingQuotesAreStripped() {
+        let result = OutputValidator.validate(
+            output: "\"Meet on Saturday.\"",
+            input: "meet on friday sorry saturday",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: "Meet on Saturday."))
+    }
+
+    @Test func speakersOwnQuotesAreKept() {
+        let output = "\"Ship it,\" she said, \"today.\""
+        let result = OutputValidator.validate(
+            output: output, input: "\"ship it\" she said \"today\"", language: .english
+        )
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    @Test func answeredQuestionIsRejected() {
+        let result = OutputValidator.validate(
+            output: "The capital of France is Paris.",
+            input: "What's the capital of France?",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "answered-question"))
+    }
+
+    @Test func rewriteWithMostlyNewWordsIsRejected() {
+        let result = OutputValidator.validate(
+            output: "Kindly be advised that our quarterly synchronization has been postponed indefinitely.",
+            input: "so the meeting we had planned for this week is not happening anymore",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "rewrite"))
+    }
+
+    @Test func minimalEditCleanupIsAccepted() {
+        let output = "The meeting we had planned for this week is not happening anymore."
+        let result = OutputValidator.validate(
+            output: output,
+            input: "so um the meeting we had planned for this week is is not happening anymore",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: output))
+    }
+}

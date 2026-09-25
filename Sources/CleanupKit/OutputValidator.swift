@@ -19,8 +19,10 @@ public enum OutputValidator {
     public static func validate(
         output: String, input: String, language: Language
     ) -> ValidationResult {
-        let cleaned = strippingThinkBlocks(output)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = strippingEchoedWrappers(
+            strippingThinkBlocks(output).trimmingCharacters(in: .whitespacesAndNewlines),
+            input: input
+        )
 
         if cleaned.isEmpty {
             return .rejected(rule: "empty")
@@ -136,7 +138,64 @@ public enum OutputValidator {
             }
         }
 
+        // Answer failure class the ratio floor cannot see: a full-sentence
+        // answer ("The capital of France is Paris.") is as long as the
+        // question it replaces. A dictated question stays a question, so a
+        // vanished question mark means the model replied instead.
+        if containsQuestionMark(input), !containsQuestionMark(cleaned) {
+            return .rejected(rule: "answered-question")
+        }
+
+        // Rewrite guard for space-separated text: cleanup deletes and repairs,
+        // so most output words already appear in the input. More than half new
+        // words means a rewrite or an answer, not a cleanup.
+        if !language.isUnspacedScript, !input.containsHanCharacters {
+            let inputWords = Set(latinWords(in: input))
+            let outputWords = latinWords(in: cleaned)
+            if outputWords.count >= 8 {
+                let novel = outputWords.filter { !inputWords.contains($0) }.count
+                if Double(novel) / Double(outputWords.count) > 0.5 {
+                    return .rejected(rule: "rewrite")
+                }
+            }
+        }
+
         return .accepted(cleaned: cleaned)
+    }
+
+    private static func containsQuestionMark(_ text: String) -> Bool {
+        text.contains("?") || text.contains("？")
+    }
+
+    private static func latinWords(in text: String) -> [String] {
+        text.lowercased()
+            .split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "'" || $0 == "’") })
+            .map(String.init)
+    }
+
+    /// Small local models often echo the `<TRANSCRIPT>` fence from the user
+    /// message or wrap their answer in quotes despite the prompt. Both are
+    /// packaging, not content: strip them unless the speaker's own text was
+    /// quoted.
+    static func strippingEchoedWrappers(_ text: String, input: String) -> String {
+        var result = text
+        for tag in ["<transcript>", "</transcript>"] {
+            result = result.replacingOccurrences(of: tag, with: "", options: [.caseInsensitive])
+        }
+        result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quotePairs: [(Character, Character)] = [("\"", "\""), ("“", "”"), ("「", "」")]
+        let trimmedInput = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let (open, close) = quotePairs.first(where: { result.first == $0.0 && result.last == $0.1 }),
+            result.count >= 2, trimmedInput.first != open
+        {
+            let inner = result.dropFirst().dropLast()
+            // Only a single wrapping pair — never strip quotes that open and
+            // close separate quotations inside the text.
+            if !inner.contains(open), !inner.contains(close) {
+                result = String(inner).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return result
     }
 
     /// Removes `<think>`, `<thinking>`, and `<reasoning>` blocks emitted by

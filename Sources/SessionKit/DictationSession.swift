@@ -765,6 +765,15 @@ public actor DictationSession {
             .text
         let dictionarySeconds = Self.seconds(dictionaryStart.duration(to: clock.now))
 
+        // Nothing left to say: the transcript was only noise tags, a
+        // special-token remnant, or fillers ("[BLANK_AUDIO]", "Um."). Pasting
+        // an empty string and saving an empty history row helps no one — the
+        // same outcome as the VAD finding no speech.
+        if stage2Text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finishPipeline()
+            return true
+        }
+
         var deliveryText = stage2Text
         var cleanupSeconds = 0.0
         let cleanupOutcome: CleanupOutcome

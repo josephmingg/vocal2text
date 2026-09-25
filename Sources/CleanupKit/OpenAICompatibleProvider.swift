@@ -24,7 +24,7 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         baseURL: URL,
         apiKey: String? = nil,
         model: String,
-        temperature: Double = 0.2,
+        temperature: Double = 0,
         id: CleanupProviderID? = nil,
         leavesDevice: Bool? = nil,
         promptAssembler: PromptAssembler = PromptAssembler()
