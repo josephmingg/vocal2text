@@ -146,8 +146,16 @@ public actor OpenAICompatibleProvider: CleanupProvider {
     public func cleanup(
         _ request: CleanupRequest, timeout: Duration
     ) async throws -> CleanupResponse {
-        let urlRequest = try makeURLRequest(body: makeRequestBody(for: request), timeout: timeout)
-        let reply = try await perform(urlRequest)
+        var body = makeRequestBody(for: request)
+        var reply = try await perform(makeURLRequest(body: body, timeout: timeout))
+        // An Ollama release older than the "none" effort answers 400 naming
+        // the reasoning value; retry once the way those releases expect.
+        if reply.statusCode == 400, body.reasoningEffort != nil,
+            String(decoding: reply.body, as: UTF8.self).lowercased().contains("reasoning")
+        {
+            body.reasoningEffort = nil
+            reply = try await perform(makeURLRequest(body: body, timeout: timeout))
+        }
         guard (200..<300).contains(reply.statusCode) else {
             // Ollama answers 404 when the configured model was never pulled —
             // the most common setup mistake, and indistinguishable from "server
@@ -193,6 +201,19 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         return nil
     }
 
+    /// Reasoning off, sent to Ollama only. Cleanup needs no thinking, and
+    /// thinking-capable models (qwen3, deepseek-r1) otherwise think by
+    /// default: measured on qwen3:8b, ~490 tokens (6.6 s on an M-series Mac)
+    /// before a one-line answer — longer than the whole cleanup budget, so
+    /// the take silently fell back to the raw transcript. Qwen3's `/no_think`
+    /// soft switch was not honoured by Ollama in that measurement; this field
+    /// is what Ollama's OpenAI layer maps to `think: false`, and `false` is
+    /// accepted by models that cannot think at all.
+    nonisolated var reasoningEffortValue: String? {
+        if case .ollama = id { return "none" }
+        return nil
+    }
+
     /// Qwen3 models think before answering unless told not to, and cleanup
     /// needs no reasoning: measured on qwen3:8b, the thinking pass cost ~230
     /// tokens (seconds, on a laptop) before a one-line answer, pushing long
@@ -224,7 +245,8 @@ public actor OpenAICompatibleProvider: CleanupProvider {
             temperature: temperature,
             maxTokens: Self.maxTokens(forInputCharacterCount: request.text.count),
             stream: false,
-            keepAlive: keepAliveValue
+            keepAlive: keepAliveValue,
+            reasoningEffort: reasoningEffortValue
         )
     }
 
@@ -249,7 +271,8 @@ public actor OpenAICompatibleProvider: CleanupProvider {
             temperature: 0,
             maxTokens: 1,
             stream: false,
-            keepAlive: keepAliveValue
+            keepAlive: keepAliveValue,
+            reasoningEffort: reasoningEffortValue
         )
     }
 
@@ -410,6 +433,9 @@ struct ChatCompletionRequest: Codable, Sendable, Equatable {
     /// request (docs/15 step 19). nil (the non-Ollama case) omits the field
     /// entirely — strict OpenAI-compatible servers reject unknown arguments.
     var keepAlive: String? = nil
+    /// "none" turns reasoning off (Ollama maps it to `think: false`). nil
+    /// omits the field, for servers that do not know it.
+    var reasoningEffort: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -418,6 +444,7 @@ struct ChatCompletionRequest: Codable, Sendable, Equatable {
         case maxTokens = "max_tokens"
         case stream
         case keepAlive = "keep_alive"
+        case reasoningEffort = "reasoning_effort"
     }
 }
 

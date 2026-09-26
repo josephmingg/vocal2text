@@ -143,6 +143,29 @@ struct OpenAICompatibleProviderTests {
         #expect(json.contains("\"keep_alive\""))
     }
 
+    /// Ollama ignored Qwen3's `/no_think` in a field measurement; the
+    /// `reasoning_effort: "none"` field is what actually turns thinking off.
+    @Test func ollamaRequestsTurnReasoningOff() throws {
+        let ollama = OpenAICompatibleProvider(
+            baseURL: URL(string: "http://localhost:11434")!,
+            model: "qwen3:8b",
+            id: .ollama(model: "qwen3:8b")
+        )
+        let request = CleanupRequest(text: "hello", language: .english)
+        for body in [ollama.makeRequestBody(for: request), ollama.makePrewarmBody(for: request)] {
+            let json = try #require(String(data: JSONEncoder().encode(body), encoding: .utf8))
+            #expect(json.contains("\"reasoning_effort\":\"none\""))
+        }
+    }
+
+    @Test func nonOllamaRequestsOmitReasoningEffort() throws {
+        let body = provider("https://api.openai.com/v1").makeRequestBody(
+            for: CleanupRequest(text: "hello", language: .english)
+        )
+        let json = try #require(String(data: JSONEncoder().encode(body), encoding: .utf8))
+        #expect(!json.contains("reasoning_effort"))
+    }
+
     /// Strict OpenAI-compatible servers reject unknown arguments, so the
     /// Ollama-only field must vanish from the wire entirely for other ids.
     @Test func nonOllamaRequestsOmitKeepAlive() throws {
