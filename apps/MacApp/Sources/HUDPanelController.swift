@@ -57,7 +57,7 @@ final class HUDPanelController {
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.ignoresMouseEvents = true
 
-        let hosting = NSHostingView(rootView: HUDView(appState: appState))
+        let hosting = NSHostingView(rootView: HUDView(appState: appState, settings: appState.settings))
         // No auto-layout sizing constraints from SwiftUI — the panel frame is
         // fixed and the root view already frames itself to `panelSize`.
         hosting.sizingOptions = []

@@ -85,6 +85,12 @@ private struct GeneralPane: View {
                 }
                 Toggle("Play sounds", isOn: $settings.soundsEnabled)
                 Toggle("Show HUD while dictating", isOn: $settings.hudEnabled)
+                Picker("HUD style", selection: $settings.hudStyle) {
+                    ForEach(HUDStyle.allCases, id: \.self) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
+                .disabled(!settings.hudEnabled)
                 Toggle("Show latency after each dictation", isOn: $settings.showTimingsToast)
                 // docs/15 step 33: the FR-1.3 hands-free cap, no longer
                 // hardcoded at 15 minutes.

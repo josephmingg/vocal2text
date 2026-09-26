@@ -5,9 +5,29 @@ import SwiftUI
 /// keeps a constant frame; every mode change morphs inside it (docs/03 §3.4).
 struct HUDView: View {
     @ObservedObject var appState: AppState
+    @ObservedObject var settings: SettingsStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        // A disabled HUD draws nothing, so no animation ticks off-screen.
+        if !settings.hudEnabled {
+            EmptyView()
+        } else {
+            styled
+        }
+    }
+
+    @ViewBuilder
+    private var styled: some View {
+        switch settings.hudStyle {
+        case .jarvis:
+            JarvisHUDView(state: appState.hudState)
+        case .classic:
+            classic
+        }
+    }
+
+    private var classic: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.ultraThinMaterial)

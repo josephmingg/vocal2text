@@ -44,6 +44,11 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(hudEnabled, forKey: Keys.hudEnabled) }
     }
 
+    /// Purely cosmetic HUD skin; never touches the dictation path.
+    @Published var hudStyle: HUDStyle {
+        didSet { Self.defaults.set(hudStyle.rawValue, forKey: Keys.hudStyle) }
+    }
+
     @Published var soundsEnabled: Bool {
         didSet { Self.defaults.set(soundsEnabled, forKey: Keys.soundsEnabled) }
     }
@@ -139,6 +144,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         hotkeySpec = hotkey.spec
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
         hudEnabled = defaults.object(forKey: Keys.hudEnabled) as? Bool ?? true
+        hudStyle = defaults.string(forKey: Keys.hudStyle).flatMap(HUDStyle.init(rawValue:)) ?? .jarvis
         soundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
         showTimingsToast = defaults.object(forKey: Keys.showTimingsToast) as? Bool ?? false
         lockCapMinutes = defaults.object(forKey: Keys.lockCapMinutes) as? Int ?? 15
@@ -239,6 +245,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let legacyHotkeyChoice = "settings.hotkeyChoice"
         static let audioRetentionDays = "settings.audioRetentionDays"
         static let hudEnabled = "settings.hudEnabled"
+        static let hudStyle = "settings.hudStyle"
         static let soundsEnabled = "settings.soundsEnabled"
         static let showTimingsToast = "settings.showTimingsToast"
         static let lockCapMinutes = "settings.lockCapMinutes"
