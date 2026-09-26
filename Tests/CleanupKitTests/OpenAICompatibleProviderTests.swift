@@ -112,6 +112,25 @@ struct OpenAICompatibleProviderTests {
         )
     }
 
+    /// Qwen3 thinks by default; cleanup must not pay for it. The switch goes
+    /// on BOTH the prewarm and the real request so the cached prefix matches.
+    @Test func qwen3RequestsDisableThinking() {
+        let qwen3 = OpenAICompatibleProvider(
+            baseURL: URL(string: "http://localhost:11434")!, model: "qwen3:8b"
+        )
+        let request = CleanupRequest(text: "hello", language: .english)
+        let real = qwen3.makeRequestBody(for: request).messages.first?.content ?? ""
+        let warm = qwen3.makePrewarmBody(for: request).messages.first?.content ?? ""
+        #expect(real.hasSuffix("/no_think"))
+        #expect(real == warm)
+    }
+
+    @Test func otherModelsGetThePromptUnchanged() {
+        let request = CleanupRequest(text: "hello", language: .english)
+        let body = provider("http://localhost:11434").makeRequestBody(for: request)
+        #expect(body.messages.first?.content == PromptAssembler().systemPrompt(for: request))
+    }
+
     @Test func ollamaRequestsCarryKeepAlive() throws {
         let ollama = OpenAICompatibleProvider(
             baseURL: URL(string: "http://localhost:11434")!,
@@ -122,6 +141,29 @@ struct OpenAICompatibleProviderTests {
         #expect(body.keepAlive != nil)
         let json = try #require(String(data: JSONEncoder().encode(body), encoding: .utf8))
         #expect(json.contains("\"keep_alive\""))
+    }
+
+    /// Ollama ignored Qwen3's `/no_think` in a field measurement; the
+    /// `reasoning_effort: "none"` field is what actually turns thinking off.
+    @Test func ollamaRequestsTurnReasoningOff() throws {
+        let ollama = OpenAICompatibleProvider(
+            baseURL: URL(string: "http://localhost:11434")!,
+            model: "qwen3:8b",
+            id: .ollama(model: "qwen3:8b")
+        )
+        let request = CleanupRequest(text: "hello", language: .english)
+        for body in [ollama.makeRequestBody(for: request), ollama.makePrewarmBody(for: request)] {
+            let json = try #require(String(data: JSONEncoder().encode(body), encoding: .utf8))
+            #expect(json.contains("\"reasoning_effort\":\"none\""))
+        }
+    }
+
+    @Test func nonOllamaRequestsOmitReasoningEffort() throws {
+        let body = provider("https://api.openai.com/v1").makeRequestBody(
+            for: CleanupRequest(text: "hello", language: .english)
+        )
+        let json = try #require(String(data: JSONEncoder().encode(body), encoding: .utf8))
+        #expect(!json.contains("reasoning_effort"))
     }
 
     /// Strict OpenAI-compatible servers reject unknown arguments, so the

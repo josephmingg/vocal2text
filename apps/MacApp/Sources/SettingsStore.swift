@@ -29,6 +29,15 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(stylePrompt, forKey: Keys.stylePrompt) }
     }
 
+    /// Send every take through AI cleanup, even ones that already look clean,
+    /// so the model can repair misheard words from context ("rose your ideas"
+    /// → "roast your ideas"). Costs the cleanup round-trip on short takes
+    /// that would otherwise skip it; on by default because a misheard word is
+    /// exactly what a tidy-looking short take hides.
+    @Published var fixMisheardWords: Bool {
+        didSet { Self.defaults.set(fixMisheardWords, forKey: Keys.fixMisheardWords) }
+    }
+
     /// The push-to-talk binding — a preset or a recorded custom combination
     /// (docs/13). Persisted as JSON so the shape can grow without another
     /// migration.
@@ -42,6 +51,11 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
 
     @Published var hudEnabled: Bool {
         didSet { Self.defaults.set(hudEnabled, forKey: Keys.hudEnabled) }
+    }
+
+    /// Purely cosmetic HUD skin; never touches the dictation path.
+    @Published var hudStyle: HUDStyle {
+        didSet { Self.defaults.set(hudStyle.rawValue, forKey: Keys.hudStyle) }
     }
 
     @Published var soundsEnabled: Bool {
@@ -135,10 +149,12 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         cleanupMasterSwitch = defaults.object(forKey: Keys.cleanupMasterSwitch) as? Bool ?? false
         languageMode = Self.languageMode(from: defaults.string(forKey: Keys.languageMode))
         stylePrompt = defaults.string(forKey: Keys.stylePrompt) ?? ""
+        fixMisheardWords = defaults.object(forKey: Keys.fixMisheardWords) as? Bool ?? true
         let hotkey = Self.loadHotkeySpec(from: defaults)
         hotkeySpec = hotkey.spec
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
         hudEnabled = defaults.object(forKey: Keys.hudEnabled) as? Bool ?? true
+        hudStyle = defaults.string(forKey: Keys.hudStyle).flatMap(HUDStyle.init(rawValue:)) ?? .jarvis
         soundsEnabled = defaults.object(forKey: Keys.soundsEnabled) as? Bool ?? true
         showTimingsToast = defaults.object(forKey: Keys.showTimingsToast) as? Bool ?? false
         lockCapMinutes = defaults.object(forKey: Keys.lockCapMinutes) as? Int ?? 15
@@ -169,6 +185,8 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     var globalLanguageMode: LanguageMode { languageMode }
 
     var globalStylePrompt: String { stylePrompt }
+
+    var cleanupRunsOnCleanTakes: Bool { fixMisheardWords }
 
     /// Stage-3 budget: 6 s default (docs/05 §3.2); on expiry the session
     /// delivers the stage-2 text unchanged (FR-7.3).
@@ -233,12 +251,14 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let cleanupMasterSwitch = "settings.cleanupMasterSwitch"
         static let languageMode = "settings.languageMode"
         static let stylePrompt = "settings.stylePrompt"
+        static let fixMisheardWords = "settings.fixMisheardWords"
         static let hotkeySpec = "settings.hotkeySpec"
         /// Pre-spec key, read once by the migration and never written again.
         /// Left in the domain so downgrading to an older build still works.
         static let legacyHotkeyChoice = "settings.hotkeyChoice"
         static let audioRetentionDays = "settings.audioRetentionDays"
         static let hudEnabled = "settings.hudEnabled"
+        static let hudStyle = "settings.hudStyle"
         static let soundsEnabled = "settings.soundsEnabled"
         static let showTimingsToast = "settings.showTimingsToast"
         static let lockCapMinutes = "settings.lockCapMinutes"

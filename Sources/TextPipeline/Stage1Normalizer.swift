@@ -34,6 +34,12 @@ public enum Stage1Normalizer: Sendable {
         guard formatting.autoPunctuation, !result.isEmpty else { return result }
         switch language {
         case .english:
+            // Fillers and stutters — the deterministic half of "auto clean",
+            // on even when the stage-3 LLM is off or unavailable.
+            result = EnglishCleanup.clean(result)
+            result = stripLeadingOrphanPunctuation(result)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !result.isEmpty else { return result }
             result = capitalizedFirstLetter(result)
             result = appendingTerminalPeriodIfSentenceLike(result)
         case .chinese:

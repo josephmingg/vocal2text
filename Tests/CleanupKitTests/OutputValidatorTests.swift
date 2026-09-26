@@ -108,6 +108,85 @@ struct OutputValidatorTests {
         #expect(result == .rejected(rule: "meta-text"))
     }
 
+    /// Field report: the model answered the dictation like a chatbot and the
+    /// reply was typed in place of the user's own words.
+    @Test func aChatbotReplyToTheDictationIsRejected() {
+        let result = OutputValidator.validate(
+            output: """
+                Certainly! Here's a refined version of the request: Can you assist me in \
+                brainstorming ways to enhance this process? Additionally, are there newer models? Thank you.
+                """,
+            input: "can you help me brainstorm ways to improve this process and are there newer models",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "meta-text"))
+    }
+
+    @Test(arguments: [
+        "Of course, meet on Saturday.",
+        "Absolutely! Meet on Saturday.",
+        "Here is a polished version: meet on Saturday.",
+        "Meet on Saturday. Corrected version: meet on Saturday.",
+    ])
+    func assistantPhrasingIsRejected(output: String) {
+        let result = OutputValidator.validate(
+            output: output, input: "meet on saturday", language: .english
+        )
+        #expect(result == .rejected(rule: "meta-text"))
+    }
+
+    /// The same words are ordinary content when the speaker said them.
+    @Test(arguments: [
+        ("Certainly, I can make Friday.", "certainly I can make friday"),
+        ("Of course we should ship it.", "of course we should ship it"),
+        ("Send me the refined version tomorrow.", "send me the refined version tomorrow"),
+    ])
+    func assistantWordsTheSpeakerDictatedAreKept(output: String, input: String) {
+        let result = OutputValidator.validate(output: output, input: input, language: .english)
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    /// Review finding: a filler before the speaker's own opener is removed by
+    /// cleanup, which must not make the opener look like a model preamble.
+    @Test(arguments: [
+        ("Absolutely, I'll be there.", "um, absolutely, I'll be there"),
+        ("Of course we can.", "uh of course we can"),
+        ("好的，我明天过去。", "嗯，好的我明天过去"),
+    ])
+    func anOpenerAfterAFillerIsStillTheSpeakersWord(output: String, input: String) {
+        let language: Language = input.containsHanCharacters ? .chinese : .english
+        let result = OutputValidator.validate(output: output, input: input, language: language)
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    @Test func aMarkerIsMatchedAsAWholeWord() {
+        let result = OutputValidator.validate(
+            output: "Surely you can come.", input: "uh surely you can come", language: .english
+        )
+        #expect(result == .accepted(cleaned: "Surely you can come."))
+    }
+
+    /// Grammar and misheard-word fixes create these phrases legitimately.
+    @Test(arguments: [
+        ("Send the corrected version tomorrow.", "send the correct version tomorrow"),
+        ("Let me know if you need anything.", "let me no if you need anything"),
+        ("I hope this helps.", "I hope this help"),
+    ])
+    func legitimateRepairsAreNotMistakenForAssistantPhrasing(output: String, input: String) {
+        let result = OutputValidator.validate(output: output, input: input, language: .english)
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    /// A misheard-word repair changes one word; it must survive every guard.
+    @Test func aSingleMisheardWordRepairIsAccepted() {
+        let result = OutputValidator.validate(
+            output: "Roast your ideas before the meeting.",
+            input: "rose your ideas before the meeting",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: "Roast your ideas before the meeting."))
+    }
+
     @Test func markdownFenceAtStartIsRejected() {
         let result = OutputValidator.validate(
             output: "```\nmeet on Saturday\n```",
@@ -459,4 +538,61 @@ func theSpellingRuleAndTheStyleSectionAreExclusive(style: String) {
         .first { $0.hasPrefix("The dictation is in English") }
     #expect(languageLine != nil)
     #expect(languageLine?.contains("  ") == false)
+}
+
+struct OutputValidatorPackagingAndAnswerTests {
+
+    @Test func echoedTranscriptTagsAreStripped() {
+        let result = OutputValidator.validate(
+            output: "<TRANSCRIPT>\nMeet on Saturday.\n</TRANSCRIPT>",
+            input: "meet on friday sorry saturday",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: "Meet on Saturday."))
+    }
+
+    @Test func wrappingQuotesAreStripped() {
+        let result = OutputValidator.validate(
+            output: "\"Meet on Saturday.\"",
+            input: "meet on friday sorry saturday",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: "Meet on Saturday."))
+    }
+
+    @Test func speakersOwnQuotesAreKept() {
+        let output = "\"Ship it,\" she said, \"today.\""
+        let result = OutputValidator.validate(
+            output: output, input: "\"ship it\" she said \"today\"", language: .english
+        )
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    @Test func answeredQuestionIsRejected() {
+        let result = OutputValidator.validate(
+            output: "The capital of France is Paris.",
+            input: "What's the capital of France?",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "answered-question"))
+    }
+
+    @Test func rewriteWithMostlyNewWordsIsRejected() {
+        let result = OutputValidator.validate(
+            output: "Kindly be advised that our quarterly synchronization has been postponed indefinitely.",
+            input: "so the meeting we had planned for this week is not happening anymore",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "rewrite"))
+    }
+
+    @Test func minimalEditCleanupIsAccepted() {
+        let output = "The meeting we had planned for this week is not happening anymore."
+        let result = OutputValidator.validate(
+            output: output,
+            input: "so um the meeting we had planned for this week is is not happening anymore",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: output))
+    }
 }

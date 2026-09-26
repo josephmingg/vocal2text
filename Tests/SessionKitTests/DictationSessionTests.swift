@@ -553,11 +553,41 @@ struct DictationSessionTests {
         #expect(delivered == ["Meet on saturday."])
     }
 
+    /// A misheard word ("rose your ideas") looks clean to every deterministic
+    /// check, so users who opt into context repair must reach the model.
+    @Test func aCleanTakeRunsTheModelWhenContextRepairIsOn() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        var config = StaticConfig(masterSwitch: true)
+        config.runsOnCleanTakes = true
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "rose your ideas", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: config,
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 1)
+    }
+
+    @Test func theCleanupBudgetGrowsWithTheTakeAndStaysBounded() {
+        let base = Duration.seconds(6)
+        #expect(DictationSession.cleanupBudget(base: base, characterCount: 0) == base)
+        #expect(DictationSession.cleanupBudget(base: base, characterCount: 500) == .seconds(11))
+        #expect(DictationSession.cleanupBudget(base: base, characterCount: 50_000) == .seconds(20))
+        #expect(DictationSession.cleanupBudget(base: .zero, characterCount: 500) == .zero)
+    }
+
     @Test func aFillerBearingTakeStillRunsTheModel() async throws {
         let provider = ScriptedCleanupProvider(script: .uppercase)
         let harness = makeHarness(
             engineResult: TranscriptionResult(
-                text: "um meet on saturday", detectedLanguage: .english
+                // "um" no longer counts: stage 1 removes it deterministically
+                // before the heuristic looks. Hedges stay with the model.
+                text: "basically meet on saturday", detectedLanguage: .english
             ),
             profile: Profile(name: "Notes", cleanupEnabled: true),
             config: StaticConfig(masterSwitch: true),
@@ -1248,5 +1278,18 @@ struct CancelledTakeRecoveryTests {
         let records = await store.records
         #expect(records.count == 1)
         #expect(records.first?.source == .recovered)
+    }
+}
+
+struct EmptyTranscriptTests {
+    @Test(arguments: ["[BLANK_AUDIO]", "Um.", "<|nospeech|>"])
+    func emptyAfterNormalizationDeliversAndSavesNothing(raw: String) async {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: raw, detectedLanguage: .english)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        #expect(await harness.deliverer.deliveredTexts.isEmpty)
+        #expect(await harness.store.records.isEmpty)
     }
 }

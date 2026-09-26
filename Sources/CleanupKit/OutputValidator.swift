@@ -19,8 +19,10 @@ public enum OutputValidator {
     public static func validate(
         output: String, input: String, language: Language
     ) -> ValidationResult {
-        let cleaned = strippingThinkBlocks(output)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = strippingEchoedWrappers(
+            strippingThinkBlocks(output).trimmingCharacters(in: .whitespacesAndNewlines),
+            input: input
+        )
 
         if cleaned.isEmpty {
             return .rejected(rule: "empty")
@@ -43,16 +45,36 @@ public enum OutputValidator {
         // dictation merely began with "sure".
         let lowered = cleaned.lowercased()
         let loweredInput = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // The speaker's opener is judged after their own fillers: "um,
+        // absolutely, I'll be there" legitimately cleans to "Absolutely, I'll
+        // be there." — the filler removal is the very reason it reached the
+        // model — so the marker is still the speaker's word.
+        let inputHead = strippingLeadingFillers(loweredInput)
         var candidate = Substring(lowered)
         if let shared = metaMarkers.first(where: {
-            loweredInput.hasPrefix($0) && lowered.hasPrefix($0)
+            startsWithMarker(inputHead, $0) && startsWithMarker(Substring(lowered), $0)
         }) {
             candidate = lowered.dropFirst(shared.count)
             while let first = candidate.first, first.isWhitespace || first.isPunctuation {
                 candidate = candidate.dropFirst()
             }
         }
-        if metaMarkers.contains(where: { candidate.hasPrefix($0) }) {
+        if metaMarkers.contains(where: { startsWithMarker(candidate, $0) }) {
+            return .rejected(rule: "meta-text")
+        }
+        // Assistant phrasing can also arrive mid-output ("Certainly! Here's a
+        // refined version of the request: …"), where a prefix check sees only
+        // the interjection. These phrases are ordinary words too — a
+        // misheard-word fix legitimately turns "correct version" into
+        // "corrected version" — so one counts only when it *introduces* text
+        // (a colon follows shortly) and the speaker did not say it.
+        if assistantPhrases.contains(where: { phrase in
+            guard !loweredInput.contains(phrase), let range = lowered.range(of: phrase) else {
+                return false
+            }
+            let tail = lowered[range.upperBound...].prefix(40)
+            return tail.contains(":") || tail.contains("：")
+        }) {
             return .rejected(rule: "meta-text")
         }
 
@@ -136,7 +158,66 @@ public enum OutputValidator {
             }
         }
 
+        // Answer failure class the ratio floor cannot see: a full-sentence
+        // answer ("The capital of France is Paris.") is as long as the
+        // question it replaces. A dictated question stays a question, so a
+        // vanished question mark means the model replied instead.
+        if containsQuestionMark(input), !containsQuestionMark(cleaned) {
+            return .rejected(rule: "answered-question")
+        }
+
+        // Rewrite guard for space-separated text: cleanup deletes and repairs,
+        // so most output words already appear in the input. More than half new
+        // words means a rewrite or an answer, not a cleanup.
+        if !language.isUnspacedScript, !input.containsHanCharacters,
+            !input.containsMyanmarCharacters
+        {
+            let inputWords = Set(latinWords(in: input))
+            let outputWords = latinWords(in: cleaned)
+            if outputWords.count >= 8 {
+                let novel = outputWords.filter { !inputWords.contains($0) }.count
+                if Double(novel) / Double(outputWords.count) > 0.5 {
+                    return .rejected(rule: "rewrite")
+                }
+            }
+        }
+
         return .accepted(cleaned: cleaned)
+    }
+
+    private static func containsQuestionMark(_ text: String) -> Bool {
+        text.contains("?") || text.contains("？")
+    }
+
+    private static func latinWords(in text: String) -> [String] {
+        text.lowercased()
+            .split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "'" || $0 == "’") })
+            .map(String.init)
+    }
+
+    /// Small local models often echo the `<TRANSCRIPT>` fence from the user
+    /// message or wrap their answer in quotes despite the prompt. Both are
+    /// packaging, not content: strip them unless the speaker's own text was
+    /// quoted.
+    static func strippingEchoedWrappers(_ text: String, input: String) -> String {
+        var result = text
+        for tag in ["<transcript>", "</transcript>"] {
+            result = result.replacingOccurrences(of: tag, with: "", options: [.caseInsensitive])
+        }
+        result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quotePairs: [(Character, Character)] = [("\"", "\""), ("“", "”"), ("「", "」")]
+        let trimmedInput = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let (open, close) = quotePairs.first(where: { result.first == $0.0 && result.last == $0.1 }),
+            result.count >= 2, trimmedInput.first != open
+        {
+            let inner = result.dropFirst().dropLast()
+            // Only a single wrapping pair — never strip quotes that open and
+            // close separate quotations inside the text.
+            if !inner.contains(open), !inner.contains(close) {
+                result = String(inner).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return result
     }
 
     /// Removes `<think>`, `<thinking>`, and `<reasoning>` blocks emitted by
@@ -157,5 +238,46 @@ public enum OutputValidator {
     /// Compared case-insensitively against the start of the (stripped) output.
     private static let metaMarkers: [String] = [
         "here is", "here's", "here’s", "以下是", "好的", "sure", "```",
+        // Chatbot openers: the model replying to the dictation instead of
+        // cleaning it. Seen in the field: "Certainly! Here's a refined
+        // version…" typed in place of the user's own request.
+        "certainly", "of course", "absolutely", "i'd be happy", "i’d be happy",
+        "i would be happy", "happy to help", "great question", "当然可以", "没问题",
     ]
+
+    /// Phrases an assistant uses to introduce its rewrite. Matched anywhere,
+    /// but only when a colon follows and the speaker did not say them.
+    private static let assistantPhrases: [String] = [
+        "refined version", "cleaned-up version", "cleaned up version",
+        "cleaned text", "corrected version", "revised version", "polished version",
+        "improved version", "rewritten version", "修改后的版本", "润色后的版本",
+    ]
+
+    /// True when `text` opens with `marker` as a whole word: "sure" must not
+    /// match "surely". Markers ending in a non-Latin character (好的, ```)
+    /// have no word boundary to check.
+    private static func startsWithMarker(_ text: Substring, _ marker: String) -> Bool {
+        guard text.hasPrefix(marker) else { return false }
+        guard let last = marker.last, last.isASCII, last.isLetter else { return true }
+        let next = text.dropFirst(marker.count).first
+        return !(next.map { $0.isLetter || $0.isNumber } ?? false)
+    }
+
+    /// Drops leading fillers ("um,", "uh", 嗯) and the punctuation around them.
+    private static func strippingLeadingFillers(_ text: String) -> Substring {
+        var rest = Substring(text)
+        var changed = true
+        while changed {
+            changed = false
+            while let first = rest.first, first.isWhitespace || first.isPunctuation {
+                rest = rest.dropFirst()
+            }
+            for filler in CleanupSkipHeuristic.fillers where startsWithMarker(rest, filler) {
+                rest = rest.dropFirst(filler.count)
+                changed = true
+                break
+            }
+        }
+        return rest
+    }
 }

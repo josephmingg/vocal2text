@@ -211,7 +211,7 @@ struct OpenAICompatibleProviderRequestTests {
         )
 
         #expect(body.model == "qwen2.5:7b-instruct")
-        #expect(body.temperature == 0.2)
+        #expect(body.temperature == 0)
         #expect(body.stream == false)
         // 29 chars → 4× char cap, floored at 1024 (room for a reasoning model
         // to think before it answers).

@@ -116,11 +116,24 @@ final class IOSAppState: ObservableObject {
         // On iOS the profile is chosen manually (no frontmost-app detection —
         // docs/02 FR-i3.3); default = the profile owning the default route.
         let selectedName = UserDefaults.standard.string(forKey: "selectedProfileName") ?? ""
+        // Apple's on-device model is the iPhone's cleanup provider (iOS 26 +
+        // Apple Intelligence). Elsewhere there is none, stage 3 reports
+        // providerUnavailable, and Settings hides the switch.
+        var cleanup: CleanupPipeline?
+        var prewarmCleanup: @Sendable () async -> Void = {}
+        #if canImport(FoundationModels) && compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            let provider = FoundationModelsProvider()
+            cleanup = CleanupPipeline(provider: provider)
+            prewarmCleanup = { await provider.prewarm() }
+        }
+        #endif
         let dependencies = DictationSession.Dependencies(
             audio: IOSCaptureAdapter(microphone: MicrophoneCapture()),
             engine: engine,
-            cleanup: nil,
+            cleanup: cleanup,
             cleanupProviderID: .appleFoundationModels,
+            prewarmCleanup: prewarmCleanup,
             deliverer: deliverer,
             store: IOSTranscriptStore(database: database),
             config: config,
@@ -175,6 +188,17 @@ final class IOSAppState: ObservableObject {
         return resolver.resolve(
             frontmostBundleID: nil, tabHostname: nil, manualPinProfileID: manual?.id
         ).profile.name
+    }
+
+    /// True when Apple's on-device cleanup model can run on this iPhone —
+    /// the only condition under which Settings offers the cleanup switch.
+    static var isOnDeviceCleanupAvailable: Bool {
+        #if canImport(FoundationModels) && compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            return FoundationModelsProvider.isSystemModelAvailable
+        }
+        #endif
+        return false
     }
 
     // MARK: - Dictation controls

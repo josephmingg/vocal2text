@@ -765,6 +765,15 @@ public actor DictationSession {
             .text
         let dictionarySeconds = Self.seconds(dictionaryStart.duration(to: clock.now))
 
+        // Nothing left to say: the transcript was only noise tags, a
+        // special-token remnant, or fillers ("[BLANK_AUDIO]", "Um."). Pasting
+        // an empty string and saving an empty history row helps no one — the
+        // same outcome as the VAD finding no speech.
+        if stage2Text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finishPipeline()
+            return true
+        }
+
         var deliveryText = stage2Text
         var cleanupSeconds = 0.0
         let cleanupOutcome: CleanupOutcome
@@ -799,7 +808,9 @@ public actor DictationSession {
             } else {
                 stylePrompt = await deps.config.globalStylePrompt
             }
-            let timeout = await deps.config.cleanupTimeout
+            let timeout = Self.cleanupBudget(
+                base: await deps.config.cleanupTimeout, characterCount: stage2Text.count
+            )
             let request = CleanupRequest(
                 text: stage2Text,
                 language: language,
@@ -942,6 +953,7 @@ public actor DictationSession {
     private func cleanupHasNothingToDo(
         _ stage2Text: String, language: Language, profile: Profile
     ) async -> Bool {
+        if await deps.config.cleanupRunsOnCleanTakes { return false }
         let profilePrompt = profile.promptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard profilePrompt.isEmpty else { return false }
         if !profile.ignoresGlobalStyle {
@@ -967,6 +979,18 @@ public actor DictationSession {
     static func cleanupAllowed(for language: Language, profile: Profile) -> Bool {
         if language.allowsCleanupByDefault { return true }
         return profile.languageOverride?.pinnedLanguage == language
+    }
+
+    /// The configured budget covers a typical take; a long one needs longer
+    /// because the model must write the whole text back out. On a local 8B
+    /// model (~25 tokens/s, ~4 characters per token) 100 characters of output
+    /// cost about one second, so a two-minute dictation used to blow a flat
+    /// 6 s budget and silently arrive uncleaned. Capped so a stalled server
+    /// still falls back within a bounded wait; a zero budget stays zero.
+    static func cleanupBudget(base: Duration, characterCount: Int) -> Duration {
+        guard base > .zero else { return base }
+        let extra = Duration.milliseconds(characterCount * 10)
+        return min(base + extra, max(base, .seconds(20)))
     }
 
     /// Maps a `CleanupPipeline` fallback reason onto history metadata: the

@@ -191,11 +191,23 @@ final class AppState: ObservableObject {
                     (AppState.ollamaBaseURL(), settings.ollamaModel)
                 }
                 let model = AppState.cleanupModel(for: profile, globalModel: globalModel)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // A blank model field means "no Ollama model": use Apple's
+                // on-device model, or skip cleanup. Sending Ollama an empty
+                // model name failed every take once the server was running.
+                if model.isEmpty {
+                    return await AppState.appleCleanupSelection()
+                }
                 let provider = OpenAICompatibleProvider(
                     baseURL: baseURL,
                     model: model,
                     id: .ollama(model: model)
                 )
+                if let apple = await AppState.appleCleanupFallback(
+                    for: profile, instead: provider
+                ) {
+                    return apple
+                }
                 return DictationSession.CleanupSelection(
                     pipeline: CleanupPipeline(provider: provider),
                     providerID: .ollama(model: model)
@@ -269,7 +281,9 @@ final class AppState: ObservableObject {
                         )
                         : nil
                 }
-                guard let snapshot else { return }
+                guard let snapshot,
+                    !snapshot.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return }
                 let provider = OpenAICompatibleProvider(
                     baseURL: snapshot.baseURL,
                     model: snapshot.model,
@@ -1188,6 +1202,48 @@ final class AppState: ObservableObject {
     /// provider v1 carries configuration for — a profile asking for an
     /// OpenAI-compatible endpoint has no URL or key to reach it with, so it
     /// falls back to the global model rather than failing every take.
+    /// Apple's on-device model (macOS 26 + Apple Intelligence) as the
+    /// zero-setup cleanup provider. Without it, turning on AI cleanup did
+    /// nothing for anyone who had not installed and started Ollama — every
+    /// take silently fell back to the raw transcript. Used when a profile
+    /// pins it, or when the Ollama server is not answering. The Ollama probe
+    /// only runs on machines where the Apple model is actually available, so
+    /// older systems keep the probe-free path (docs/15 step 19).
+    /// Apple's on-device model unconditionally, when this Mac has it.
+    nonisolated static func appleCleanupSelection() async -> DictationSession.CleanupSelection? {
+        #if canImport(FoundationModels) && compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let apple = FoundationModelsProvider()
+            guard await apple.isAvailable() else { return nil }
+            return .init(pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels)
+        }
+        #endif
+        return nil
+    }
+
+    nonisolated static func appleCleanupFallback(
+        for profile: Profile, instead ollama: OpenAICompatibleProvider
+    ) async -> DictationSession.CleanupSelection? {
+        #if canImport(FoundationModels) && compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let apple = FoundationModelsProvider()
+            guard await apple.isAvailable() else { return nil }
+            let pinned = profile.providerOverride == .appleFoundationModels
+            if pinned {
+                return .init(pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels)
+            }
+            if case .ollama? = profile.providerOverride {
+                // An explicit Ollama pin is honoured even when it is down.
+                return nil
+            }
+            if await !ollama.isAvailable() {
+                return .init(pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels)
+            }
+        }
+        #endif
+        return nil
+    }
+
     nonisolated static func cleanupModel(for profile: Profile, globalModel: String) -> String {
         guard case .ollama(let model)? = profile.providerOverride else { return globalModel }
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -200,6 +200,11 @@ struct StaticConfig: SessionConfiguring {
     var stylePrompt = ""
     var timeout = Duration.seconds(5)
     var entries: [DictionaryEntry] = []
+    var runsOnCleanTakes = false
+
+    var cleanupRunsOnCleanTakes: Bool {
+        get async { runsOnCleanTakes }
+    }
 
     var cleanupMasterSwitch: Bool {
         get async { masterSwitch }
