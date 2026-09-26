@@ -363,10 +363,12 @@ private struct CleanupPane: View {
                 OllamaModelStatus(baseURL: ollamaBaseURL, model: settings.ollamaModel)
                 Text(
                     """
-                    Recommended: qwen3:8b — much better at understanding context, \
-                    English and Chinese (about 5 GB; 16 GB of memory or more). \
-                    On 8 GB Macs use qwen3:4b. Install once in Terminal with \
-                    "ollama pull qwen3:8b", then enter the name above.
+                    Leave Model empty to use Apple's built-in on-device model — \
+                    fast, quiet, nothing to install (needs Apple Intelligence). \
+                    For smarter cleanup: qwen3:8b (about 5 GB; 16 GB of memory or \
+                    more; the Mac works harder while it runs). For the fastest \
+                    Ollama option: qwen2.5:3b-instruct. Install once in Terminal \
+                    with "ollama pull <name>", then enter the name above.
                     """
                 )
                 .font(.caption)
@@ -398,6 +400,7 @@ private struct OllamaModelStatus: View {
         case installed
         case missing
         case serverDown
+        case appleOnly
     }
 
     var body: some View {
@@ -416,6 +419,12 @@ private struct OllamaModelStatus: View {
                 )
                 .foregroundStyle(.orange)
                 .textSelection(.enabled)
+            case .appleOnly:
+                Label(
+                    "No model set — Apple's on-device model is used, if available",
+                    systemImage: "apple.logo"
+                )
+                .foregroundStyle(.secondary)
             case .serverDown:
                 Label(
                     "Ollama is not running — Apple's on-device model is used instead, if available",
@@ -429,6 +438,10 @@ private struct OllamaModelStatus: View {
             // Debounce typing in either field.
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
+            if trimmedModel.isEmpty {
+                status = .appleOnly
+                return
+            }
             status = .checking
             status = await Self.check(baseURL: baseURL, model: trimmedModel)
         }
