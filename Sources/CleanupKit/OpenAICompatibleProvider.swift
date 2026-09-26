@@ -144,6 +144,14 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         let urlRequest = try makeURLRequest(body: makeRequestBody(for: request), timeout: timeout)
         let reply = try await perform(urlRequest)
         guard (200..<300).contains(reply.statusCode) else {
+            // Ollama answers 404 when the configured model was never pulled —
+            // the most common setup mistake, and indistinguishable from "server
+            // down" in the history log unless it says so.
+            if reply.statusCode == 404 {
+                throw CleanupError.providerUnavailable(
+                    "HTTP 404: model \"\(model)\" not found (run: ollama pull \(model))"
+                )
+            }
             throw CleanupError.providerUnavailable("HTTP \(reply.statusCode)")
         }
         let decoded: ChatCompletionResponse
@@ -180,12 +188,29 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         return nil
     }
 
+    /// Qwen3 models think before answering unless told not to, and cleanup
+    /// needs no reasoning: measured on qwen3:8b, the thinking pass cost ~230
+    /// tokens (seconds, on a laptop) before a one-line answer, pushing long
+    /// takes past the 6 s cleanup budget so they silently fell back to the
+    /// raw transcript. `/no_think` is Qwen3's documented soft switch; the
+    /// empty `<think></think>` it still emits is stripped by the validator.
+    /// Appended to the system prompt (not the user turn) so the prompt-cache
+    /// prefix the prewarm primes stays byte-identical across takes.
+    nonisolated var disablesThinking: Bool {
+        model.lowercased().hasPrefix("qwen3")
+    }
+
+    nonisolated func systemContent(for request: CleanupRequest) -> String {
+        let prompt = assembler.systemPrompt(for: request)
+        return disablesThinking ? prompt + "\n/no_think" : prompt
+    }
+
     nonisolated func makeRequestBody(for request: CleanupRequest) -> ChatCompletionRequest {
         ChatCompletionRequest(
             model: model,
             messages: [
                 ChatCompletionRequest.Message(
-                    role: "system", content: assembler.systemPrompt(for: request)
+                    role: "system", content: systemContent(for: request)
                 ),
                 ChatCompletionRequest.Message(
                     role: "user", content: assembler.userMessage(for: request)
@@ -210,7 +235,7 @@ public actor OpenAICompatibleProvider: CleanupProvider {
             model: model,
             messages: [
                 ChatCompletionRequest.Message(
-                    role: "system", content: assembler.systemPrompt(for: request)
+                    role: "system", content: systemContent(for: request)
                 ),
                 ChatCompletionRequest.Message(
                     role: "user", content: assembler.userMessage(for: request)

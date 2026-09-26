@@ -342,9 +342,35 @@ private struct CleanupPane: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
-            Section("Ollama") {
+            Section {
+                Toggle("Fix misheard words using context", isOn: $settings.fixMisheardWords)
+                    .disabled(!settings.cleanupMasterSwitch)
+                Text(
+                    """
+                    Lets the AI repair words the recognizer misheard — "rose your \
+                    ideas" becomes "roast your ideas". Every dictation goes through \
+                    the AI, so short ones take a little longer. Turn off for maximum \
+                    speed. For mistakes that keep recurring, a Dictionary entry is \
+                    faster and always exact.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Section("Ollama (free, runs on this Mac)") {
                 TextField("Server URL", text: $ollamaBaseURL)
                 TextField("Model", text: $settings.ollamaModel)
+                OllamaModelStatus(baseURL: ollamaBaseURL, model: settings.ollamaModel)
+                Text(
+                    """
+                    Recommended: qwen3:8b — much better at understanding context, \
+                    English and Chinese (about 5 GB; 16 GB of memory or more). \
+                    On 8 GB Macs use qwen3:4b. Install once in Terminal with \
+                    "ollama pull qwen3:8b", then enter the name above.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Section("Custom style prompt") {
                 // FR-10.1: one global style prompt for all cleanup-enabled
@@ -355,6 +381,84 @@ private struct CleanupPane: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Whether the configured Ollama model is actually installed. A model that
+/// was never pulled makes every cleanup fail with a 404, and the dictation
+/// then silently arrives uncleaned — this makes that state visible.
+@MainActor
+private struct OllamaModelStatus: View {
+    let baseURL: String
+    let model: String
+    @State private var status: Status = .checking
+
+    enum Status: Equatable {
+        case checking
+        case installed
+        case missing
+        case serverDown
+    }
+
+    var body: some View {
+        Group {
+            switch status {
+            case .checking:
+                Label("Checking Ollama…", systemImage: "hourglass")
+                    .foregroundStyle(.secondary)
+            case .installed:
+                Label("Model installed and ready", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            case .missing:
+                Label(
+                    "Not installed — run: ollama pull \(trimmedModel)",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+            case .serverDown:
+                Label(
+                    "Ollama is not running — Apple's on-device model is used instead, if available",
+                    systemImage: "exclamationmark.circle"
+                )
+                .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .task(id: "\(baseURL)|\(model)") {
+            // Debounce typing in either field.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            status = .checking
+            status = await Self.check(baseURL: baseURL, model: trimmedModel)
+        }
+    }
+
+    private var trimmedModel: String {
+        model.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private struct Tags: Decodable {
+        struct Model: Decodable { let name: String }
+        let models: [Model]
+    }
+
+    nonisolated static func check(baseURL: String, model: String) async -> Status {
+        var root = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        while root.hasSuffix("/") { root.removeLast() }
+        if root.lowercased().hasSuffix("/v1") { root.removeLast(3) }
+        guard let url = URL(string: root + "/api/tags") else { return .serverDown }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
+        guard
+            let (data, response) = try? await URLSession.shared.data(for: request),
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let tags = try? JSONDecoder().decode(Tags.self, from: data)
+        else { return .serverDown }
+        // "qwen3" means "qwen3:latest" to Ollama.
+        let wanted = model.contains(":") ? model : model + ":latest"
+        return tags.models.contains { $0.name == wanted || $0.name == model }
+            ? .installed : .missing
     }
 }
 

@@ -97,5 +97,16 @@ public protocol SessionConfiguring: Sendable {
     var globalLanguageMode: LanguageMode { get async }
     var globalStylePrompt: String { get async }
     var cleanupTimeout: Duration { get async }
+    /// When true, stage 3 runs even on takes the skip heuristic calls clean.
+    /// Misheard words ("rose your ideas" for "roast your ideas") look
+    /// perfectly tidy to any deterministic check — only the model, reading
+    /// context, can catch them — so a user who wants those repaired has to
+    /// pay the round-trip on every take.
+    var cleanupRunsOnCleanTakes: Bool { get async }
     func enabledDictionaryEntries() async -> [DictionaryEntry]
+}
+
+extension SessionConfiguring {
+    /// Default: keep the latency-saving skip (docs/15 step 20).
+    public var cleanupRunsOnCleanTakes: Bool { false }
 }

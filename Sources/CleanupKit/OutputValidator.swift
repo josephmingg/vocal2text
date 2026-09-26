@@ -57,6 +57,13 @@ public enum OutputValidator {
         if metaMarkers.contains(where: { candidate.hasPrefix($0) }) {
             return .rejected(rule: "meta-text")
         }
+        // Assistant phrasing can also arrive mid-output ("Certainly! Here's a
+        // refined version of the request: …"), where a prefix check sees only
+        // the interjection. A phrase counts only when the model introduced it:
+        // one the speaker actually dictated is content, not a preamble.
+        if assistantPhrases.contains(where: { lowered.contains($0) && !loweredInput.contains($0) }) {
+            return .rejected(rule: "meta-text")
+        }
 
         let inputCount = input.count
         let ratio =
@@ -218,5 +225,19 @@ public enum OutputValidator {
     /// Compared case-insensitively against the start of the (stripped) output.
     private static let metaMarkers: [String] = [
         "here is", "here's", "here’s", "以下是", "好的", "sure", "```",
+        // Chatbot openers: the model replying to the dictation instead of
+        // cleaning it. Seen in the field: "Certainly! Here's a refined
+        // version…" typed in place of the user's own request.
+        "certainly", "of course", "absolutely", "i'd be happy", "i’d be happy",
+        "i would be happy", "happy to help", "great question", "当然可以", "没问题",
+    ]
+
+    /// Phrases that only an assistant talking *about* the text would write.
+    /// Matched anywhere in the output, and only when absent from the input.
+    private static let assistantPhrases: [String] = [
+        "refined version", "cleaned-up version", "cleaned up version",
+        "cleaned text", "corrected version", "revised version", "polished version",
+        "here's the cleaned", "here is the cleaned", "here’s the cleaned",
+        "i hope this helps", "let me know if you need", "以下是修改", "修改后的版本",
     ]
 }

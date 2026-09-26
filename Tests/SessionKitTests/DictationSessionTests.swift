@@ -553,6 +553,26 @@ struct DictationSessionTests {
         #expect(delivered == ["Meet on saturday."])
     }
 
+    /// A misheard word ("rose your ideas") looks clean to every deterministic
+    /// check, so users who opt into context repair must reach the model.
+    @Test func aCleanTakeRunsTheModelWhenContextRepairIsOn() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        var config = StaticConfig(masterSwitch: true)
+        config.runsOnCleanTakes = true
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "rose your ideas", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true),
+            config: config,
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 1)
+    }
+
     @Test func aFillerBearingTakeStillRunsTheModel() async throws {
         let provider = ScriptedCleanupProvider(script: .uppercase)
         let harness = makeHarness(

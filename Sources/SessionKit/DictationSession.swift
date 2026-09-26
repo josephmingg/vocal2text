@@ -951,6 +951,7 @@ public actor DictationSession {
     private func cleanupHasNothingToDo(
         _ stage2Text: String, language: Language, profile: Profile
     ) async -> Bool {
+        if await deps.config.cleanupRunsOnCleanTakes { return false }
         let profilePrompt = profile.promptText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard profilePrompt.isEmpty else { return false }
         if !profile.ignoresGlobalStyle {

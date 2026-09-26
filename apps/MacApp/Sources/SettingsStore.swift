@@ -29,6 +29,15 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(stylePrompt, forKey: Keys.stylePrompt) }
     }
 
+    /// Send every take through AI cleanup, even ones that already look clean,
+    /// so the model can repair misheard words from context ("rose your ideas"
+    /// → "roast your ideas"). Costs the cleanup round-trip on short takes
+    /// that would otherwise skip it; on by default because a misheard word is
+    /// exactly what a tidy-looking short take hides.
+    @Published var fixMisheardWords: Bool {
+        didSet { Self.defaults.set(fixMisheardWords, forKey: Keys.fixMisheardWords) }
+    }
+
     /// The push-to-talk binding — a preset or a recorded custom combination
     /// (docs/13). Persisted as JSON so the shape can grow without another
     /// migration.
@@ -140,6 +149,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         cleanupMasterSwitch = defaults.object(forKey: Keys.cleanupMasterSwitch) as? Bool ?? false
         languageMode = Self.languageMode(from: defaults.string(forKey: Keys.languageMode))
         stylePrompt = defaults.string(forKey: Keys.stylePrompt) ?? ""
+        fixMisheardWords = defaults.object(forKey: Keys.fixMisheardWords) as? Bool ?? true
         let hotkey = Self.loadHotkeySpec(from: defaults)
         hotkeySpec = hotkey.spec
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
@@ -175,6 +185,8 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     var globalLanguageMode: LanguageMode { languageMode }
 
     var globalStylePrompt: String { stylePrompt }
+
+    var cleanupRunsOnCleanTakes: Bool { fixMisheardWords }
 
     /// Stage-3 budget: 6 s default (docs/05 §3.2); on expiry the session
     /// delivers the stage-2 text unchanged (FR-7.3).
@@ -239,6 +251,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let cleanupMasterSwitch = "settings.cleanupMasterSwitch"
         static let languageMode = "settings.languageMode"
         static let stylePrompt = "settings.stylePrompt"
+        static let fixMisheardWords = "settings.fixMisheardWords"
         static let hotkeySpec = "settings.hotkeySpec"
         /// Pre-spec key, read once by the migration and never written again.
         /// Left in the domain so downgrading to an older build still works.

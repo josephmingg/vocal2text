@@ -108,6 +108,54 @@ struct OutputValidatorTests {
         #expect(result == .rejected(rule: "meta-text"))
     }
 
+    /// Field report: the model answered the dictation like a chatbot and the
+    /// reply was typed in place of the user's own words.
+    @Test func aChatbotReplyToTheDictationIsRejected() {
+        let result = OutputValidator.validate(
+            output: """
+                Certainly! Here's a refined version of the request: Can you assist me in \
+                brainstorming ways to enhance this process? Additionally, are there newer models? Thank you.
+                """,
+            input: "can you help me brainstorm ways to improve this process and are there newer models",
+            language: .english
+        )
+        #expect(result == .rejected(rule: "meta-text"))
+    }
+
+    @Test(arguments: [
+        "Of course, meet on Saturday.",
+        "Absolutely! Meet on Saturday.",
+        "Meet on Saturday. I hope this helps!",
+        "Here is a polished version: meet on Saturday.",
+    ])
+    func assistantPhrasingIsRejected(output: String) {
+        let result = OutputValidator.validate(
+            output: output, input: "meet on saturday", language: .english
+        )
+        #expect(result == .rejected(rule: "meta-text"))
+    }
+
+    /// The same words are ordinary content when the speaker said them.
+    @Test(arguments: [
+        ("Certainly, I can make Friday.", "certainly I can make friday"),
+        ("Of course we should ship it.", "of course we should ship it"),
+        ("Send me the refined version tomorrow.", "send me the refined version tomorrow"),
+    ])
+    func assistantWordsTheSpeakerDictatedAreKept(output: String, input: String) {
+        let result = OutputValidator.validate(output: output, input: input, language: .english)
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    /// A misheard-word repair changes one word; it must survive every guard.
+    @Test func aSingleMisheardWordRepairIsAccepted() {
+        let result = OutputValidator.validate(
+            output: "Roast your ideas before the meeting.",
+            input: "rose your ideas before the meeting",
+            language: .english
+        )
+        #expect(result == .accepted(cleaned: "Roast your ideas before the meeting."))
+    }
+
     @Test func markdownFenceAtStartIsRejected() {
         let result = OutputValidator.validate(
             output: "```\nmeet on Saturday\n```",

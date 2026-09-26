@@ -112,6 +112,25 @@ struct OpenAICompatibleProviderTests {
         )
     }
 
+    /// Qwen3 thinks by default; cleanup must not pay for it. The switch goes
+    /// on BOTH the prewarm and the real request so the cached prefix matches.
+    @Test func qwen3RequestsDisableThinking() {
+        let qwen3 = OpenAICompatibleProvider(
+            baseURL: URL(string: "http://localhost:11434")!, model: "qwen3:8b"
+        )
+        let request = CleanupRequest(text: "hello", language: .english)
+        let real = qwen3.makeRequestBody(for: request).messages.first?.content ?? ""
+        let warm = qwen3.makePrewarmBody(for: request).messages.first?.content ?? ""
+        #expect(real.hasSuffix("/no_think"))
+        #expect(real == warm)
+    }
+
+    @Test func otherModelsGetThePromptUnchanged() {
+        let request = CleanupRequest(text: "hello", language: .english)
+        let body = provider("http://localhost:11434").makeRequestBody(for: request)
+        #expect(body.messages.first?.content == PromptAssembler().systemPrompt(for: request))
+    }
+
     @Test func ollamaRequestsCarryKeepAlive() throws {
         let ollama = OpenAICompatibleProvider(
             baseURL: URL(string: "http://localhost:11434")!,
