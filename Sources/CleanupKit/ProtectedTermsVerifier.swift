@@ -23,11 +23,13 @@ public enum ProtectedTermsVerifier {
         let isIndexAligned = loweredOutput.count == outputCharacters.count
         for term in protectedTerms {
             guard !term.isEmpty, input.contains(term) else { continue }
-            let found = containsMutatedVariant(
+            let found = mutationCandidates(
                 of: Array(term),
                 in: outputCharacters,
                 loweredOutput: isIndexAligned ? loweredOutput : nil
-            )
+            ).contains {
+                !isSpeakersOwnText($0, in: outputCharacters, term: term, input: input)
+            }
             if found { return false }
         }
         return true
@@ -113,12 +115,14 @@ public enum ProtectedTermsVerifier {
         var characters = Array(output)
         for term in protectedTerms {
             guard !term.isEmpty, input.contains(term) else { continue }
-            characters = repairing(term: Array(term), in: characters)
+            characters = repairing(term: Array(term), in: characters, input: input)
         }
         return String(characters)
     }
 
-    private static func repairing(term: [Character], in output: [Character]) -> [Character] {
+    private static func repairing(
+        term: [Character], in output: [Character], input: String
+    ) -> [Character] {
         let lowered = lowercasedCharacters(output[...])
         let aligned = lowered.count == output.count ? lowered : nil
         // Repair is held to a stricter standard than detection: rewriting a
@@ -130,6 +134,7 @@ public enum ProtectedTermsVerifier {
         // than what shipped before repair existed. This also means a term
         // embedded in contiguous CJK prose is not repaired, only rejected.
         let candidates = mutationCandidates(of: term, in: output, loweredOutput: aligned)
+            .filter { !isSpeakersOwnText($0, in: output, term: String(term), input: input) }
             .filter { range in
                 let before = range.lowerBound > 0 ? output[range.lowerBound - 1] : nil
                 let after = range.upperBound < output.count ? output[range.upperBound] : nil
@@ -166,6 +171,33 @@ public enum ProtectedTermsVerifier {
             repaired.replaceSubrange(best, with: term)
         }
         return repaired
+    }
+
+    /// A near-miss window whose exact text the speaker already said is their
+    /// own words, not the term in altered spelling. Without this, short terms
+    /// flagged ordinary prose on nearly every take — protected "AI" matched
+    /// the "a " in "is a good one", protected 微信 matched 相信 — and every
+    /// such take silently fell back to the uncleaned transcript. A genuine
+    /// mutation (威信 for 微信, "Cluade" for "Claude") is text the model
+    /// invented, so it is absent from the input and stays flagged.
+    /// Compared case-insensitively, since cleanup capitalizes sentence starts
+    /// ("wait" → "Wait"). A pure case variant of the term is the mutation the
+    /// guard exists to catch — unless it is glued inside a longer Latin word
+    /// ("ai" in "Wait"), where it is part of that word, not the term.
+    private static func isSpeakersOwnText(
+        _ range: Range<Int>, in output: [Character], term: String, input: String
+    ) -> Bool {
+        let text = String(output[range])
+        if text.lowercased() == term.lowercased() {
+            func isLatinWordCharacter(_ index: Int) -> Bool {
+                guard output.indices.contains(index) else { return false }
+                let character = output[index]
+                return character.isASCII && (character.isLetter || character.isNumber)
+            }
+            return isLatinWordCharacter(range.lowerBound - 1)
+                || isLatinWordCharacter(range.upperBound)
+        }
+        return input.range(of: text, options: .caseInsensitive) != nil
     }
 
     /// True when `candidate` appears as a contiguous run inside `whole`.

@@ -74,6 +74,18 @@ struct ProtectedTermsVerifierTests {
         )
     }
 
+    /// Review finding: short terms used to flag ordinary words near them.
+    @Test(arguments: [
+        ("The AI model is a good one.", "the AI model is a good one", "AI"),
+        ("Wait, the AI is ready.", "wait, the AI is ready", "AI"),
+        ("我相信微信会更新。", "我相信微信会更新", "微信"),
+    ])
+    func wordsTheSpeakerSaidAreNotMutationsOfAShortTerm(
+        output: String, input: String, term: String
+    ) {
+        #expect(ProtectedTermsVerifier.verify(output: output, input: input, protectedTerms: [term]))
+    }
+
     @Test func chineseExactTermPasses() {
         #expect(
             ProtectedTermsVerifier.verify(

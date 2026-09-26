@@ -45,23 +45,36 @@ public enum OutputValidator {
         // dictation merely began with "sure".
         let lowered = cleaned.lowercased()
         let loweredInput = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // The speaker's opener is judged after their own fillers: "um,
+        // absolutely, I'll be there" legitimately cleans to "Absolutely, I'll
+        // be there." — the filler removal is the very reason it reached the
+        // model — so the marker is still the speaker's word.
+        let inputHead = strippingLeadingFillers(loweredInput)
         var candidate = Substring(lowered)
         if let shared = metaMarkers.first(where: {
-            loweredInput.hasPrefix($0) && lowered.hasPrefix($0)
+            startsWithMarker(inputHead, $0) && startsWithMarker(Substring(lowered), $0)
         }) {
             candidate = lowered.dropFirst(shared.count)
             while let first = candidate.first, first.isWhitespace || first.isPunctuation {
                 candidate = candidate.dropFirst()
             }
         }
-        if metaMarkers.contains(where: { candidate.hasPrefix($0) }) {
+        if metaMarkers.contains(where: { startsWithMarker(candidate, $0) }) {
             return .rejected(rule: "meta-text")
         }
         // Assistant phrasing can also arrive mid-output ("Certainly! Here's a
         // refined version of the request: …"), where a prefix check sees only
-        // the interjection. A phrase counts only when the model introduced it:
-        // one the speaker actually dictated is content, not a preamble.
-        if assistantPhrases.contains(where: { lowered.contains($0) && !loweredInput.contains($0) }) {
+        // the interjection. These phrases are ordinary words too — a
+        // misheard-word fix legitimately turns "correct version" into
+        // "corrected version" — so one counts only when it *introduces* text
+        // (a colon follows shortly) and the speaker did not say it.
+        if assistantPhrases.contains(where: { phrase in
+            guard !loweredInput.contains(phrase), let range = lowered.range(of: phrase) else {
+                return false
+            }
+            let tail = lowered[range.upperBound...].prefix(40)
+            return tail.contains(":") || tail.contains("：")
+        }) {
             return .rejected(rule: "meta-text")
         }
 
@@ -232,12 +245,39 @@ public enum OutputValidator {
         "i would be happy", "happy to help", "great question", "当然可以", "没问题",
     ]
 
-    /// Phrases that only an assistant talking *about* the text would write.
-    /// Matched anywhere in the output, and only when absent from the input.
+    /// Phrases an assistant uses to introduce its rewrite. Matched anywhere,
+    /// but only when a colon follows and the speaker did not say them.
     private static let assistantPhrases: [String] = [
         "refined version", "cleaned-up version", "cleaned up version",
         "cleaned text", "corrected version", "revised version", "polished version",
-        "here's the cleaned", "here is the cleaned", "here’s the cleaned",
-        "i hope this helps", "let me know if you need", "以下是修改", "修改后的版本",
+        "improved version", "rewritten version", "修改后的版本", "润色后的版本",
     ]
+
+    /// True when `text` opens with `marker` as a whole word: "sure" must not
+    /// match "surely". Markers ending in a non-Latin character (好的, ```)
+    /// have no word boundary to check.
+    private static func startsWithMarker(_ text: Substring, _ marker: String) -> Bool {
+        guard text.hasPrefix(marker) else { return false }
+        guard let last = marker.last, last.isASCII, last.isLetter else { return true }
+        let next = text.dropFirst(marker.count).first
+        return !(next.map { $0.isLetter || $0.isNumber } ?? false)
+    }
+
+    /// Drops leading fillers ("um,", "uh", 嗯) and the punctuation around them.
+    private static func strippingLeadingFillers(_ text: String) -> Substring {
+        var rest = Substring(text)
+        var changed = true
+        while changed {
+            changed = false
+            while let first = rest.first, first.isWhitespace || first.isPunctuation {
+                rest = rest.dropFirst()
+            }
+            for filler in CleanupSkipHeuristic.fillers where startsWithMarker(rest, filler) {
+                rest = rest.dropFirst(filler.count)
+                changed = true
+                break
+            }
+        }
+        return rest
+    }
 }

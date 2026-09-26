@@ -573,6 +573,14 @@ struct DictationSessionTests {
         #expect(cleanupCallCount == 1)
     }
 
+    @Test func theCleanupBudgetGrowsWithTheTakeAndStaysBounded() {
+        let base = Duration.seconds(6)
+        #expect(DictationSession.cleanupBudget(base: base, characterCount: 0) == base)
+        #expect(DictationSession.cleanupBudget(base: base, characterCount: 500) == .seconds(11))
+        #expect(DictationSession.cleanupBudget(base: base, characterCount: 50_000) == .seconds(20))
+        #expect(DictationSession.cleanupBudget(base: .zero, characterCount: 500) == .zero)
+    }
+
     @Test func aFillerBearingTakeStillRunsTheModel() async throws {
         let provider = ScriptedCleanupProvider(script: .uppercase)
         let harness = makeHarness(

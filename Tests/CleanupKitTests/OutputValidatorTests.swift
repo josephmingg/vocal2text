@@ -125,8 +125,8 @@ struct OutputValidatorTests {
     @Test(arguments: [
         "Of course, meet on Saturday.",
         "Absolutely! Meet on Saturday.",
-        "Meet on Saturday. I hope this helps!",
         "Here is a polished version: meet on Saturday.",
+        "Meet on Saturday. Corrected version: meet on Saturday.",
     ])
     func assistantPhrasingIsRejected(output: String) {
         let result = OutputValidator.validate(
@@ -142,6 +142,37 @@ struct OutputValidatorTests {
         ("Send me the refined version tomorrow.", "send me the refined version tomorrow"),
     ])
     func assistantWordsTheSpeakerDictatedAreKept(output: String, input: String) {
+        let result = OutputValidator.validate(output: output, input: input, language: .english)
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    /// Review finding: a filler before the speaker's own opener is removed by
+    /// cleanup, which must not make the opener look like a model preamble.
+    @Test(arguments: [
+        ("Absolutely, I'll be there.", "um, absolutely, I'll be there"),
+        ("Of course we can.", "uh of course we can"),
+        ("好的，我明天过去。", "嗯，好的我明天过去"),
+    ])
+    func anOpenerAfterAFillerIsStillTheSpeakersWord(output: String, input: String) {
+        let language: Language = input.containsHanCharacters ? .chinese : .english
+        let result = OutputValidator.validate(output: output, input: input, language: language)
+        #expect(result == .accepted(cleaned: output))
+    }
+
+    @Test func aMarkerIsMatchedAsAWholeWord() {
+        let result = OutputValidator.validate(
+            output: "Surely you can come.", input: "uh surely you can come", language: .english
+        )
+        #expect(result == .accepted(cleaned: "Surely you can come."))
+    }
+
+    /// Grammar and misheard-word fixes create these phrases legitimately.
+    @Test(arguments: [
+        ("Send the corrected version tomorrow.", "send the correct version tomorrow"),
+        ("Let me know if you need anything.", "let me no if you need anything"),
+        ("I hope this helps.", "I hope this help"),
+    ])
+    func legitimateRepairsAreNotMistakenForAssistantPhrasing(output: String, input: String) {
         let result = OutputValidator.validate(output: output, input: input, language: .english)
         #expect(result == .accepted(cleaned: output))
     }

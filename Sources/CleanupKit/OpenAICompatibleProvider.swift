@@ -33,7 +33,9 @@ public actor OpenAICompatibleProvider: CleanupProvider {
         let isLoopback = Self.isLoopbackHost(host)
         self.baseURL = Self.normalizedRoot(baseURL)
         self.apiKey = apiKey
-        self.model = model
+        // A stray space typed into Settings made every request 404 while the
+        // model looked installed, and hid the qwen3 prefix from `/no_think`.
+        self.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
         self.temperature = temperature
         self.id = id ?? .openAICompatible(name: host.isEmpty ? "custom" : host)
         self.leavesDevice = leavesDevice ?? !isLoopback
@@ -132,7 +134,10 @@ public actor OpenAICompatibleProvider: CleanupProvider {
     public func prewarm(for request: CleanupRequest) async {
         guard
             let urlRequest = try? makeURLRequest(
-                body: makePrewarmBody(for: request), timeout: .seconds(5)
+                // Generous: this request also pays a cold model load, which
+                // for an 8B model can take well over 5 s. It runs in the
+                // background while the user speaks, so nobody waits on it.
+                body: makePrewarmBody(for: request), timeout: .seconds(30)
             )
         else { return }
         _ = try? await perform(urlRequest)
