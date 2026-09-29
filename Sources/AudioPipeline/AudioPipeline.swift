@@ -414,13 +414,20 @@ public enum AudioArchive {
 ///
 /// v1 skeleton: no `AVAudioEngineConfigurationChange` converter rebuild yet, and
 /// converter-internal tail frames (a few ms) are not flushed at finish.
+/// One tapped buffer's channel-0 samples plus the rate they were recorded
+/// at, so conversion follows the hardware even when it changes mid-take.
+struct NativeChunk: Sendable {
+    let samples: [Float]
+    let sampleRate: Double
+}
+
 public actor MicrophoneCapture {
     private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
     private var monoInputFormat: AVAudioFormat?
     private var targetFormat: AVAudioFormat?
     private var accumulated: [Float] = []
-    private var nativeContinuation: AsyncStream<[Float]>.Continuation?
+    private var nativeContinuation: AsyncStream<NativeChunk>.Continuation?
     private var chunkContinuation: AsyncStream<PCMChunk>.Continuation?
     private var processingTask: Task<Void, Never>?
     private var recoveryURL: URL?
@@ -570,7 +577,17 @@ public actor MicrophoneCapture {
         applyPreferredInputDevice(to: engine)
         var input = engine.inputNode
         var hardwareFormat = input.outputFormat(forBus: 0)
-        if hardwareFormat.sampleRate <= 0, cameFromPreheat {
+        // A prepared engine goes stale when the input changes after it was
+        // built — AirPods connecting, a wake from sleep, a different default
+        // microphone. Its node then reports the old device's format, which no
+        // longer matches the hardware. Field crash (three in one evening):
+        // installTap raised an Objective-C exception on exactly that
+        // mismatch, and an ObjC exception cannot be caught in Swift, so the
+        // app died on the hotkey press. Rebuild whenever the node and the
+        // hardware disagree, or the format is unusable.
+        if cameFromPreheat,
+            !Self.formatsAgree(node: hardwareFormat, hardware: input.inputFormat(forBus: 0))
+        {
             engine = AVAudioEngine()
             applyPreferredInputDevice(to: engine)
             input = engine.inputNode
@@ -613,7 +630,7 @@ public actor MicrophoneCapture {
         let recoveryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32")
 
-        let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: [Float].self)
+        let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: NativeChunk.self)
         // The live-chunk stream feeds the streaming preview (docs/15 step 22);
         // the take itself is `accumulated`. The buffer is bounded so an
         // unconsumed stream never retains the whole take a second time, but
@@ -643,14 +660,20 @@ public actor MicrophoneCapture {
         let tap: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { buffer, _ in
             let samples = MicrophoneCapture.monoSamples(from: buffer)
             if !samples.isEmpty {
-                nativeContinuation.yield(samples)
+                nativeContinuation.yield(
+                    NativeChunk(samples: samples, sampleRate: buffer.format.sampleRate)
+                )
             }
         }
-        input.installTap(onBus: 0, bufferSize: 4_096, format: hardwareFormat, block: tap)
+        // `format: nil` taps in whatever format the node is actually producing.
+        // Passing a format makes AVFAudio assert that it matches the hardware,
+        // and a failed assertion is an uncatchable exception that kills the
+        // app; buffers carry their own rate, and `ingest` follows it.
+        input.installTap(onBus: 0, bufferSize: 4_096, format: nil, block: tap)
 
         processingTask = Task.detached { [weak self] in
-            for await samples in nativeStream {
-                await self?.ingest(samples)
+            for await chunk in nativeStream {
+                await self?.ingest(chunk)
             }
         }
 
@@ -714,7 +737,16 @@ public actor MicrophoneCapture {
         }
     }
 
-    private func ingest(_ nativeSamples: [Float]) {
+    private func ingest(_ chunk: NativeChunk) {
+        let nativeSamples = chunk.samples
+        // The device can change rate under a running take; convert from the
+        // rate the buffer actually has, never a stale one (which would play
+        // the audio back at the wrong speed and wreck the transcript).
+        if let current = monoInputFormat, chunk.sampleRate > 0,
+            current.sampleRate != chunk.sampleRate
+        {
+            retargetConverter(toInputRate: chunk.sampleRate)
+        }
         guard let converter,
               let inputFormat = monoInputFormat,
               let outputFormat = targetFormat,
@@ -861,6 +893,30 @@ public actor MicrophoneCapture {
         recoveryURL = nil
         monoInputFormat = nil
         targetFormat = nil
+    }
+
+    /// Rebuilds the resampler for a new input rate. Fails soft: on any
+    /// failure the old converter stays, which only degrades this take.
+    private func retargetConverter(toInputRate rate: Double) {
+        guard let target = targetFormat,
+            let monoInput = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false
+            ),
+            let replacement = AVAudioConverter(from: monoInput, to: target)
+        else { return }
+        VocalLog.audio.notice(
+            "input rate changed mid-take to \(rate, privacy: .public) Hz — resampler rebuilt"
+        )
+        monoInputFormat = monoInput
+        converter = replacement
+    }
+
+    /// True when a prepared engine's input node still describes the hardware
+    /// it is attached to, and that format is usable.
+    static func formatsAgree(node: AVAudioFormat, hardware: AVAudioFormat) -> Bool {
+        node.sampleRate > 0 && node.channelCount > 0
+            && node.sampleRate == hardware.sampleRate
+            && node.channelCount == hardware.channelCount
     }
 
     private static func monoSamples(from buffer: AVAudioPCMBuffer) -> [Float] {
