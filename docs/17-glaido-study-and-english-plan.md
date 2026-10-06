@@ -2,9 +2,12 @@
 
 > **What this is.** A study of Glaido ("the world's fastest dictation"), a cold review of
 > Vocal as it stands on `main` (`43059de`), and a phased plan to make Vocal's **English**
-> dictation the best it can be. Chinese and Burmese are out of scope on purpose. This page
-> recommends; the only code it touches is none. Every finding below was verified by reading
-> or reproducing it on `main`, unless it is marked *plausible*.
+> dictation the best it can be. Chinese and Burmese are out of scope on purpose. Every finding
+> below was verified by reading or reproducing it on `main`, unless it is marked *plausible*.
+>
+> **Status (same day):** the owner answered §8 and asked for G1 + G0 + G3 + G4 in one PR to
+> save CI minutes. They are built on this branch. **§9** lists what shipped, what did not,
+> and the hardware checklist, because CI compiles the app but never runs it.
 >
 > **Read with:** [docs/15](15-deep-review-and-improvement-plan.md) (the Wispr Flow plan,
 > phases 0–7, mostly built) and [docs/16](16-mvp-cold-review.md) (the English MVP review).
@@ -253,9 +256,42 @@ fields exist), optionally boosted for the current profile.
 `docs/benchmarks/M0-results.md`). This blocks Parakeet-by-default (step 14 "pending
 vocal-bench numbers") and every "faster than X" claim. See plan step G0.
 
-### 4.3 App layer
+### 4.3 App layer (independent review of `apps/`, `PersistenceKit`, `ProfileKit`)
 
-*(The parallel app-layer review results are merged in §4.4 once complete.)*
+A separate cold review of the app layer reported 27 findings. Each one marked *fixed* was
+re-verified against the code before it was changed. The rest are recorded here for later.
+
+| # | Sev | Finding | Status |
+|---|---|---|---|
+| 1 | M | A chord during a hands-free take (right-⌘+Tab, Fn+arrow) cancelled the whole take | **Fixed**: shortcuts during lock are ignored (core + tests) |
+| 2 | M | Double-tapping out of hands-free started a new locked take | **Fixed**: the lock-exit tap no longer seeds a double-tap (core + tests) |
+| 3 | M | The HUD swallowed clicks above the Dock for the whole take, and had nothing to click | **Fixed**: always click-through |
+| 4 | M | AX insertion reported success when the field already contained the same text | **Fixed**: the value must change |
+| 5 | M | AX calls on the main actor had no messaging timeout (~6 s freeze on a busy target) | **Fixed**: 1 s bound, 0.25 s for read-only context |
+| 6 | M | "Keep audio: Never" kept cancelled and failed takes; Delete All left recovery files | **Fixed**: discarded at once (FR-1.6); Delete All clears them |
+| 7 | M | Alacritty, kitty, WezTerm and Warp were typed into as terminals but formatted as prose | **Fixed**: routed to Terminal / Code, with an upgrade for existing installs |
+| 8 | M* | The browser-automation prompt first appears mid-dictation | Open: request it from onboarding |
+| 9 | M* | The clipboard snapshot forces every pasteboard format to render (Excel/Keynote) | Open: snapshot known types with a size cap |
+| 10 | M– | History decodes everything on the main thread and never refreshes | Open |
+| 11 | L–M | Mic levels inside `hudState` redraw every AppState observer ~12×/s | Open: split into a HUD-only object |
+| 12 | L–M | Sleep during a hands-free take left the silence auto-stop armed | **Fixed** |
+| 13 | L–M | An earlier take's error showed after the next take delivered | **Fixed** (test fails without the fix) |
+| 14 | L–M | A hotkey press during "Recover" waits for the whole recovery | Open |
+| 15 | L | "Test Your Key" ends test mode on the first edge | Open |
+| 16 | L | Undo last insertion edited matching text in any app, any time later | **Fixed**: same app, within 10 minutes |
+| 17 | L | The short-tap commit timer can deliver before the lock gesture completes | Open (small impact) |
+| 18 | L | "Run Setup Assistant Again" may reopen on the last page | Open |
+| 19 | L* | Start/stop sounds are captured at the edges of the take | Open |
+| 20 | L | A stuck background secure input is only discovered after speaking | Open |
+| 21 | L | iOS settings are read and written across threads during overlapping takes | Open |
+| 22 | L | iOS auto-copy rides Universal Clipboard to other devices | **Fixed**: local-only |
+| 23 | L* | The iOS audio session is never released after in-app takes | Open |
+| 24 | L | Per-app insertion overrides are read at launch only | Open |
+| 25 | L | Deleting one transcript left its text readable in the database file | **Fixed**: `secure_delete` |
+| 26 | L* | A downgrade can duplicate the built-in profiles | Open |
+| 27 | L | The delivered sound and HUD lag the paste by the 400 ms restore wait | Open (a restore race needs care) |
+
+\* plausible: depends on runtime behaviour.
 
 ---
 
@@ -401,7 +437,17 @@ with cleanup off; p50 ≤ 900 ms with cleanup on.**
 
 ## 8. Decisions only you can make
 
-These are also asked directly in the session. Nothing in G1 depends on them; G2–G5 do.
+**Answered 2026-10-06:**
+- offline only;
+- macOS 26 with Apple Intelligence;
+- keep "wait, paste once";
+- build G1 + G0 + G4 + G3 in one PR;
+- command mode triggered by **both** a dedicated key and an opt-in wake word;
+- keep the current ellipsis behaviour (F3 stays);
+- cleanup stays **OFF** by default;
+- cursor context **opt-in**.
+
+Still open: 1, 5, 10, 11, 12, plus which five commands you use most.
 
 1. **Source of truth:** is `main` at `43059de` what is installed on your Mac today, and should
    all work build on it?
@@ -425,3 +471,45 @@ These are also asked directly in the session. Nothing in G1 depends on them; G2�
 12. **Where you dictate now:** still email and docs, code and terminal, and notes? How much
     goes into AI chat apps (Claude, ChatGPT, Cursor chat)?
 13. **Delivery:** one PR per phase (G1 first), or a single branch?
+
+---
+
+## 9. Implementation status (this branch)
+
+### Built
+| Plan step | What shipped | Tests |
+|---|---|---|
+| G1.1 F1 | The loop guard collapses only units that contain a non-ASCII letter; digits and symbols survive | Linux |
+| G1.2 F2 | in/on/at/a/was/are removed from the stutter list | Linux |
+| G1.3 F5 | Snippets fire only as the whole take; `{date}` `{time}` `{clipboard}` tags; a per-entry Snippet checkbox (optional field, no migration); snippets never bias the recognizer or count as protected terms; no cleanup or reformatting | Linux (engine, session) |
+| G1.5 F4 | The year rules skip hyphenated compounds | Linux |
+| G1.6 | §4.3 items 1–7, 12, 13, 16, 22, 25 | Linux for 1, 2, 6 (store), 13; app code for the rest |
+| G3.2 | Opt-in **Use nearby text as context** (Settings → Cleanup): ~240 characters before and 80 after the caret, read only when cleanup runs, never stored, never from secure fields; fenced `<CONTEXT>` in the prompt, rejected if echoed; prompts without context are byte-identical | Linux |
+| G3.3 | **Dictation style**: Standard / Casual / Lowercase / Raw (Settings → General and the menu bar). Deterministic, after stage 4; Raw runs the pipeline verbatim and skips cleanup; Terminal / Code is untouched | Linux |
+| G3.4 | **AI Prompt** built-in profile (Claude, ChatGPT, claude.ai, chatgpt.com, gemini.google.com); idempotent built-in upgrades for existing installs | Linux |
+| G4.1–4.4 | **Command mode**: a command key (Settings → General → Commands, off by default) plus an opt-in "Vocal, …" wake word; the selection captured at press; arithmetic and date/time answered locally; otherwise Ollama, falling back to Apple's on-device model; a key-capable non-activating preview where **Return inserts**, ⌘C copies and Escape or clicking away dismisses | Linux (parser, tools, prompt, sanitizer, session routing, request body); app code for the key, panel and insertion |
+| G0.1 | **Speed Check** (Settings tab): three passages, the same audio decoded by Whisper and Parakeet after a warm-up, p50/p95, real-time factor, WER, the G0.3 recommendation, and a Markdown report to copy or save as `docs/benchmarks/M0-results.md` | Linux (scoring, report) |
+
+### Not built (still in the plan)
+- G2: Parakeet as the default, vocabulary boosting, trailing-window preview. Waits on your
+  Speed Check numbers.
+- G3.1: Ollama is still tried first, then Apple's model; cleanup is still OFF by default.
+- G3.5: speculative cleanup.
+- G3.6: deterministic "scratch that".
+- G4.5: MCP tools.
+- G5: the learning loop, quick fix, hands-free chord, ⌘K, and two-stage first run.
+
+### Hardware checklist (run once on your Mac after `make install`)
+| # | Check | Why |
+|---|---|---|
+| 1 | Settings → Speed Check: read all three passages, then Save Report into `docs/benchmarks/` | Unblocks G2 |
+| 2 | Set a command key. Select a sentence in Notes, hold the key, say "make this shorter". The preview shows the result, **Return** replaces the selection, and Notes keeps focus throughout | The panel becomes key without activating Vocal, which only exists at runtime |
+| 3 | Same with nothing selected: "what's 15% of 240" gives **36** instantly; "write a polite reply declining the meeting" uses the model | Local tools vs model path |
+| 4 | Turn on the wake word, then dictate "Vocal, turn this into bullet points" with text selected | Wake-word routing |
+| 5 | Escape and clicking elsewhere both dismiss the preview; Return then goes to your app, not the preview | Key monitor and resign handling |
+| 6 | A snippet "my address" (multi-line) expands when said alone and stays prose in "I changed my address" | F5 |
+| 7 | Styles: Lowercase in Messages, Raw anywhere, and Terminal stays verbatim | G3.3 |
+| 8 | Turn on "Use nearby text as context", continue a sentence mid-paragraph, and check it starts lowercase | G3.2 |
+| 9 | Hands-free: during a locked take press Fn+arrow (or right-⌘+Tab); the take keeps recording. Double-tap out; no new locked take starts | §4.3 #1, #2 |
+| 10 | The HUD never blocks clicks; dictating into kitty or WezTerm gives verbatim text | §4.3 #3, #7 |
+| 11 | "Keep audio: Never", then cancel a take: there's no Recover menu item | §4.3 #6 |

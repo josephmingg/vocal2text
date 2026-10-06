@@ -268,6 +268,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if self.hotkeyMonitor?.start() == true {
+                    // Accessibility just arrived (onboarding): the command
+                    // key's tap failed for the same reason, so arm it too.
+                    _ = self.commandMonitor?.start()
                     self.appState.hotkeyArmed = true
                     self.armRetryTimer?.invalidate()
                     self.armRetryTimer = nil
