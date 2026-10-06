@@ -66,6 +66,14 @@ final class AppState: ObservableObject {
     /// pressing the current key in the recorder starts a real dictation behind
     /// the sheet.
     weak var hotkeyMonitor: HotkeyMonitor?
+    /// The command key's monitor (docs/17 G4), when one is configured.
+    weak var commandHotkeyMonitor: HotkeyMonitor?
+    /// True between an accepted command-key press and its release, so the
+    /// release of a press that never started a command (a dictation was
+    /// already recording) cannot end that dictation.
+    private var commandPressActive = false
+    /// Created on the first command; reused after.
+    private var commandPreview: CommandPreviewController?
 
     /// Bumped on every accepted hotkey down-edge, so a "press it now" tester can
     /// confirm the key works without knowing anything about the event tap.
@@ -352,6 +360,14 @@ final class AppState: ObservableObject {
         // docs/17 G3.2, opt-in (Settings → Cleanup): the text around the
         // caret for this one cleanup request. The session asks only when
         // cleanup will run and the setting is on; secure fields read as nil.
+        // docs/17 G4: command mode. The handler only opens the preview and
+        // starts the model call, so the pipeline queue is never held.
+        dependencies.handleCommand = { command in
+            await relay.noteCommand(command)
+        }
+        dependencies.captureSelection = {
+            await MainActor.run { AXInserter.selectedText() }
+        }
         dependencies.readSurroundingContext = {
             await MainActor.run { () -> String? in
                 guard let slice = AXInserter.surroundingText() else { return nil }
@@ -658,6 +674,135 @@ final class AppState: ObservableObject {
             }
         }
         enqueueControl { session in await session.pressBegan() }
+    }
+
+    // MARK: - Command mode (docs/17 G4)
+
+    /// Command-key press: record an instruction instead of dictation.
+    /// Ignored while a dictation is recording — that take owns the mic.
+    func startCommand() {
+        if case .listening = hudState.mode { return }
+        commandPressActive = true
+        hudState.partialText = "Command — say what to do"
+        hudState.levels = []
+        enqueueControl { session in await session.pressBegan(kind: .command) }
+    }
+
+    func stopCommand() {
+        guard commandPressActive else { return }
+        commandPressActive = false
+        DeliverySounds.playStop(enabled: settings.soundsEnabled)
+        enqueueControl { session in await session.pressEnded() }
+    }
+
+    func cancelCommand() {
+        guard commandPressActive else { return }
+        commandPressActive = false
+        cancelDictation()
+    }
+
+    /// A transcribed command: answer it locally when the deterministic tools
+    /// can (arithmetic, dates), otherwise ask the local model, and show the
+    /// result in the preview — inserted only when the user presses Return.
+    func handleCommand(_ command: VoiceCommand) {
+        let preview = commandPreview ?? CommandPreviewController()
+        commandPreview = preview
+        let request = VoiceCommandRequest(
+            instruction: command.instruction,
+            selectedText: command.selectedText,
+            language: command.language
+        )
+        let target = command.pressTimeBundleID
+        let language = command.language
+        let token = preview.begin(
+            instruction: command.instruction, actsOnSelection: request.hasSelection
+        ) { [weak self] text in
+            self?.insertCommandResult(text, into: target, language: language)
+        }
+        if !request.hasSelection,
+            let answer = LocalCommandTools.answer(command.instruction, now: Date()) {
+            preview.show(result: answer, for: token)
+            return
+        }
+        let baseURL = Self.ollamaBaseURL()
+        let model = settings.ollamaModel
+        Task { [weak self] in
+            guard let runner = await Self.commandRunner(baseURL: baseURL, model: model) else {
+                self?.commandPreview?.show(
+                    failure: "No local AI model is available. Start Ollama, or turn on Apple Intelligence.",
+                    for: token
+                )
+                return
+            }
+            do {
+                let response = try await runner.runCommand(
+                    system: VoiceCommandPrompt.system(for: request),
+                    user: VoiceCommandPrompt.user(for: request),
+                    timeout: .seconds(30)
+                )
+                if let text = VoiceCommandPrompt.sanitized(response.text, request: request) {
+                    self?.commandPreview?.show(result: text, for: token)
+                } else {
+                    self?.commandPreview?.show(
+                        failure: "The model returned nothing. Try rephrasing.", for: token
+                    )
+                }
+            } catch {
+                VocalLog.cleanup.error(
+                    "command failed: \(String(describing: error), privacy: .public)"
+                )
+                self?.commandPreview?.show(
+                    failure: "The local model could not answer. Try again.", for: token
+                )
+            }
+        }
+    }
+
+    /// Return in the preview: insert into the app the command was spoken
+    /// in, replacing the selection it acted on (AX-first, paste fallback —
+    /// the same ladder as dictation).
+    private func insertCommandResult(_ text: String, into bundleID: String?, language: Language) {
+        let overrides = settings.insertionStrategyOverrides
+        Task { @MainActor in
+            if let bundleID,
+                NSWorkspace.shared.frontmostApplication?.bundleIdentifier != bundleID,
+                let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+                _ = app.activate()
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            let deliverer = TextDeliverer(strategies: InsertionStrategyTable(overrides: overrides))
+            let context = DeliveryContext(
+                pressTimeAppBundleID: bundleID,
+                isLockMode: false,
+                formatting: FormattingOptions(),
+                language: language
+            )
+            let outcome = await deliverer.deliver(text, context: context)
+            self.showDelivery(outcome: outcome)
+        }
+    }
+
+    /// Ollama when it answers (the user's configured model), else Apple's
+    /// on-device model on macOS 26 with Apple Intelligence, else nothing.
+    nonisolated static func commandRunner(baseURL: URL, model: String) async -> (any CommandRunning)? {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let ollama = OpenAICompatibleProvider(
+                baseURL: baseURL, model: trimmed, id: .ollama(model: trimmed)
+            )
+            if await ollama.isAvailable() {
+                return ollama
+            }
+        }
+        #if canImport(FoundationModels) && compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let apple = FoundationModelsProvider()
+            if await apple.isAvailable() {
+                return apple
+            }
+        }
+        #endif
+        return nil
     }
 
     func stopDictation(isLockMode: Bool) {
@@ -1413,6 +1558,10 @@ private final class ResolutionRelay {
 
     func noteLevel(_ level: Float) {
         appState?.appendLevel(level)
+    }
+
+    func noteCommand(_ command: VoiceCommand) {
+        appState?.handleCommand(command)
     }
 }
 

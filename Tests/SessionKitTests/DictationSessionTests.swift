@@ -156,6 +156,49 @@ private actor ReadCounter {
     }
 }
 
+/// Collects the commands a session hands to the platform.
+private actor CommandSink {
+    private(set) var commands: [VoiceCommand] = []
+    func receive(_ command: VoiceCommand) { commands.append(command) }
+}
+
+/// A session wired for command mode, with a scripted transcript.
+private func makeCommandSession(
+    transcript: String,
+    wakeWord: Bool,
+    sink: CommandSink,
+    deliverer: RecordingTextDeliverer,
+    store: InMemoryStore = InMemoryStore()
+) -> DictationSession {
+    var dependencies = DictationSession.Dependencies(
+        audio: ScriptedAudioCapturing(
+            chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+            log: CaptureLog()
+        ),
+        engine: FakeTranscriptionEngine(
+            result: TranscriptionResult(text: transcript, detectedLanguage: .english)
+        ),
+        deliverer: deliverer,
+        store: store,
+        config: WakeWordConfig(enabled: wakeWord),
+        profileResolution: { (Profile(name: "Default"), .app, "com.example.mail") },
+        now: { fixedNow }
+    )
+    dependencies.handleCommand = { await sink.receive($0) }
+    dependencies.captureSelection = { "The meeting moved to Friday." }
+    return DictationSession(dependencies: dependencies)
+}
+
+private struct WakeWordConfig: SessionConfiguring {
+    var enabled: Bool
+    var cleanupMasterSwitch: Bool { get async { false } }
+    var globalLanguageMode: LanguageMode { get async { .auto } }
+    var globalStylePrompt: String { get async { "" } }
+    var cleanupTimeout: Duration { get async { .seconds(5) } }
+    var wakeWordCommandsEnabled: Bool { get async { enabled } }
+    func enabledDictionaryEntries() async -> [DictionaryEntry] { [] }
+}
+
 private let fixedNow = Date(timeIntervalSince1970: 1_723_000_000)
 
 /// One-shot latch for scripting suspension points (e.g. a profile resolution
@@ -1052,6 +1095,70 @@ struct DictationSessionTests {
         let requests = await provider.requests
         let request = try #require(requests.first)
         #expect(request.context == (optedIn ? "We met Siobhan yesterday" + CleanupRequest.cursorMarker : ""))
+    }
+
+    // MARK: - docs/17 G4 command mode
+
+    @Test func aCommandKeyTakeGoesToTheHandlerWithThePressTimeSelection() async throws {
+        let sink = CommandSink()
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = makeCommandSession(
+            transcript: "make this shorter", wakeWord: false, sink: sink, deliverer: deliverer, store: store
+        )
+        await session.pressBegan(kind: .command)
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+
+        let commands = await sink.commands
+        let command = try #require(commands.first)
+        #expect(command.instruction == "Make this shorter.")
+        #expect(command.selectedText == "The meeting moved to Friday.")
+        #expect(command.pressTimeBundleID == "com.example.mail")
+        #expect(!command.viaWakeWord)
+        // Nothing typed, nothing saved — the preview owns the result.
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered.isEmpty)
+        let records = await store.records
+        #expect(records.isEmpty)
+    }
+
+    @Test(arguments: [true, false])
+    func theWakeWordTurnsADictationIntoACommandOnlyWhenEnabled(enabled: Bool) async {
+        let sink = CommandSink()
+        let deliverer = RecordingTextDeliverer()
+        let session = makeCommandSession(
+            transcript: "Vocal, make this shorter.", wakeWord: enabled, sink: sink, deliverer: deliverer
+        )
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+
+        let commands = await sink.commands
+        let delivered = await deliverer.deliveredTexts
+        if enabled {
+            #expect(commands.map(\.instruction) == ["Make this shorter."])
+            #expect(commands.first?.viaWakeWord == true)
+            #expect(delivered.isEmpty)
+        } else {
+            #expect(commands.isEmpty)
+            #expect(delivered == ["Vocal, make this shorter."])
+        }
+    }
+
+    @Test func anOrdinaryDictationIsTypedEvenWithTheWakeWordOn() async {
+        let sink = CommandSink()
+        let deliverer = RecordingTextDeliverer()
+        let session = makeCommandSession(
+            transcript: "Vocal cords need rest", wakeWord: true, sink: sink, deliverer: deliverer
+        )
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        let commands = await sink.commands
+        #expect(commands.isEmpty)
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered == ["Vocal cords need rest."])
     }
 
     /// Regression: profile resolution must never gate the microphone. On macOS

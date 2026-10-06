@@ -131,6 +131,32 @@ extension AXInserter {
 }
 
 extension AXInserter {
+    /// The focused element's selected text, for command mode (docs/17 G4):
+    /// what "make this shorter" acts on. nil when nothing is selected, the
+    /// element is a secure field, or AX exposes no selection.
+    static func selectedText() -> String? {
+        guard !SecureInputProbe.isSecureInputActive(), let element = focusedElement() else {
+            return nil
+        }
+        _ = AXUIElementSetMessagingTimeout(element, 0.25)
+        var subroleRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+            == .success,
+            let subrole = subroleRef as? String,
+            subrole == (kAXSecureTextFieldSubrole as String) {
+            return nil
+        }
+        var selectedRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXSelectedTextAttribute as CFString, &selectedRef
+            ) == .success,
+            let selected = selectedRef as? String,
+            !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return selected
+    }
+
     /// The text around the caret for opt-in context-aware cleanup (docs/17
     /// G3.2): up to `before` UTF-16 units before the selection and `after`
     /// beyond it. nil for secure fields, while secure input is on, or where

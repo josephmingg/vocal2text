@@ -1,0 +1,233 @@
+import AppKit
+import SwiftUI
+
+/// What the command preview shows (docs/17 G4, after Glaido's command
+/// window): the spoken instruction, then the model's answer to accept with
+/// Return or dismiss with Escape.
+@MainActor
+final class CommandPreviewModel: ObservableObject {
+    enum Phase: Equatable {
+        case thinking
+        case ready(String)
+        case failed(String)
+    }
+
+    @Published var instruction = ""
+    @Published var actsOnSelection = false
+    @Published var phase: Phase = .thinking
+}
+
+/// A panel that can take keyboard focus without activating Vocal — so the
+/// app the user was working in stays frontmost, with its selection intact,
+/// and Return/Escape still reach the preview.
+private final class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Owns the command preview window. Every `begin` bumps a generation, so a
+/// slow model answer for a command the user already dismissed (or replaced
+/// with a newer one) is dropped instead of popping up late.
+@MainActor
+final class CommandPreviewController {
+    private let model: CommandPreviewModel
+    private let panel: NSPanel
+    private var keyMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    private var onInsert: ((String) -> Void)?
+    private(set) var generation = 0
+
+    init() {
+        let model = CommandPreviewModel()
+        let panel = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 260),
+            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.isMovableByWindowBackground = true
+        panel.contentView = NSHostingView(rootView: CommandPreviewView(model: model))
+        self.model = model
+        self.panel = panel
+    }
+
+    var isVisible: Bool { panel.isVisible }
+
+    /// Shows the "working on it" state for a new command and returns the
+    /// token its answer must carry.
+    @discardableResult
+    func begin(
+        instruction: String,
+        actsOnSelection: Bool,
+        onInsert: @escaping (String) -> Void
+    ) -> Int {
+        generation += 1
+        model.instruction = instruction
+        model.actsOnSelection = actsOnSelection
+        model.phase = .thinking
+        self.onInsert = onInsert
+        present()
+        return generation
+    }
+
+    func show(result: String, for token: Int) {
+        guard token == generation, panel.isVisible else { return }
+        model.phase = .ready(result)
+    }
+
+    func show(failure: String, for token: Int) {
+        guard token == generation, panel.isVisible else { return }
+        model.phase = .failed(failure)
+    }
+
+    func dismiss() {
+        generation += 1
+        onInsert = nil
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
+        keyMonitor = nil
+        if let resignObserver {
+            NotificationCenter.default.removeObserver(resignObserver)
+        }
+        resignObserver = nil
+        panel.orderOut(nil)
+    }
+
+    // MARK: - Presentation
+
+    private func present() {
+        if let screen = NSScreen.main {
+            let frame = screen.visibleFrame
+            let size = panel.frame.size
+            panel.setFrameOrigin(
+                NSPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2 + frame.height / 6)
+            )
+        }
+        panel.makeKeyAndOrderFront(nil)
+        installKeyMonitor()
+        // Clicking anywhere else abandons the preview — Return would
+        // otherwise land in whatever the user clicked into.
+        if resignObserver == nil {
+            resignObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification, object: panel, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.dismiss()
+                }
+            }
+        }
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            // Only Sendable values cross into the main-actor hop (NSEvent is
+            // not Sendable) — the same pattern as the hotkey recorder.
+            let keyCode = event.keyCode
+            let isCopy = event.modifierFlags.contains(.command)
+                && event.charactersIgnoringModifiers?.lowercased() == "c"
+            let swallow = MainActor.assumeIsolated {
+                self?.handleKey(keyCode, isCopy: isCopy) ?? false
+            }
+            return swallow ? nil : event
+        }
+    }
+
+    /// Return / keypad Enter inserts a ready answer; Escape dismisses; ⌘C
+    /// copies the answer. Everything else passes through untouched.
+    private func handleKey(_ keyCode: UInt16, isCopy: Bool) -> Bool {
+        guard panel.isKeyWindow else { return false }
+        switch keyCode {
+        case 36, 76:
+            if case .ready(let text) = model.phase {
+                let insert = onInsert
+                dismiss()
+                insert?(text)
+            }
+            return true
+        case 53:
+            dismiss()
+            return true
+        default:
+            if isCopy, case .ready(let text) = model.phase {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+                return true
+            }
+            return false
+        }
+    }
+}
+
+/// SwiftUI body of the preview window.
+private struct CommandPreviewView: View {
+    @ObservedObject var model: CommandPreviewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.secondary)
+                Text(model.instruction)
+                    .font(.headline)
+                    .lineLimit(2)
+                Spacer()
+                if model.actsOnSelection {
+                    Text("on selection")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                }
+            }
+            Divider()
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            Divider()
+            Text(hint)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(width: 520, height: 260)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch model.phase {
+        case .thinking:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Working on it…")
+                    .foregroundStyle(.secondary)
+            }
+        case .ready(let text):
+            ScrollView {
+                Text(text)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private var hint: String {
+        switch model.phase {
+        case .ready: "↩ Insert   ⌘C Copy   ⎋ Dismiss"
+        default: "⎋ Dismiss"
+        }
+    }
+}

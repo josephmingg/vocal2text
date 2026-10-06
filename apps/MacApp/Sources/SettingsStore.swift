@@ -53,6 +53,28 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         }
     }
 
+    /// The command key (docs/17 G4): hold it, speak an instruction ("make
+    /// this shorter"), and the result appears in a preview. nil = off, the
+    /// shipping default. Persisted as JSON like the dictation key.
+    @Published var commandHotkeySpec: HotkeySpec? {
+        didSet {
+            if let commandHotkeySpec, let data = try? JSONEncoder().encode(commandHotkeySpec) {
+                Self.defaults.set(data, forKey: Keys.commandHotkeySpec)
+            } else {
+                Self.defaults.removeObject(forKey: Keys.commandHotkeySpec)
+            }
+        }
+    }
+
+    /// Opt-in (docs/17 G4.4): "Vocal, …" / "Hey Vocal …" at the start of a
+    /// dictation runs it as a command. Satisfies
+    /// `SessionConfiguring.wakeWordCommandsEnabled`.
+    @Published var wakeWordCommandsEnabled: Bool {
+        didSet {
+            Self.defaults.set(wakeWordCommandsEnabled, forKey: Keys.wakeWordCommandsEnabled)
+        }
+    }
+
     /// The push-to-talk binding — a preset or a recorded custom combination
     /// (docs/13). Persisted as JSON so the shape can grow without another
     /// migration.
@@ -170,6 +192,10 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
             ?? .standard
         cleanupUsesSurroundingText =
             defaults.object(forKey: Keys.cleanupUsesSurroundingText) as? Bool ?? false
+        commandHotkeySpec = defaults.data(forKey: Keys.commandHotkeySpec)
+            .flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) }
+        wakeWordCommandsEnabled =
+            defaults.object(forKey: Keys.wakeWordCommandsEnabled) as? Bool ?? false
         let hotkey = Self.loadHotkeySpec(from: defaults)
         hotkeySpec = hotkey.spec
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
@@ -274,6 +300,8 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let fixMisheardWords = "settings.fixMisheardWords"
         static let dictationStyle = "settings.dictationStyle"
         static let cleanupUsesSurroundingText = "settings.cleanupUsesSurroundingText"
+        static let commandHotkeySpec = "settings.commandHotkeySpec"
+        static let wakeWordCommandsEnabled = "settings.wakeWordCommandsEnabled"
         static let hotkeySpec = "settings.hotkeySpec"
         /// Pre-spec key, read once by the migration and never written again.
         /// Left in the domain so downgrading to an older build still works.

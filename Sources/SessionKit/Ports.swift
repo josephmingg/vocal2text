@@ -109,6 +109,9 @@ public protocol SessionConfiguring: Sendable {
     /// Opt-in (docs/17 G3.2): cleanup may read a bounded slice of the text
     /// around the cursor for casing, name spelling and tone. Never persisted.
     var cleanupUsesSurroundingText: Bool { get async }
+    /// Opt-in (docs/17 G4.4): a dictation that starts with "Vocal, …" or
+    /// "Hey Vocal …" becomes a command instead of being typed.
+    var wakeWordCommandsEnabled: Bool { get async }
     func enabledDictionaryEntries() async -> [DictionaryEntry]
 }
 
@@ -118,4 +121,40 @@ extension SessionConfiguring {
     public var dictationStyle: DictationStyle { .standard }
     /// Default OFF — the owner's choice: reading surrounding text is opt-in.
     public var cleanupUsesSurroundingText: Bool { false }
+    public var wakeWordCommandsEnabled: Bool { false }
+}
+
+/// What a press is for (docs/17 G4): ordinary dictation, or a spoken
+/// command from the command key.
+public enum TakeKind: Sendable, Hashable {
+    case dictation
+    case command
+}
+
+/// A transcribed command, handed to the platform instead of being typed.
+public struct VoiceCommand: Sendable, Hashable {
+    /// The spoken instruction, wake word removed, dictionary fixes applied.
+    public var instruction: String
+    /// The selection captured when the key went down; nil when nothing was
+    /// selected or the platform could not read it.
+    public var selectedText: String?
+    public var language: Language
+    /// The app the command was spoken in — where the result belongs.
+    public var pressTimeBundleID: String?
+    /// True when the command came from the wake word rather than the key.
+    public var viaWakeWord: Bool
+
+    public init(
+        instruction: String,
+        selectedText: String?,
+        language: Language,
+        pressTimeBundleID: String?,
+        viaWakeWord: Bool
+    ) {
+        self.instruction = instruction
+        self.selectedText = selectedText
+        self.language = language
+        self.pressTimeBundleID = pressTimeBundleID
+        self.viaWakeWord = viaWakeWord
+    }
 }

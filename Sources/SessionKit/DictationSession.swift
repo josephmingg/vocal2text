@@ -149,6 +149,15 @@ public actor DictationSession {
         /// only when cleanup is about to run *and* the user opted in; nil
         /// results or a nil hook mean no context. Never persisted.
         public var readSurroundingContext: (@Sendable () async -> String?)? = nil
+        /// Receives command takes (docs/17 G4). Must return promptly — the
+        /// pipeline queue waits on it — so platforms start their own work
+        /// (model call, preview) and return. nil disables command mode: a
+        /// `.command` press then behaves as dictation.
+        public var handleCommand: (@Sendable (VoiceCommand) async -> Void)? = nil
+        /// Reads the current selection at press time, for commands. Called at
+        /// every command press, and at dictation presses only while the wake
+        /// word is enabled (the take might turn out to be a command).
+        public var captureSelection: (@Sendable () async -> String?)? = nil
 
         /// Fixed-pipeline form: every take uses the same provider. Used by
         /// tests and by platforms with a single built-in provider; the Mac app
@@ -254,6 +263,9 @@ public actor DictationSession {
 
     private struct ActiveTake {
         var resolution: PendingResolution
+        var kind: TakeKind
+        /// Press-time selection read, for commands (docs/17 G4).
+        var selection: Task<String?, Never>?
         var capture: CaptureSession
         var pressedAt: ContinuousClock.Instant
         /// Press → mic open (docs/15 step 47) — speech lost at take start.
@@ -263,6 +275,8 @@ public actor DictationSession {
     /// Everything the detached processing pipeline needs once capture ended.
     private struct PendingTake {
         var resolution: PendingResolution
+        var kind: TakeKind
+        var selection: Task<String?, Never>?
         var audio: PCMChunk
         var captureSeconds: Double
         var armSeconds: Double
@@ -406,7 +420,7 @@ public actor DictationSession {
     /// prewarm both run concurrently beside it, because either can block on
     /// platform I/O and any millisecond spent before the mic opens is speech
     /// the user already spoke and will never get back.
-    public func pressBegan() async {
+    public func pressBegan(kind: TakeKind = .dictation) async {
         // Accepted whenever no capture is active — a previous take may still
         // be processing on the detached pipeline (docs/15 W3).
         switch phaseValue {
@@ -424,6 +438,18 @@ public actor DictationSession {
         let resolve = deps.profileResolution
         let resolution = PendingResolution { await resolve() }
 
+        // docs/17 G4: the selection a command acts on is the one at press
+        // time — read concurrently, like the profile, never before the mic.
+        var selection: Task<String?, Never>?
+        if deps.handleCommand != nil, let capture = deps.captureSelection {
+            let config = deps.config
+            selection = Task {
+                if kind == .command { return await capture() }
+                guard await config.wakeWordCommandsEnabled else { return nil }
+                return await capture()
+            }
+        }
+
         let prewarm = deps.prewarmCleanup
         prewarmTask = Task { await prewarm() }
 
@@ -432,6 +458,8 @@ public actor DictationSession {
             let capture = try await deps.audio.start()
             take = ActiveTake(
                 resolution: resolution,
+                kind: kind,
+                selection: selection,
                 capture: capture,
                 pressedAt: pressedAt,
                 armSeconds: Self.seconds(pressedAt.duration(to: clock.now))
@@ -622,6 +650,8 @@ public actor DictationSession {
 
         let pending = PendingTake(
             resolution: active.resolution,
+            kind: active.kind,
+            selection: active.selection,
             audio: audio,
             captureSeconds: captureSeconds,
             armSeconds: active.armSeconds,
@@ -652,7 +682,9 @@ public actor DictationSession {
                 isLockMode: pending.isLockMode,
                 captureSeconds: pending.captureSeconds,
                 armSeconds: pending.armSeconds,
-                source: .dictation
+                source: .dictation,
+                kind: pending.kind,
+                selection: pending.selection
             )
         }
     }
@@ -706,7 +738,9 @@ public actor DictationSession {
         isLockMode: Bool,
         captureSeconds: Double,
         armSeconds: Double,
-        source: TranscriptSource
+        source: TranscriptSource,
+        kind: TakeKind = .dictation,
+        selection: Task<String?, Never>? = nil
     ) async -> Bool {
         let profile = resolved.profile
         // Pipelines run strictly in press order, so the error the platform
@@ -788,6 +822,40 @@ public actor DictationSession {
         let normalized = Stage1Normalizer.normalize(
             result.text, language: language, formatting: formatting
         )
+
+        // docs/17 G4: a command take — from the command key, or a dictation
+        // that opened with the opt-in wake word — goes to the platform's
+        // command handler instead of being typed. Nothing is delivered or
+        // saved here; the handler shows a preview and inserts on Enter.
+        if let handleCommand = deps.handleCommand {
+            var spoken: String?
+            var viaWakeWord = false
+            if kind == .command {
+                spoken = normalized
+            } else if await deps.config.wakeWordCommandsEnabled,
+                let instruction = VoiceCommandParser.instruction(afterWakeWordIn: normalized) {
+                spoken = instruction
+                viaWakeWord = true
+            }
+            if let spoken {
+                let instruction = DictionaryEngine.apply(spoken, entries: entries, language: language)
+                    .text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !instruction.isEmpty {
+                    let selected = await selection?.value
+                    await handleCommand(
+                        VoiceCommand(
+                            instruction: instruction,
+                            selectedText: selected,
+                            language: language,
+                            pressTimeBundleID: resolved.pressTimeBundleID,
+                            viaWakeWord: viaWakeWord
+                        )
+                    )
+                }
+                finishPipeline()
+                return true
+            }
+        }
         // docs/17 F5: a snippet fires only when it is the whole take, and
         // then its written form *is* the text — tags expanded, no cleanup,
         // no reformatting beyond a separating space.

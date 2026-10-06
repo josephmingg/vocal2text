@@ -59,6 +59,35 @@ private struct GeneralPane: View {
                 // Same control onboarding shows, so the two cannot drift.
                 HotkeyPickerView(appState: appState)
             }
+            Section("Commands") {
+                // docs/17 G4 (after Glaido's Commands): select text, hold the
+                // command key, say what to do — a preview shows the result,
+                // Return inserts it. Runs on the local model only.
+                Picker("Command key", selection: $settings.commandHotkeySpec) {
+                    Text("Off").tag(Optional<HotkeySpec>.none)
+                    ForEach(
+                        HotkeySpec.presets.filter { $0.kind != settings.hotkeySpec.kind },
+                        id: \.self
+                    ) { spec in
+                        Text(spec.label).tag(Optional(spec))
+                    }
+                }
+                Toggle("Wake word: start a dictation with “Vocal, …”", isOn: $settings.wakeWordCommandsEnabled)
+                Text(
+                    """
+                    Hold the command key and say an instruction — "make this \
+                    shorter", "fix the grammar", "turn this into bullet points", \
+                    "what's 15% of 240". With text selected it acts on the \
+                    selection; otherwise it writes or answers. The result shows in \
+                    a preview: Return inserts it, Escape dismisses. Uses Ollama or \
+                    Apple's on-device model — nothing leaves this Mac. With the \
+                    wake word on, a dictation that begins "Vocal, …" or "Hey \
+                    Vocal" becomes a command too.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
             Section("Dictation style") {
                 // docs/17 §5: one click, applies to every profile that uses
                 // the global style (Terminal / Code stays verbatim).

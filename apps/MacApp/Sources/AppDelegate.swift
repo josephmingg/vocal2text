@@ -20,6 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState: AppState
 
     private var hotkeyMonitor: HotkeyMonitor?
+    /// The command key's tap (docs/17 G4); nil while no command key is set.
+    private var commandMonitor: HotkeyMonitor?
     private var hudController: HUDPanelController?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var settingsSinks: Set<AnyCancellable> = []
@@ -144,6 +146,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &settingsSinks)
 
+        // docs/17 G4: the command key — a second binding, configured from
+        // Settings and rebuilt whenever either key changes (the two must
+        // never be the same key).
+        configureCommandMonitor()
+        appState.settings.$commandHotkeySpec
+            .dropFirst()
+            .sink { [weak self] _ in
+                // @Published emits in willSet; read the new value next turn.
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.configureCommandMonitor() }
+                }
+            }
+            .store(in: &settingsSinks)
+        appState.settings.$hotkeySpec
+            .dropFirst()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.configureCommandMonitor() }
+                }
+            }
+            .store(in: &settingsSinks)
+
         hudController = HUDPanelController(appState: appState)
 
         observeWorkspaceNotifications()
@@ -162,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lockCapTask?.cancel()
         shortTapCommitTask?.cancel()
         armRetryTimer?.invalidate()
+        commandMonitor?.stop()
     }
 
     // MARK: - Lock-mode cap + first-run arming
@@ -197,7 +222,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Re-create the tap after wake/unlock, and keep retrying if it could not
     /// be re-created — a wake that lands before the window server is ready must
     /// not cost the user their hotkey until the next relaunch.
+    /// (Re)builds the command-key monitor from settings. Hold to speak an
+    /// instruction; a tap, a double-tap or a chord ends or cancels it — there
+    /// is no hands-free command. Inert during a hands-free dictation.
+    private func configureCommandMonitor() {
+        commandMonitor?.stop()
+        commandMonitor = nil
+        appState.commandHotkeyMonitor = nil
+        guard let spec = appState.settings.commandHotkeySpec,
+            spec.kind != appState.settings.hotkeySpec.kind
+        else { return }
+        let monitor = HotkeyMonitor(spec: spec)
+        monitor.onPressBegan = { [weak self] in
+            guard let self, !self.appState.isHotkeyTestModeActive, !self.isLockModeActive else {
+                return
+            }
+            self.appState.startCommand()
+        }
+        let end: () -> Void = { [weak self] in
+            self?.appState.stopCommand()
+        }
+        monitor.onPressEnded = end
+        monitor.onShortTap = end
+        monitor.onLockToggle = end
+        monitor.onCancel = { [weak self] in
+            self?.appState.cancelCommand()
+        }
+        _ = monitor.start()
+        commandMonitor = monitor
+        appState.commandHotkeyMonitor = monitor
+    }
+
     private func rearmOrRetry() {
+        _ = commandMonitor?.rearm()
         guard let monitor = hotkeyMonitor else { return }
         appState.hotkeyArmed = monitor.rearm()
         if !appState.hotkeyArmed {
