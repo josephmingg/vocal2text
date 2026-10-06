@@ -5,6 +5,7 @@ import ASREngineWhisperKit
 import AVFoundation
 import AppKit
 import AudioPipeline
+import BenchKit
 import CleanupKit
 import Combine
 import CoreModels
@@ -674,6 +675,62 @@ final class AppState: ObservableObject {
             }
         }
         enqueueControl { session in await session.pressBegan() }
+    }
+
+    // MARK: - Speed Check (docs/17 G0)
+
+    /// Decodes one recorded passage with each engine — the same audio, so
+    /// the comparison is fair — and scores it. Each engine is prepared first
+    /// (a download on first use) and, when `warmUp`, run once untimed so a
+    /// first-inference compile never lands in the numbers. Dictionary terms
+    /// are left out: Parakeet does not use them, and the check compares
+    /// engines, not dictionaries.
+    func speedCheckDecode(
+        _ audio: PCMChunk, passageIndex: Int, includeParakeet: Bool, warmUp: Bool
+    ) async -> (measurements: [SpeedCheck.Measurement], failures: [String]) {
+        var engines: [(name: String, engine: any TranscriptionEngine)] = [
+            ("Whisper (\(settings.whisperKitModel))", engine)
+        ]
+        if includeParakeet {
+            engines.append(("Parakeet (English)", parakeetEngine))
+        }
+        let mode = LanguageMode.pinned(.english)
+        let clock = ContinuousClock()
+        var measurements: [SpeedCheck.Measurement] = []
+        var failures: [String] = []
+        for (name, engine) in engines {
+            do {
+                try await engine.prepare(languageMode: mode)
+                if warmUp {
+                    _ = try? await engine.transcribe(audio, languageMode: mode, dictionaryTerms: [])
+                }
+                let decodeStart = clock.now
+                let result = try await engine.transcribe(audio, languageMode: mode, dictionaryTerms: [])
+                let decodeSeconds = Self.seconds(decodeStart.duration(to: clock.now))
+                let pipelineStart = clock.now
+                let normalized = Stage1Normalizer.normalize(
+                    result.text, language: .english, formatting: FormattingOptions()
+                )
+                let formatted = Stage4Formatter.format(
+                    normalized, language: .english, formatting: FormattingOptions(),
+                    precedingContext: nil
+                )
+                let pipelineSeconds = Self.seconds(pipelineStart.duration(to: clock.now))
+                measurements.append(
+                    SpeedCheck.measure(
+                        engine: name,
+                        passageIndex: passageIndex,
+                        transcript: formatted,
+                        audioSeconds: audio.durationSeconds,
+                        decodeSeconds: decodeSeconds,
+                        pipelineSeconds: pipelineSeconds
+                    )
+                )
+            } catch {
+                failures.append("\(name) could not run: \(error.localizedDescription)")
+            }
+        }
+        return (measurements, failures)
     }
 
     // MARK: - Command mode (docs/17 G4)

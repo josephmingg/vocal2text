@@ -79,7 +79,11 @@ public enum StyleFormatter {
                 end = text.index(after: end)
             }
             let word = text[index..<end]
-            result += keepsCasing(word) ? String(word) : word.lowercased()
+            if keepsCasing(word) {
+                result += word
+            } else {
+                result += word.lowercased()
+            }
             index = end
         }
         return result

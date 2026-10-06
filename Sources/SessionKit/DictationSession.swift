@@ -143,21 +143,21 @@ public actor DictationSession {
         /// (docs/17 F5). Called only when the matched snippet carries that
         /// tag; nil expands it to nothing. Set after init, like the other
         /// optional platform hooks below.
-        public var readClipboard: (@Sendable () async -> String?)? = nil
+        public var readClipboard: (@Sendable () async -> String?)?
         /// Reads a bounded slice of the text around the insertion point, with
         /// `CleanupRequest.cursorMarker` at the caret (docs/17 G3.2). Called
         /// only when cleanup is about to run *and* the user opted in; nil
         /// results or a nil hook mean no context. Never persisted.
-        public var readSurroundingContext: (@Sendable () async -> String?)? = nil
+        public var readSurroundingContext: (@Sendable () async -> String?)?
         /// Receives command takes (docs/17 G4). Must return promptly — the
         /// pipeline queue waits on it — so platforms start their own work
         /// (model call, preview) and return. nil disables command mode: a
         /// `.command` press then behaves as dictation.
-        public var handleCommand: (@Sendable (VoiceCommand) async -> Void)? = nil
+        public var handleCommand: (@Sendable (VoiceCommand) async -> Void)?
         /// Reads the current selection at press time, for commands. Called at
         /// every command press, and at dictation presses only while the wake
         /// word is enabled (the take might turn out to be a command).
-        public var captureSelection: (@Sendable () async -> String?)? = nil
+        public var captureSelection: (@Sendable () async -> String?)?
 
         /// Fixed-pipeline form: every take uses the same provider. Used by
         /// tests and by platforms with a single built-in provider; the Mac app

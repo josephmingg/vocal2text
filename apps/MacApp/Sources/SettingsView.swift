@@ -28,6 +28,9 @@ struct SettingsView: View {
                 .tabItem { Label("Profiles", systemImage: "person.2") }
             ModelsPane(settings: settings)
                 .tabItem { Label("Models", systemImage: "cpu") }
+            // docs/17 G0: measure this Mac with your voice.
+            SpeedCheckPane(appState: appState)
+                .tabItem { Label("Speed Check", systemImage: "speedometer") }
             CleanupPane(settings: settings)
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
             DictionaryPane(database: appState.database)
