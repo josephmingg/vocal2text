@@ -66,8 +66,30 @@ public enum Stage4Formatter: Sendable {
 
     /// "!!" → "!", "?." → "?": a run of terminal marks keeps its first mark.
     /// Single marks ("U.S.", "3.14") are runs of one and never touched.
+    ///
+    /// A collapsed run now ends a sentence, so the word after it takes a
+    /// capital: "Wait... are you serious?" → "Wait. Are you serious?", never
+    /// a full stop followed by a lowercase word (owner decision, docs/17 F3).
+    /// Only words after a *collapsed* run are capitalized — "e.g. this" and
+    /// other single marks keep the speaker's casing.
     private static func collapseDuplicateTerminalPunctuation(_ text: String) -> String {
-        PipelineRegex.replacing(pattern: "([.!?])[.!?]+", in: text, with: "$1")
+        guard
+            let regex = try? NSRegularExpression(pattern: "([.!?])[.!?]+(?:(\\s+)(\\p{Ll}))?")
+        else { return text }
+        let nsText = text as NSString
+        var result = ""
+        var cursor = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+            result += nsText.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            result += nsText.substring(with: match.range(at: 1))
+            if match.range(at: 3).location != NSNotFound {
+                result += nsText.substring(with: match.range(at: 2))
+                result += nsText.substring(with: match.range(at: 3)).uppercased()
+            }
+            cursor = match.range.location + match.range.length
+        }
+        result += nsText.substring(from: cursor)
+        return result
     }
 
     /// Spacing only, never casing: a snippet's written form is authoritative

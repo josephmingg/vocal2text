@@ -134,6 +134,7 @@ func realLifeDictationsSurviveEveryStyle(style: DictationStyle) {
     #expect(styledPipeline("Let's check in in five minutes.", .standard) == "Let's check in in five minutes.")
     #expect(styledPipeline("The order ID is 100000000, not 10000000.", .standard)
         == "The order ID is 100000000, not 10000000.")
+    #expect(styledPipeline("Wait... are you serious?", .standard) == "Wait. Are you serious?")
     #expect(styledPipeline("Sounds good to me", .casual) == "Sounds good to me")
     #expect(styledPipeline("Running 10 minutes late, sorry!", .lowercase) == "running 10 minutes late, sorry!")
     #expect(styledPipeline("The API returns a 404 when the JWT expires.", .lowercase)

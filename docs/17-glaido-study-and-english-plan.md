@@ -443,7 +443,8 @@ with cleanup off; p50 ≤ 900 ms with cleanup on.**
 - keep "wait, paste once";
 - build G1 + G0 + G4 + G3 in one PR;
 - command mode triggered by **both** a dedicated key and an opt-in wake word;
-- keep the current ellipsis behaviour (F3 stays);
+- keep the current ellipsis behaviour (F3 stays), but capitalise the word after it
+  (follow-up decision: "Wait... are you serious?" → "Wait. Are you serious?");
 - cleanup stays **OFF** by default;
 - cursor context **opt-in**.
 
@@ -541,9 +542,14 @@ had to catch it.
 - window buttons on the preview;
 - Settings order.
 
-**Found and *not* changed (owner decision):** keeping the ellipsis collapse produces
-"Wait... are you serious?" → **"Wait. are you serious?"**, a full stop followed by a
-lowercase word.
+**Found, then fixed on the owner's call:** the ellipsis collapse produced
+"Wait... are you serious?" → "Wait. are you serious?", a full stop followed by a
+lowercase word. Stage 4 now capitalises the word after any collapsed run of marks
+("Wait. Are you serious?", "Really? That worked"), while single marks ("e.g. this",
+"3 p.m. today") keep the speaker's casing. Evidence:
+`wordAfterACollapsedEllipsisIsCapitalized`, `singleMarksKeepTheSpeakersCasing`, and
+the corpus check in `representativeTransformations`. Mutation check: removing the
+capitalisation fails 4 expectations across those tests.
 
 **Not verified here; needs the real Mac:** everything in the §9 hardware checklist,
 plus:

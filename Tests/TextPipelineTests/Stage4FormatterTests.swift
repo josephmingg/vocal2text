@@ -27,6 +27,27 @@ struct Stage4FormatterTests {
         #expect(out == "Wait.")
     }
 
+    @Test func wordAfterACollapsedEllipsisIsCapitalized() {
+        let cases: [(String, String)] = [
+            ("Wait... are you serious?", "Wait. Are you serious?"),
+            ("Really?! that worked", "Really? That worked"),
+            ("I don't know.. maybe tomorrow.", "I don't know. Maybe tomorrow."),
+            // Already capitalized, or not a letter: nothing to change.
+            ("Wait... Are you serious?", "Wait. Are you serious?"),
+            ("Thanks!! 2 more to go.", "Thanks! 2 more to go."),
+        ]
+        for (input, expected) in cases {
+            let out = Stage4Formatter.format(input, language: .english, formatting: defaults, precedingContext: nil)
+            #expect(out == expected, "\(input)")
+        }
+    }
+
+    @Test func singleMarksKeepTheSpeakersCasing() {
+        let input = "Use a tool, e.g. this one, at 3 p.m. today."
+        let out = Stage4Formatter.format(input, language: .english, formatting: defaults, precedingContext: nil)
+        #expect(out == input)
+    }
+
     @Test func abbreviationsAndDecimalsAreUntouched() {
         let out = Stage4Formatter.format(
             "See the U.S. report on 3.14 today.",
