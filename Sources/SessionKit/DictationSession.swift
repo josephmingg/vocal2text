@@ -704,6 +704,11 @@ public actor DictationSession {
         source: TranscriptSource
     ) async -> Bool {
         let profile = resolved.profile
+        // Pipelines run strictly in press order, so the error the platform
+        // reads at idle must belong to the most recent one: an earlier take
+        // that failed while this one was recording would otherwise surface
+        // its error after this take delivered fine (docs/17 §4.4 #13).
+        lastError = nil
 
         let languageMode: LanguageMode
         if let override = profile.languageOverride {

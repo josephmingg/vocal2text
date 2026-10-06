@@ -233,8 +233,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.isLockModeActive = false
-                    self?.hotkeyMonitor?.noteLockEnded()
+                    // The full lock teardown, not just the flag: a hands-free
+                    // take's cap timer and silence auto-stop must disarm too,
+                    // or the stale detector ends the first take after wake
+                    // the moment it hears a quiet chunk (docs/17 §4.4 #12).
+                    self?.endLockMode(stopping: false)
                     self?.appState.cancelDictation()
                 }
             }

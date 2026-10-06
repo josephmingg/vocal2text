@@ -39,7 +39,7 @@ enum AXInserter {
         // Insist on verifiability BEFORE writing (see type comment): an
         // element with no readable value cannot confirm the write, and a
         // paste after an unconfirmed-but-landed write duplicates the text.
-        guard readableValue(of: element) != nil else { return false }
+        guard let before = readableValue(of: element) else { return false }
 
         guard
             AXUIElementSetAttributeValue(
@@ -51,7 +51,12 @@ enum AXInserter {
         // single-line field may fold the newlines out of a multi-line
         // insertion, and reporting that landed-but-transformed write as a
         // failure would paste the text a second time.
-        guard let after = readableValue(of: element) else { return false }
+        //
+        // The value must also have *changed*: dictating "Thanks!" into a
+        // field that already says "Thanks!" passed containment even when the
+        // app ACKed the write and ignored it — reported as inserted, nothing
+        // pasted, text silently lost (docs/17 §4.4 #4).
+        guard let after = readableValue(of: element), after != before else { return false }
         let needle = text.filter { !$0.isWhitespace }
         if needle.isEmpty { return true }
         return after.filter { !$0.isWhitespace }.contains(needle)
@@ -59,10 +64,19 @@ enum AXInserter {
 
     // MARK: - Helpers
 
+    /// Bound for every AX message (docs/17 §4.4 #5). These calls run on the
+    /// main actor, and the system default (~6 s) let a beachballing target
+    /// freeze the HUD, menu and hotkey for that long. Long enough that a slow
+    /// but successful write is not misread as a failure and pasted twice.
+    static let messagingTimeout: Float = 1.0
+
     static func focusedElement() -> AXUIElement? {
         var focusedRef: CFTypeRef?
+        let systemWide = AXUIElementCreateSystemWide()
+        // On the system-wide element this sets the process-wide default.
+        _ = AXUIElementSetMessagingTimeout(systemWide, messagingTimeout)
         let result = AXUIElementCopyAttributeValue(
-            AXUIElementCreateSystemWide(),
+            systemWide,
             kAXFocusedUIElementAttribute as CFString,
             &focusedRef
         )
@@ -92,10 +106,11 @@ extension AXInserter {
     /// and joining real (FR-3.3). nil where AX exposes no value or selection
     /// — the caller falls back or formats for a fresh insertion point.
     static func precedingContext(maxLength: Int = 64) -> String? {
-        guard
-            let element = focusedElement(),
-            let value = readableValue(of: element)
-        else { return nil }
+        guard let element = focusedElement() else { return nil }
+        // A read-only lookup that only refines spacing: a slow target should
+        // cost a quarter second, not the whole messaging budget.
+        _ = AXUIElementSetMessagingTimeout(element, 0.25)
+        guard let value = readableValue(of: element) else { return nil }
         var rangeRef: CFTypeRef?
         guard
             AXUIElementCopyAttributeValue(

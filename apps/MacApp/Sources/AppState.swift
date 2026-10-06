@@ -238,6 +238,12 @@ final class AppState: ObservableObject {
             // ordinary 24-hour recovery window — the same menu offer as a
             // cancelled take, so zero silent losses.
             preserveFailedAudio: { audio in
+                // "Keep audio: Never" means never — a failed take's recording
+                // is not exempt from the user's privacy choice (docs/17 §4.4 #6).
+                let retentionDays = await MainActor.run { settings.audioRetentionDays }
+                guard AudioRetentionPolicy.keepsAudio(retentionDays: retentionDays) else {
+                    return
+                }
                 RecoveryStore.preserve(samples: audio.samples)
             },
             // Streaming preview (docs/15 step 22), display-only per FR-4.1.
@@ -666,7 +672,17 @@ final class AppState: ObservableObject {
     }
 
     func cancelDictation() {
-        enqueueControl { session in await session.cancel() }
+        // FR-1.6: with retention "Never", cancelled audio is discarded at
+        // once — no 24-hour recovery window (docs/17 §4.4 #6).
+        let discardRecording = !AudioRetentionPolicy.keepsAudio(
+            retentionDays: settings.audioRetentionDays
+        )
+        enqueueControl { session in
+            await session.cancel()
+            if discardRecording {
+                RecoveryStore.discardAll()
+            }
+        }
     }
 
     // MARK: - Cancelled-take recovery (FR-1.6, docs/11 G9)
@@ -920,14 +936,29 @@ final class AppState: ObservableObject {
     /// insertion with the raw transcription, or remove it entirely. AX-only —
     /// where the focused element can't be read and edited, nothing changes
     /// and the HUD says so, which beats guessing with synthesized keystrokes.
+    /// How long after delivery "Undo last insertion" stays offered.
+    private static let undoWindowSeconds: TimeInterval = 10 * 60
+
     func undoLastInsertion(replaceWithRaw: Bool) {
         guard let record = latestDeliveredRecord() else {
             showNotice("Nothing to undo yet")
             return
         }
+        // Undo edits whatever field is focused, so it must be the field the
+        // text went into: an hour later in another app, "Undo" would delete
+        // the last matching "Thanks!" in an unrelated email (docs/17 §4.4 #16).
+        guard Date().timeIntervalSince(record.createdAt) <= Self.undoWindowSeconds else {
+            showNotice("The last insertion is too old to undo")
+            return
+        }
         NSApp.deactivate()
         Task { @MainActor in
             await Self.yieldFocusToPreviousApp()
+            if let target = record.targetAppBundleID,
+                NSWorkspace.shared.frontmostApplication?.bundleIdentifier != target {
+                self.showNotice("Switch back to the app you dictated into to undo")
+                return
+            }
             let replacement = replaceWithRaw ? record.rawText : ""
             if AXUndo.replaceLastOccurrence(of: record.deliveredText, with: replacement) {
                 self.showNotice(

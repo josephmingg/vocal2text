@@ -32,7 +32,7 @@ struct SettingsView: View {
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
             DictionaryPane(database: appState.database)
                 .tabItem { Label("Dictionary", systemImage: "character.book.closed") }
-            HistoryPrivacyPane(settings: settings, database: appState.database)
+            HistoryPrivacyPane(settings: settings, database: appState.database, appState: appState)
                 .tabItem { Label("History & Privacy", systemImage: "clock.arrow.circlepath") }
             AboutPane(database: appState.database)
                 .tabItem { Label("About", systemImage: "info.circle") }
@@ -698,6 +698,7 @@ private struct DictionaryPane: View {
 private struct HistoryPrivacyPane: View {
     @ObservedObject var settings: SettingsStore
     let database: DatabaseStore?
+    let appState: AppState
     @State private var confirmingDeleteAll = false
     @State private var statusText: String?
 
@@ -755,6 +756,11 @@ private struct HistoryPrivacyPane: View {
             if let directory = AppState.audioDirectory() {
                 AudioArchive.deleteAll(in: directory)
             }
+            // So are cancelled and failed takes waiting in the recovery
+            // window — unencrypted recordings the menu would still offer
+            // back (docs/17 §4.4 #6).
+            RecoveryStore.discardAll()
+            appState.refreshRecoverableTake()
             // Deleting rows only unlinks them: the transcript text stays
             // readable in the file's free pages until it is overwritten.
             // Compacting is what makes "permanently removes" true, and it is

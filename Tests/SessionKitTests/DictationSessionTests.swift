@@ -82,6 +82,56 @@ private actor FailThenSucceedEngine: TranscriptionEngine {
     }
 }
 
+/// Blocks its first transcription until released, then fails it; later
+/// calls succeed — a take that fails while the next one is recording.
+private actor GatedFailFirstEngine: TranscriptionEngine {
+    nonisolated let id = "gated-fail-first"
+    nonisolated let displayName = "Gated Fail First"
+
+    private let result: TranscriptionResult
+    private var calls = 0
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(result: TranscriptionResult) {
+        self.result = result
+    }
+
+    func release() {
+        released = true
+        let waiting = waiters
+        waiters = []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    func availability(for language: Language) async -> EngineAvailability { .ready }
+    func prepare(languageMode: LanguageMode) async throws {}
+    func unload() async {}
+
+    func transcribe(
+        _ audio: PCMChunk,
+        languageMode: LanguageMode,
+        dictionaryTerms: [String]
+    ) async throws -> TranscriptionResult {
+        calls += 1
+        guard calls == 1 else { return result }
+        if !released {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        throw TranscriptionError.engineUnavailable("first take fails")
+    }
+
+    nonisolated func transcribeStream(
+        _ audio: AsyncStream<PCMChunk>,
+        languageMode: LanguageMode,
+        dictionaryTerms: [String]
+    ) -> AsyncThrowingStream<TranscriptionUpdate, Error> {
+        AsyncThrowingStream<TranscriptionUpdate, Error> { continuation in
+            continuation.finish()
+        }
+    }
+}
+
 private let fixedNow = Date(timeIntervalSince1970: 1_723_000_000)
 
 /// One-shot latch for scripting suspension points (e.g. a profile resolution
@@ -965,6 +1015,49 @@ struct DictationSessionTests {
         #expect(record.routeKind == .app)
         let finishCount = await captureLog.finishCount
         #expect(finishCount == 1)
+    }
+
+    /// docs/17 §4.4 #13: an earlier take that fails while the next one is
+    /// recording must not leave its error behind for the next take's idle.
+    @Test func aFailedEarlierTakeDoesNotBlameTheNextOne() async {
+        let engine = GatedFailFirstEngine(
+            result: TranscriptionResult(text: "second take works", detectedLanguage: .english)
+        )
+        let deliverer = RecordingTextDeliverer()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: ScriptedAudioCapturing(
+                    chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                    log: CaptureLog()
+                ),
+                engine: engine,
+                selectCleanup: { _ in nil },
+                deliverer: deliverer,
+                store: InMemoryStore(),
+                config: StaticConfig(),
+                profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        await session.pressEnded()
+        let firstPipeline = await session.pipelineTask
+        // Take 2 starts recording while take 1 is still transcribing.
+        await session.pressBegan()
+        await engine.release()
+        await firstPipeline?.value
+        let errorWhileRecording = await session.lastError
+        #expect(errorWhileRecording != nil)
+
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask {
+            await pipeline.value
+        }
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered == ["Second take works."])
+        let errorAfterSuccess = await session.lastError
+        #expect(errorAfterSuccess == nil)
     }
 
     @Test func secureFieldBlockPersistsNothing() async {

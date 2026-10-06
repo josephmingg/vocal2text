@@ -354,7 +354,13 @@ private final class ClipboardDelivering: TextDelivering, @unchecked Sendable {
         let language = context.language
         await MainActor.run { [weak appState] in
             if appState?.autoCopy ?? true {
-                UIPasteboard.general.string = text
+                // Local only: an automatic copy of every dictation must not
+                // ride Universal Clipboard to the user's other devices
+                // (docs/17 §4.4 #22). The explicit Copy buttons stay normal.
+                UIPasteboard.general.setItems(
+                    [["public.utf8-plain-text": text]],
+                    options: [.localOnly: true]
+                )
             }
             appState?.showResult(text)
             // After the result is on screen, so anything reacting to this sees

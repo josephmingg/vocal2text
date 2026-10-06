@@ -132,6 +132,32 @@ public enum RecoveryStore {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// Removes every recovery sidecar regardless of age — "Keep audio: Never"
+    /// and "Delete All History" (FR-1.6, docs/17 §4.4 #6). Returns how many
+    /// files were removed. A capture still in flight keeps writing to its
+    /// open handle; only its crash-recovery copy is lost.
+    @discardableResult
+    public static func discardAll(
+        in directory: URL = FileManager.default.temporaryDirectory
+    ) -> Int {
+        let fileManager = FileManager.default
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+        var removed = 0
+        for entry in entries
+        where entry.lastPathComponent.hasPrefix(RecoveryFileReaper.recoveryFilePrefix)
+            && entry.pathExtension == "pcmf32"
+        {
+            if (try? fileManager.removeItem(at: entry)) != nil {
+                removed += 1
+            }
+        }
+        return removed
+    }
+
     /// Writes a failed take's samples back as a recovery sidecar (docs/15
     /// step 35): transcription failed after capture already deleted its
     /// crash-recovery copy, and these samples are the only copy left. The

@@ -40,7 +40,15 @@ public final class DatabaseStore: @unchecked Sendable {
         + "audioPath, isCancelled, importedFilename, segments"
 
     public init(path: String) throws {
-        let queue = try DatabaseQueue(path: path)
+        var configuration = Configuration()
+        // Deleting a transcript must delete its text: without secure_delete,
+        // SQLite only unlinks the row and the words stay readable in free
+        // pages and FTS segments until overwritten — Delete All vacuums, but
+        // a single-row delete never did (docs/17 §4.4 #25).
+        configuration.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA secure_delete = ON")
+        }
+        let queue = try DatabaseQueue(path: path, configuration: configuration)
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1") { db in
             try db.execute(sql: """
