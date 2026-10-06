@@ -108,6 +108,7 @@ final class IOSAppState: ObservableObject {
 
         let database = Self.makeDatabase()
         let profiles = Self.loadProfiles(database: database)
+        DictionaryMigration.pinLegacyEntriesInlineOnce(database: database)
         let engine = WhisperKitEngine()
         let config = IOSSessionConfig(database: database)
         let deliverer = ClipboardDelivering()
@@ -165,7 +166,17 @@ final class IOSAppState: ObservableObject {
 
         // docs/17 F5: a snippet's {clipboard} tag, read only when present.
         dependencies.readClipboard = {
-            await MainActor.run { UIPasteboard.general.string }
+            await MainActor.run { () -> String? in
+                // Auto-copy puts every dictation on the clipboard; that copy
+                // is Vocal's own, not something the user copied, so a
+                // {clipboard} snippet must not paste the last dictation back
+                // (docs/17 §11). Checked before reading, which also spares
+                // the paste-permission prompt in that case.
+                if OwnClipboardWrite.changeCount == UIPasteboard.general.changeCount {
+                    return nil
+                }
+                return UIPasteboard.general.string
+            }
         }
 
         self.database = database
@@ -304,7 +315,10 @@ final class IOSAppState: ObservableObject {
     /// no profile editor yet — the seeded set is effectively read-only here.
     private static func loadProfiles(database: DatabaseStore?) -> [Profile] {
         ProfileBootstrap.loadSeedingAndUpgrading(
-            load: { try database?.profiles() ?? [] },
+            load: {
+                guard let database else { throw ProfileBootstrap.StoreUnavailable() }
+                return try database.profiles()
+            },
             save: { try database?.save($0) },
             storedVersion: UserDefaults.standard.integer(forKey: "profiles.builtInVersion"),
             recordVersion: { UserDefaults.standard.set($0, forKey: "profiles.builtInVersion") }
@@ -345,6 +359,12 @@ private struct IOSCaptureAdapter: AudioCapturing {
     }
 }
 
+/// The pasteboard generation of Vocal's last automatic copy.
+@MainActor
+private enum OwnClipboardWrite {
+    static var changeCount: Int?
+}
+
 /// Mode D1 delivery: the transcript lands on the clipboard (when auto-copy is
 /// on) and the result card offers Share (docs/02 FR-i2.1).
 private final class ClipboardDelivering: TextDelivering, @unchecked Sendable {
@@ -363,6 +383,7 @@ private final class ClipboardDelivering: TextDelivering, @unchecked Sendable {
                     [["public.utf8-plain-text": text]],
                     options: [.localOnly: true]
                 )
+                OwnClipboardWrite.changeCount = UIPasteboard.general.changeCount
             }
             appState?.showResult(text)
             // After the result is on screen, so anything reacting to this sees

@@ -5,6 +5,15 @@ import Foundation
 /// (docs/11 G17). Closure-based rather than depending on PersistenceKit so
 /// the logic tests on Linux and both apps share one bootstrap path.
 public enum ProfileBootstrap: Sendable {
+    /// Thrown by an app's `load` closure when it has no store at all (the
+    /// database did not open) — distinct from an empty store, which is a
+    /// fresh install. Treating "no database" as "fresh install" would record
+    /// the built-in version against nothing, and the real store, opening on
+    /// a later launch, would never get the upgrades (docs/17 §11).
+    public struct StoreUnavailable: Error, Sendable {
+        public init() {}
+    }
+
     /// Returns the persisted profile set, seeding the built-in starter
     /// profiles through `save` when the store is empty.
     ///
@@ -56,16 +65,23 @@ public enum ProfileBootstrap: Sendable {
             return BuiltInProfiles.makeAll()
         }
         var profiles = stored
+        var seededAll = true
         if profiles.isEmpty {
             profiles = BuiltInProfiles.makeAll()
             for profile in profiles {
-                try? save(profile)
+                do {
+                    try save(profile)
+                } catch {
+                    seededAll = false
+                }
             }
         }
         let upgrade = upgrading(profiles, fromVersion: storedVersion, save: save)
-        // A failed upgrade write keeps its change in memory for this launch
-        // and leaves the version unrecorded, so the next launch retries it.
-        if upgrade.allSaved {
+        // A failed seed or upgrade write keeps its change in memory for this
+        // launch and leaves the version unrecorded, so the next launch
+        // retries it (a seed that half-failed is retried as an upgrade:
+        // the missing built-in is re-added because no profile covers it).
+        if seededAll, upgrade.allSaved {
             recordVersion(builtInVersion)
         }
         return upgrade.profiles
@@ -122,7 +138,20 @@ public enum ProfileBootstrap: Sendable {
                 updated.contains { $0.name == BuiltInProfiles.aiPromptName }
                 || BuiltInProfiles.aiPromptRoutes.contains { routed.contains($0) }
             if !hasAIPrompt {
-                let profile = BuiltInProfiles.aiPrompt()
+                var profile = BuiltInProfiles.aiPrompt()
+                // A website route outranks an app route (docs/05 §4), so
+                // adding claude.ai would quietly take those pages away from
+                // a profile the user made for their browser. Only when no
+                // profile of the user's own routes an app do the sites come
+                // along; otherwise AI Prompt starts with the desktop apps.
+                let builtInNames = Set(BuiltInProfiles.makeAll().map(\.name))
+                let userRoutesApps = updated.contains { profile in
+                    !builtInNames.contains(profile.name)
+                        && profile.routes.contains { if case .app = $0 { true } else { false } }
+                }
+                if userRoutesApps {
+                    profile.routes.removeAll { if case .website = $0 { true } else { false } }
+                }
                 updated.append(profile)
                 changed.append(profile.id)
             }

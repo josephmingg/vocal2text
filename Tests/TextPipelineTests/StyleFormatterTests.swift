@@ -44,6 +44,12 @@ struct StyleFormatterTests {
         #expect(out == "joseph said the API on my iPhone works with Claude Code")
     }
 
+    /// docs/17 §11: a dictionary "Al" must not keep the capital on "Also".
+    @Test func lowercaseProtectsDictionaryTermsAsWholeWordsOnly() {
+        let out = styled("Also Edit The Annual report for Al.", .lowercase, terms: ["Al", "Ed", "Ann"])
+        #expect(out == "also edit the annual report for Al")
+    }
+
     @Test func lowercaseLowercasesI() {
         #expect(styled("I think so. Do you?", .lowercase) == "i think so. do you?")
     }

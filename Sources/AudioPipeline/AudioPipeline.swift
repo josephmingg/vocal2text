@@ -6,6 +6,16 @@ import Foundation
 /// it compiles — and is tested — on every platform.
 public enum RecoveryFileReaper {
     public static let recoveryFilePrefix = "vocal-capture-"
+    /// Crash sidecars of measurement captures (Speed Check). Swept and
+    /// deleted like recovery files, but never offered back by "Recover":
+    /// a read-aloud test passage is not a dictation.
+    public static let measurementFilePrefix = "vocal-measure-"
+
+    static func isSidecar(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        return url.pathExtension == "pcmf32"
+            && (name.hasPrefix(recoveryFilePrefix) || name.hasPrefix(measurementFilePrefix))
+    }
 
     /// How long a cancelled take's raw audio stays recoverable (FR-1.6).
     public static let recoveryRetention: TimeInterval = 24 * 60 * 60
@@ -32,9 +42,7 @@ public enum RecoveryFileReaper {
             )
         else { return }
 
-        for entry in entries where entry.lastPathComponent.hasPrefix(recoveryFilePrefix)
-            && entry.pathExtension == "pcmf32"
-        {
+        for entry in entries where isSidecar(entry) {
             let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate
             // An unreadable timestamp is treated as expired: the file is
@@ -147,10 +155,7 @@ public enum RecoveryStore {
             )
         else { return 0 }
         var removed = 0
-        for entry in entries
-        where entry.lastPathComponent.hasPrefix(RecoveryFileReaper.recoveryFilePrefix)
-            && entry.pathExtension == "pcmf32"
-        {
+        for entry in entries where RecoveryFileReaper.isSidecar(entry) {
             if (try? fileManager.removeItem(at: entry)) != nil {
                 removed += 1
             }
@@ -497,7 +502,14 @@ public actor MicrophoneCapture {
     private var lastDiskProbe: (at: Date, availableBytes: Int64?)?
     private static let diskProbeMaxAge: TimeInterval = 60
 
-    public init() {}
+    /// The sidecar's file-name prefix: `RecoveryFileReaper.recoveryFilePrefix`
+    /// for dictation (offered back by "Recover"), `measurementFilePrefix`
+    /// for captures that must never be (Speed Check).
+    private let sidecarPrefix: String
+
+    public init(sidecarPrefix: String = RecoveryFileReaper.recoveryFilePrefix) {
+        self.sidecarPrefix = sidecarPrefix
+    }
 
     /// Builds and prepares the next take's engine, and refreshes the disk
     /// probe — everything capture start needs that can be paid for while no
@@ -656,7 +668,7 @@ public actor MicrophoneCapture {
         // which runs on the processing task, off the press path — is the
         // earliest moment anything needs the file to exist.
         let recoveryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32")
+            .appendingPathComponent(sidecarPrefix + UUID().uuidString + ".pcmf32")
 
         let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: NativeChunk.self)
         // The live-chunk stream feeds the streaming preview (docs/15 step 22);

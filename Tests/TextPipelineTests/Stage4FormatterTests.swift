@@ -48,6 +48,9 @@ struct Stage4FormatterTests {
             ("Done... macOS next.", "Done. macOS next."),
             ("Read pages 1..5 tonight.", "Read pages 1..5 tonight."),
             ("I counted to 3... then stopped.", "I counted to 3. Then stopped."),
+            ("Go to ../config now.", "Go to ../config now."),
+            ("Run git diff main..feature first.", "Run git diff main..feature first."),
+            ("He said \"stop...\" and left.", "He said \"stop.\" and left."),
         ]
         for (input, expected) in cases {
             let out = Stage4Formatter.format(input, language: .english, formatting: defaults, precedingContext: nil)

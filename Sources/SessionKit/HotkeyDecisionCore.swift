@@ -241,15 +241,16 @@ public struct HotkeyDecisionCore: Sendable {
             // are the user typing, not aborting (docs/13 §4).
             return Outcome()
         }
+        if isLockActive {
+            // A shortcut typed with the hotkey's modifier while a hands-free
+            // take runs — however long the modifier was held first (right-⌘
+            // held, then Tab): aborting would discard minutes of dictation,
+            // and treating the release as the finishing tap would deliver it
+            // mid-thought. Ignore the whole press.
+            pressIsShortcutDuringLock = true
+            return Outcome()
+        }
         if event.timestamp - pressStartTime < timings.chordAbort {
-            if isLockActive {
-                // A shortcut typed with the hotkey's modifier while a
-                // hands-free take runs: aborting would discard minutes of
-                // dictation, and treating the release as the finishing tap
-                // would deliver it mid-thought. Ignore the whole press.
-                pressIsShortcutDuringLock = true
-                return Outcome()
-            }
             // Chord (e.g. Fn+arrow, right-⌘+C): the user wanted a shortcut, not
             // dictation → abort-before-start (docs/03 §3.1). The event itself
             // passes through untouched — a modifier binding never swallows.

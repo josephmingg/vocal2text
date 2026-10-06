@@ -43,11 +43,12 @@ public actor DictationSession {
         /// True when this provider sends text off the device (a remote
         /// OpenAI-compatible URL). The opt-in surrounding-text context is
         /// never sent to such a provider (docs/17 G3.2: "never leaves this
-        /// Mac").
+        /// Mac"). Required, with no default: a caller that forgot it would
+        /// otherwise fail open and ship the document text off the device.
         public var leavesDevice: Bool
 
         public init(
-            pipeline: CleanupPipeline, providerID: CleanupProviderID, leavesDevice: Bool = false
+            pipeline: CleanupPipeline, providerID: CleanupProviderID, leavesDevice: Bool
         ) {
             self.pipeline = pipeline
             self.providerID = providerID
@@ -156,7 +157,10 @@ public actor DictationSession {
         /// `CleanupRequest.cursorMarker` at the caret (docs/17 G3.2). Called
         /// only when cleanup is about to run *and* the user opted in; nil
         /// results or a nil hook mean no context. Never persisted.
-        public var readSurroundingContext: (@Sendable () async -> String?)?
+        /// Takes the press-time app: a queued take may be processed after
+        /// the user switched apps, and the context must come from the app
+        /// the dictation was spoken into or not at all (docs/17 §11).
+        public var readSurroundingContext: (@Sendable (_ pressTimeBundleID: String?) async -> String?)?
         /// Receives command takes (docs/17 G4). Must return promptly — the
         /// pipeline queue waits on it — so platforms start their own work
         /// (model call, preview) and return. nil disables command mode: a
@@ -197,7 +201,11 @@ public actor DictationSession {
                 audio: audio,
                 engine: engine,
                 selectCleanup: { _ in
-                    cleanup.map { CleanupSelection(pipeline: $0, providerID: cleanupProviderID) }
+                    // A fixed pipeline's provider is opaque here, so it is
+                    // treated as leaving the device: no surrounding context.
+                    cleanup.map {
+                        CleanupSelection(pipeline: $0, providerID: cleanupProviderID, leavesDevice: true)
+                    }
                 },
                 archiveAudio: archiveAudio,
                 analyzeSpeech: analyzeSpeech,
@@ -272,6 +280,7 @@ public actor DictationSession {
     private struct ActiveTake {
         var resolution: PendingResolution
         var kind: TakeKind
+        var serial: Int
         /// Press-time selection read, for commands (docs/17 G4).
         var selection: Task<String?, Never>?
         var capture: CaptureSession
@@ -284,6 +293,7 @@ public actor DictationSession {
     private struct PendingTake {
         var resolution: PendingResolution
         var kind: TakeKind
+        var serial: Int
         var selection: Task<String?, Never>?
         var audio: PCMChunk
         var captureSeconds: Double
@@ -308,6 +318,11 @@ public actor DictationSession {
     /// leave the mic running — NFR-1).
     private var pendingRelease: PendingRelease?
     private var pendingCancel = false
+    /// Numbers presses, so an error belongs to the press that produced it: a
+    /// queued older take's pipeline must not erase a newer press's failure
+    /// (a microphone that would not open) before the HUD has shown it.
+    private var pressSerial = 0
+    private var lastErrorPress = 0
     /// Pipelines queued or running (the live press path and `recover` both
     /// count). Capture phases always win the display; this only decides
     /// whether an ended capture settles to `.transcribing` (work still in
@@ -441,6 +456,8 @@ public actor DictationSession {
         lastTimings = nil
         pendingRelease = nil
         pendingCancel = false
+        pressSerial += 1
+        let serial = pressSerial
         transition(to: .arming)
 
         let resolve = deps.profileResolution
@@ -467,6 +484,7 @@ public actor DictationSession {
             take = ActiveTake(
                 resolution: resolution,
                 kind: kind,
+                serial: serial,
                 selection: selection,
                 capture: capture,
                 pressedAt: pressedAt,
@@ -498,6 +516,7 @@ public actor DictationSession {
             pendingCancel = false
             resolution.cancel()
             lastError = .audioUnreadable("capture failed to start: \(error)")
+            lastErrorPress = serial
             settleAfterCaptureEnd()
         }
     }
@@ -558,7 +577,14 @@ public actor DictationSession {
         take = nil
         stopPreview()
         active.resolution.cancel()
-        await active.capture.cancel()
+        // A cancelled command leaves nothing to recover — whatever cancelled
+        // it (Escape, sleep, a chord): "Recover" re-runs takes as dictation,
+        // which would type the spoken instruction into the document.
+        if active.kind == .command, let discard = active.capture.discard {
+            await discard()
+        } else {
+            await active.capture.cancel()
+        }
         transition(to: .cancelled)
         settleAfterCaptureEnd()
     }
@@ -659,6 +685,7 @@ public actor DictationSession {
         let pending = PendingTake(
             resolution: active.resolution,
             kind: active.kind,
+            serial: active.serial,
             selection: active.selection,
             audio: audio,
             captureSeconds: captureSeconds,
@@ -691,6 +718,7 @@ public actor DictationSession {
                 captureSeconds: pending.captureSeconds,
                 armSeconds: pending.armSeconds,
                 source: .dictation,
+                serial: pending.serial,
                 kind: pending.kind,
                 selection: pending.selection
             )
@@ -722,7 +750,8 @@ public actor DictationSession {
             isLockMode: false,
             captureSeconds: audio.durationSeconds,
             armSeconds: 0,
-            source: .recovered
+            source: .recovered,
+            serial: pressSerial
         )
     }
 
@@ -747,6 +776,7 @@ public actor DictationSession {
         captureSeconds: Double,
         armSeconds: Double,
         source: TranscriptSource,
+        serial: Int,
         kind: TakeKind = .dictation,
         selection: Task<String?, Never>? = nil
     ) async -> Bool {
@@ -754,8 +784,12 @@ public actor DictationSession {
         // Pipelines run strictly in press order, so the error the platform
         // reads at idle must belong to the most recent one: an earlier take
         // that failed while this one was recording would otherwise surface
-        // its error after this take delivered fine (docs/17 §4.4 #13).
-        lastError = nil
+        // its error after this take delivered fine (docs/17 §4.4 #13). A
+        // newer press's own failure (the mic would not open) is not ours to
+        // clear.
+        if lastErrorPress <= serial {
+            lastError = nil
+        }
 
         let languageMode: LanguageMode
         if let override = profile.languageOverride {
@@ -798,6 +832,7 @@ public actor DictationSession {
         } catch {
             lastError =
                 (error as? TranscriptionError) ?? .engineUnavailable(String(describing: error))
+            lastErrorPress = max(lastErrorPress, serial)
             Diagnostics.shared.increment(.transcriptionFailures)
             // docs/15 step 35: a failure must leave the recording behind.
             // The capture layer's crash sidecar died with the successful
@@ -873,10 +908,18 @@ public actor DictationSession {
             matching: normalized, entries: entries, language: language
         )
         let stage2Text: String
+        // What History keeps for a take whose delivered text holds the
+        // clipboard: the snippet with the tag shown, not the contents — the
+        // clipboard is often a password or token copied a moment ago, and
+        // the history database is searchable (docs/17 §11).
+        var historyText: String?
         if let snippet {
             var clipboard: String?
             if SnippetTemplate.needsClipboard(snippet.written), let read = deps.readClipboard {
                 clipboard = await read()
+                historyText = SnippetTemplate.expand(
+                    snippet.written, clipboard: "[clipboard]", now: deps.now()
+                )
             }
             stage2Text = SnippetTemplate.expand(snippet.written, clipboard: clipboard, now: deps.now())
         } else {
@@ -940,7 +983,7 @@ public actor DictationSession {
             if !selection.leavesDevice,
                 await deps.config.cleanupUsesSurroundingText,
                 let read = deps.readSurroundingContext {
-                surrounding = await read() ?? ""
+                surrounding = await read(resolved.pressTimeBundleID) ?? ""
             }
             let request = CleanupRequest(
                 text: stage2Text,
@@ -1047,7 +1090,7 @@ public actor DictationSession {
             source: source,
             language: language,
             rawText: result.text,
-            deliveredText: formatted,
+            deliveredText: historyText ?? formatted,
             durationSeconds: audio.durationSeconds,
             targetAppBundleID: targetBundleID,
             profileName: profile.name,

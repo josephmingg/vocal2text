@@ -287,7 +287,7 @@ re-verified against the code before it was changed. The rest are recorded here f
 | 22 | L | iOS auto-copy rides Universal Clipboard to other devices | **Fixed**: local-only |
 | 23 | L* | The iOS audio session is never released after in-app takes | Open |
 | 24 | L | Per-app insertion overrides are read at launch only | Open |
-| 25 | L | Deleting one transcript left its text readable in the database file | **Fixed**: `secure_delete` |
+| 25 | L | Deleting one transcript left its text readable in the database file | **Fixed** (round 2, §11): `secure_delete` alone did not cover the search indexes; delete now also optimizes them, plus FTS5 `secure-delete` where SQLite supports it |
 | 26 | L* | A downgrade can duplicate the built-in profiles | Open |
 | 27 | L | The delivered sound and HUD lag the paste by the 400 ms restore wait | Open (a restore race needs care) |
 
@@ -558,3 +558,137 @@ plus:
 - audio-device quirks;
 - real Whisper/Parakeet/Ollama/Apple-model latency (Speed Check measures this on your
   machine).
+
+## 11. Round 2: cold review and deep QA (2026-10-06)
+
+A second pass over the whole branch, after the first PR push. Glaido was re-checked
+first: glaido.com and the review sites are still blocked from this environment, and
+search excerpts showed nothing round 1 missed (dictionary import, snippets, a command
+key, cloud-only, a 10-minute recording cap). Then two independent methods:
+
+- **Adversarial probes.** I wrote about 90 tricky English inputs and ran them through
+  the pipeline, the wake word, local tools, styles and snippets.
+- **Three independent code reviewers.** One covered core logic, one the Mac app layer,
+  and one privacy, iOS and test quality. Each finding was verified against the code
+  before any change.
+
+Every fix below has a regression test, except where marked "Mac-only". For each fix, I
+put the bug back and confirmed its test fails (25 mutation runs, all caught).
+
+### Found by the probes (fixed in 82ede5c)
+
+| Defect | Before | After |
+|---|---|---|
+| Brand capitals at a sentence start | "iPhone is great" → "IPhone…", "um, eBay…" → "EBay…" | Words with an inner capital keep their casing |
+| The same, after a collapsed ellipsis | "Wait... iPhone too?" → "Wait. IPhone too?" | "Wait. iPhone too?" |
+| Local tools answered the wrong question | "What time is it in Tokyo?" → local time | Only the plain question is answered locally; the rest goes to the model |
+| Bad arithmetic | "1,2 plus 1" → 13; 2^1000 printed with 300 invented digits | Malformed numbers go to the model; huge results use scientific form |
+| Wake word on ordinary sentences | "Okay vocal warmups…", "Hey vocal coach…", "OK Vocal." → command | Stay dictation |
+
+### Found by the reviewers (fixed in this round)
+
+**Core logic**
+- The wake word still fired on a musician's dictation: "Vocal, guitar and bass are
+  mixed", "Vocal fix is in the mix". A command verb is now required after "Vocal" in
+  every form. After punctuation, a wider set of verbs counts.
+- Command-output cleanup cut real first lines: "Here are the steps:", "Okinawa trip:".
+  Preambles now match whole words only, and never a line the selection contains.
+- Doubled punctuation broke paths: "../config" → "./config", "main..feature" →
+  "main.feature". Runs now collapse only where a sentence can end.
+- Tiny results printed as a confident "0". They now use scientific form.
+- Lowercase style kept dictionary terms inside other words ("Al" kept "Also"). Terms
+  now match whole words only.
+- An older take's pipeline could erase a newer press's microphone error. Each error
+  now belongs to the press that produced it.
+- A hands-free take ended when the modifier was held more than 1 s before a shortcut
+  key. The shortcut guard now applies regardless of timing.
+- The session's privacy flag defaulted to "stays on device", so a caller that forgot
+  it would send context off the Mac. It is now a required parameter, and the
+  convenience initializer treats its pipeline as leaving the device.
+
+**Privacy**
+- *Deleting one history row left its words in the search index.* Proven: the word was
+  still in the file's bytes. Delete now optimizes both FTS tables, and FTS5
+  `secure-delete` is enabled where supported. Both were proven with SQLite 3.45.
+  Mac/iOS-only code.
+- The `{clipboard}` snippet saved the clipboard (often a password) to History. History
+  now stores "[clipboard]". The Mac also refuses concealed or transient pasteboard
+  items.
+- Opt-in context was a prompt-injection path:
+  - Document text could close its own fence. Fence tags inside the context are now
+    defused.
+  - Output that copies an address, link or number from the document, or more than two
+  of its words, is rejected (`context-copy`).
+- Context was read from whatever app was frontmost when cleanup ran, not where the
+  take was spoken. The reader is now given the press-time app. Mac-only check.
+- Cancelled commands and Speed Check passages could be offered back by "Recover":
+  - A cancelled command now deletes its own recording, whatever cancelled it.
+  - Speed Check recordings use their own file prefix, which is swept but never
+    recovered.
+- iOS: `{clipboard}` pasted the last dictation, because auto-copy writes every
+  dictation to the clipboard. Vocal's own copy is now ignored. iOS-only.
+- The command key was not validated on load (Escape or Caps Lock could be bound).
+  Mac-only.
+
+**Upgrades**
+- The built-in profile upgrade:
+  - recorded version 2 even when a seed write failed;
+  - treated a database that failed to open as a fresh install.
+
+  Both now leave the version unrecorded, so the next launch retries.
+- Adding claude.ai / chatgpt.com to AI Prompt quietly outranked a user's own browser
+  profile, because website routes beat app routes. Those sites are now added only when
+  the user has no app-routed profile of their own.
+- Dictionary entries from before snippets existed (long or multi-line) silently became
+  whole-take snippets. A one-time migration pins them to their old inline behaviour.
+
+**Mac app layer** (Mac-only; compiled by CI, not run on hardware)
+- Re-recording the dictation key could revive the replaced command-key monitor as an
+  orphan event tap. A stopped monitor now never resumes.
+- Closing Settings mid-recording left the Speed Check microphone on. Also:
+  - A Start Over during decoding mixed two runs.
+  - A cancel while the microphone was opening was lost.
+
+  All three are fixed (window-close observer, run token, start-time cancel).
+- The dictation key could end a command take early, and a command press right after a
+  dictation press could end that dictation. Each key is now ignored while the other
+  holds the microphone, and gating no longer depends on the lagging HUD state.
+- A late phase event from the previous take could clear a new press's flag and leave
+  the mic open. Only the current take's events clear it now.
+- The command tap was not retried after wake. Both taps now retry until both are
+  armed.
+- Undo after a command acted on the previous dictation. It now says to use ⌘Z in that
+  app.
+- The preview took keyboard focus while "thinking", which lost typing and made a
+  follow-up command read Vocal's own panel:
+  - It now takes focus only when the answer is ready.
+  - While thinking it shows a Cancel button.
+  - A new command or dictation closes a waiting preview first.
+- The 30 s deadline was not a hard limit, and Esc never stopped the model. There is
+  now a real deadline (`Deadline.run`, tested with work that ignores cancellation),
+  and dismissing cancels the call.
+- Command polish:
+  - A command that heard nothing now says so.
+  - Insertion waits a beat for focus to return.
+  - A remote-Ollama setup gets an accurate message.
+  - An Ollama failure falls back to Apple's model.
+  - No stale cloud badge.
+
+### Not changed
+
+- **HotkeyFuzzTests models only the dictation key.** The command key's wiring is
+  covered by targeted tests, not by the fuzzer.
+- **RealLifeCorpusTests compares content words as a set.** Losing one copy of a
+  doubled word would pass it. The doubles themselves ("check in in", "on on") are
+  covered by `EnglishCleanupTests`.
+
+### Evidence
+
+- **Linux:** `swift build --build-tests && swift test` in `swift:6.0-noble`: 807 tests
+  pass, up from 785 at the start of round 2.
+- **SwiftLint:** exits 0. Its warnings are on lines outside this round's changes.
+- **Mutation checks:** 25 runs: 7 for the probe fixes and 18 for the review fixes.
+  Each re-introduced bug fails its test.
+- **Mac and iOS app targets:** compiled by CI only. The Mac items above are verified
+  by reading the code, not by running them.
+

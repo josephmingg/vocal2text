@@ -43,8 +43,9 @@ public final class DatabaseStore: @unchecked Sendable {
         var configuration = Configuration()
         // Deleting a transcript must delete its text: without secure_delete,
         // SQLite only unlinks the row and the words stay readable in free
-        // pages and FTS segments until overwritten — Delete All vacuums, but
-        // a single-row delete never did (docs/17 §4.4 #25).
+        // pages until overwritten — Delete All vacuums, but a single-row
+        // delete never did (docs/17 §4.4 #25). The FTS indexes need more
+        // than this pragma; see `deleteTranscript`.
         configuration.prepareDatabase { db in
             try db.execute(sql: "PRAGMA secure_delete = ON")
         }
@@ -183,6 +184,15 @@ public final class DatabaseStore: @unchecked Sendable {
         }
 
         try migrator.migrate(queue)
+        // FTS5's own secure-delete (SQLite 3.44+) removes a deleted row's
+        // index entries outright instead of writing a tombstone beside them.
+        // Older system SQLite rejects the option; `deleteTranscript`'s
+        // optimize covers that case.
+        try? queue.write { db in
+            for table in ["transcript_fts_latin", "transcript_fts_tri"] {
+                try db.execute(sql: "INSERT INTO \(table)(\(table), rank) VALUES('secure-delete', 1)")
+            }
+        }
         dbQueue = queue
     }
 
@@ -319,6 +329,15 @@ public final class DatabaseStore: @unchecked Sendable {
     public func deleteTranscript(id: UUID) throws {
         try dbQueue.write { db in
             try db.execute(sql: "DELETE FROM transcript WHERE id = ?", arguments: [id.uuidString])
+            // The FTS delete trigger only appends a tombstone; the deleted
+            // words stay in the stored index segments (docs/17 §11: proven
+            // on SQLite 3.45 — the word was still in the file's bytes).
+            // Optimize merges the segments without them, and secure_delete
+            // zeroes the pages they leave. History is small, so this is
+            // milliseconds.
+            for table in ["transcript_fts_latin", "transcript_fts_tri"] {
+                try db.execute(sql: "INSERT INTO \(table)(\(table)) VALUES('optimize')")
+            }
         }
     }
 
@@ -608,10 +627,38 @@ public final class DatabaseStore: @unchecked Sendable {
     }
 }
 
+/// One-time dictionary migrations, run at launch by both apps.
+public enum DictionaryMigration {
+    static let legacyInlineKey = "dictionary.legacyEntriesPinnedInline"
+
+    /// Pins pre-snippet entries to their old inline behaviour
+    /// (`DictionaryEntry.legacyEntriesPinnedInline`). Recorded as done only
+    /// when every save succeeded, so a failed write is retried next launch;
+    /// with no database there is nothing to migrate and nothing is recorded.
+    public static func pinLegacyEntriesInlineOnce(
+        database: DatabaseStore?, defaults: UserDefaults = .standard
+    ) {
+        guard let database, !defaults.bool(forKey: legacyInlineKey) else { return }
+        guard let entries = try? database.dictionaryEntries() else { return }
+        var allSaved = true
+        for entry in DictionaryEntry.legacyEntriesPinnedInline(entries) {
+            do {
+                try database.save(entry)
+            } catch {
+                allSaved = false
+            }
+        }
+        if allSaved {
+            defaults.set(true, forKey: legacyInlineKey)
+        }
+    }
+}
+
 #else
 /// Non-Apple platforms build without GRDB; SessionKit's `TranscriptStoring`
 /// seam is served by in-memory fakes in tests (docs/03 §5).
 public enum PersistenceInfo {
     public static let isSupported: Bool = false
 }
+
 #endif

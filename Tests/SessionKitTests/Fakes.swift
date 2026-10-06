@@ -7,9 +7,11 @@ import SessionKit
 actor CaptureLog {
     private(set) var finishCount = 0
     private(set) var cancelCount = 0
+    private(set) var discardCount = 0
 
     func recordFinish() { finishCount += 1 }
     func recordCancel() { cancelCount += 1 }
+    func recordDiscard() { discardCount += 1 }
 }
 
 /// A one-shot gate: `waitForOpen` suspends until someone calls `open`.
@@ -65,6 +67,9 @@ struct ScriptedAudioCapturing: AudioCapturing {
             },
             cancel: {
                 await log.recordCancel()
+            },
+            discard: {
+                await log.recordDiscard()
             }
         )
     }

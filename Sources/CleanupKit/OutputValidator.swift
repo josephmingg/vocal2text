@@ -17,7 +17,7 @@ public enum OutputValidator {
     /// 「周五，啊不对，周六」→「周六」, and are rejected only past 4× expansion);
     /// Han input must yield Han output.
     public static func validate(
-        output: String, input: String, language: Language
+        output: String, input: String, language: Language, context: String = ""
     ) -> ValidationResult {
         let cleaned = strippingEchoedWrappers(
             strippingThinkBlocks(output).trimmingCharacters(in: .whitespacesAndNewlines),
@@ -189,7 +189,40 @@ public enum OutputValidator {
             }
         }
 
+        // The opt-in context is document text someone else may have written
+        // (a received email, a web page), so it is a prompt-injection path
+        // the short-dictation guards above cannot see: "send it to me" →
+        // "Send it to me at payroll@evil.example." passes the length ceiling.
+        // Cleanup may borrow a name's spelling from the document, never its
+        // content: an address, link or number the speaker did not say, or
+        // more than two words lifted from it, means the model copied the
+        // document into the dictation (docs/17 §11).
+        if !context.isEmpty, borrowsContentFromContext(cleaned, input: input, context: context) {
+            return .rejected(rule: "context-copy")
+        }
+
         return .accepted(cleaned: cleaned)
+    }
+
+    static func borrowsContentFromContext(_ output: String, input: String, context: String) -> Bool {
+        let inputLower = input.lowercased()
+        let contextLower = context.lowercased()
+        let tokens = output.split(whereSeparator: \.isWhitespace).map {
+            $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?;:\"'()[]“”‘’"))
+        }
+        for token in tokens where !token.isEmpty && !inputLower.contains(token) {
+            let isLiteral = token.contains("@") || token.contains("://") || token.hasPrefix("www.")
+                || token.contains(where: \.isNumber)
+            // Only a literal the document holds: a number the model spelled
+            // out from the speaker's own words ("five" → "5") is not a copy.
+            if isLiteral, contextLower.contains(token) { return true }
+        }
+        let inputWords = Set(latinWords(in: input))
+        let contextWords = Set(latinWords(in: context))
+        let lifted = Set(latinWords(in: output)).filter {
+            !inputWords.contains($0) && contextWords.contains($0)
+        }
+        return lifted.count > 2
     }
 
     private static func containsQuestionMark(_ text: String) -> Bool {

@@ -44,6 +44,34 @@ struct VoiceCommandPromptTests {
         #expect(VoiceCommandPrompt.sanitized("  <think>x</think> ", request: edit) == nil)
     }
 
+    /// docs/17 §11: a heading is content, not a model preamble — when it is
+    /// the user's own line, or starts with a word that merely begins with
+    /// "ok" / "here".
+    @Test func realFirstLinesSurvive() {
+        let steps = VoiceCommandRequest(
+            instruction: "Fix the grammar",
+            selectedText: "Here are the steps:\n1. open the app\n2. click save",
+            language: .english
+        )
+        #expect(
+            VoiceCommandPrompt.sanitized("Here are the steps:\n1. Open the app.\n2. Click Save.", request: steps)
+                == "Here are the steps:\n1. Open the app.\n2. Click Save."
+        )
+        #expect(
+            VoiceCommandPrompt.sanitized("Okinawa trip:\nDay one: beach.", request: compose)
+                == "Okinawa trip:\nDay one: beach."
+        )
+        #expect(
+            VoiceCommandPrompt.sanitized("Hereford notes:\nCattle.", request: compose)
+                == "Hereford notes:\nCattle."
+        )
+        // The model's own preamble still goes.
+        #expect(
+            VoiceCommandPrompt.sanitized("Here's the fixed version:\nHere are the steps:\n1. Open.", request: steps)
+                == "Here are the steps:\n1. Open."
+        )
+    }
+
     @Test func quotesStayWhenTheSelectionWasQuoted() {
         let quoted = VoiceCommandRequest(instruction: "Fix it", selectedText: "\"hello\"", language: .english)
         #expect(VoiceCommandPrompt.sanitized("\"Hello.\"", request: quoted) == "\"Hello.\"")

@@ -65,19 +65,21 @@ public enum Stage4Formatter: Sendable {
     private static let sentenceTerminators: Set<Character> = [".", "!", "?", "。", "！", "？"]
 
     /// "!!" → "!", "?." → "?": a run of terminal marks keeps its first mark.
-    /// Single marks ("U.S.", "3.14") are runs of one and never touched.
+    /// Single marks ("U.S.", "3.14") are runs of one and never touched, and
+    /// a run only collapses where a sentence can end — before a space, a
+    /// closing quote or bracket, or the end of the text — so "pages 1..5",
+    /// "cd ../config" and "git diff main..feature" are kept as written.
     ///
-    /// A collapsed run now ends a sentence, so the word after it takes a
-    /// capital: "Wait... are you serious?" → "Wait. Are you serious?", never
-    /// a full stop followed by a lowercase word (owner decision, docs/17 F3).
-    /// Only words after a *collapsed* run are capitalized — "e.g. this" and
-    /// other single marks keep the speaker's casing — and a word spelled
-    /// with an inner capital ("iPhone") keeps it. A run of dots between two
-    /// digits is a range ("pages 1..5"), not punctuation, and is kept.
+    /// A collapsed run ends a sentence, so the word after it takes a capital:
+    /// "Wait... are you serious?" → "Wait. Are you serious?", never a full
+    /// stop followed by a lowercase word (owner decision, docs/17 F3). Only
+    /// words after a *collapsed* run are capitalized — "e.g. this" keeps the
+    /// speaker's casing — and a word spelled with an inner capital
+    /// ("iPhone") keeps it.
     private static func collapseDuplicateTerminalPunctuation(_ text: String) -> String {
         guard
             let regex = try? NSRegularExpression(
-                pattern: "(\\d)(\\.{2,})(?=\\d)|([.!?])[.!?]+(?:(\\s+)(\\p{Ll}[\\p{L}\\p{N}]*))?"
+                pattern: "([.!?])[.!?]+(?=[\\s\"'”’)\\]]|$)(?:(\\s+)(\\p{Ll}[\\p{L}\\p{N}]*))?"
             )
         else { return text }
         let nsText = text as NSString
@@ -86,16 +88,10 @@ public enum Stage4Formatter: Sendable {
         for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
             result += nsText.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
             cursor = match.range.location + match.range.length
-            // Leftmost match wins, so a digit range is claimed at its first
-            // digit before the dots could be read as punctuation.
-            guard match.range(at: 3).location != NSNotFound else {
-                result += nsText.substring(with: match.range)
-                continue
-            }
-            result += nsText.substring(with: match.range(at: 3))
-            if match.range(at: 5).location != NSNotFound {
-                result += nsText.substring(with: match.range(at: 4))
-                result += Stage1Normalizer.capitalizedFirstLetter(nsText.substring(with: match.range(at: 5)))
+            result += nsText.substring(with: match.range(at: 1))
+            if match.range(at: 3).location != NSNotFound {
+                result += nsText.substring(with: match.range(at: 2))
+                result += Stage1Normalizer.capitalizedFirstLetter(nsText.substring(with: match.range(at: 3)))
             }
         }
         result += nsText.substring(from: cursor)

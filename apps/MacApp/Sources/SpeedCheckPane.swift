@@ -19,9 +19,25 @@ final class SpeedCheckModel: ObservableObject {
     @Published private(set) var problems: [String] = []
     @Published var includeParakeet = true
 
-    private let microphone = MicrophoneCapture()
+    /// Its own sidecar prefix: a test passage must never be offered back by
+    /// "Recover" as if it were a dictation (docs/17 §11).
+    private let microphone = MicrophoneCapture(sidecarPrefix: RecoveryFileReaper.measurementFilePrefix)
     private var session: MicrophoneSession?
     private var nextPassage = 0
+    /// Bumped by Start Over: a decode still running for the previous run
+    /// must not write its results into the new one.
+    private var run = 0
+    /// The microphone is opening (the first time, behind the permission
+    /// prompt); a cancel that lands meanwhile is honoured once it opens.
+    private var isStarting = false
+    private var cancelWhileStarting = false
+
+    var isBusy: Bool {
+        switch stage {
+        case .recording, .decoding: true
+        case .idle, .finished: isStarting
+        }
+    }
 
     var currentPassage: Int? {
         switch stage {
@@ -34,6 +50,8 @@ final class SpeedCheckModel: ObservableObject {
     var summaries: [SpeedCheck.Summary] { SpeedCheck.summarize(measurements) }
 
     func reset() {
+        guard !isBusy else { return }
+        run += 1
         measurements = []
         problems = []
         nextPassage = 0
@@ -41,11 +59,22 @@ final class SpeedCheckModel: ObservableObject {
     }
 
     func startRecording() async {
-        guard case .idle = stage, nextPassage < SpeedCheck.passages.count else { return }
+        guard case .idle = stage, !isStarting, nextPassage < SpeedCheck.passages.count else { return }
+        isStarting = true
+        defer { isStarting = false }
         do {
-            session = try await microphone.start()
+            let started = try await microphone.start()
+            if cancelWhileStarting {
+                // The pane closed or Cancel was pressed while the mic opened.
+                cancelWhileStarting = false
+                await started.cancel()
+                RecoveryStore.discard(at: started.recoveryFileURL)
+                return
+            }
+            session = started
             stage = .recording(passage: nextPassage)
         } catch {
+            cancelWhileStarting = false
             problems.append("Could not start the microphone: \(error.localizedDescription)")
         }
     }
@@ -53,6 +82,7 @@ final class SpeedCheckModel: ObservableObject {
     func stopRecording(appState: AppState) async {
         guard case .recording(let passage) = stage, let session else { return }
         self.session = nil
+        let thisRun = run
         let audio = await session.finish()
         guard audio.durationSeconds >= 2 else {
             problems.append("Passage \(passage + 1) was too short — read the whole passage, then stop.")
@@ -66,6 +96,7 @@ final class SpeedCheckModel: ObservableObject {
             includeParakeet: includeParakeet,
             warmUp: passage == 0
         )
+        guard thisRun == run else { return }
         measurements += outcome.measurements
         problems += outcome.failures
         nextPassage = passage + 1
@@ -73,6 +104,10 @@ final class SpeedCheckModel: ObservableObject {
     }
 
     func cancelRecording() async {
+        if isStarting {
+            cancelWhileStarting = true
+            return
+        }
         guard case .recording = stage, let session else { return }
         self.session = nil
         await session.cancel()
@@ -140,7 +175,7 @@ struct SpeedCheckPane: View {
             Spacer(minLength: 0)
             HStack {
                 Button("Start Over") { model.reset() }
-                    .disabled(model.measurements.isEmpty && model.problems.isEmpty)
+                    .disabled(model.isBusy || (model.measurements.isEmpty && model.problems.isEmpty))
                 Spacer()
                 if let savedNote {
                     Text(savedNote).font(.caption).foregroundStyle(.secondary)
@@ -153,9 +188,13 @@ struct SpeedCheckPane: View {
         }
         .padding(16)
         // Closing Settings mid-passage must not leave the microphone open.
+        // Switching tabs removes the pane (onDisappear); closing the window
+        // only orders it out — Settings is kept alive — so that needs the
+        // window's own close notification.
         .onDisappear {
             Task { await model.cancelRecording() }
         }
+        .background(WindowCloseObserver { Task { await model.cancelRecording() } })
     }
 
     @ViewBuilder
@@ -245,6 +284,45 @@ struct SpeedCheckPane: View {
             savedNote = "Saved"
         } catch {
             savedNote = "Save failed: \(error.localizedDescription)"
+        }
+    }
+}
+
+/// Calls `onClose` when the window hosting it closes. Settings windows are
+/// retained and merely ordered out on close, so SwiftUI's `onDisappear`
+/// does not fire for them.
+private struct WindowCloseObserver: NSViewRepresentable {
+    let onClose: () -> Void
+
+    func makeNSView(context: Context) -> ObservingView {
+        let view = ObservingView()
+        view.onClose = onClose
+        return view
+    }
+
+    func updateNSView(_ nsView: ObservingView, context: Context) {
+        nsView.onClose = onClose
+    }
+
+    final class ObservingView: NSView {
+        var onClose: (() -> Void)?
+
+        // Selector-based: NotificationCenter drops the registration when the
+        // view deallocates, so no token or deinit bookkeeping is needed.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(
+                self, name: NSWindow.willCloseNotification, object: nil
+            )
+            guard let window else { return }
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(windowWillClose(_:)),
+                name: NSWindow.willCloseNotification, object: window
+            )
+        }
+
+        @objc private func windowWillClose(_ notification: Notification) {
+            onClose?()
         }
     }
 }

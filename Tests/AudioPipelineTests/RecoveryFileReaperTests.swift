@@ -101,3 +101,28 @@ struct RecoveryFileReaperTests {
         #expect(RecoveryStore.latestRecoverable(in: directory) == nil)
     }
 }
+
+// MARK: - docs/17 §11: Speed Check recordings are swept, never recovered
+
+@Test func measurementSidecarsAreSweptAndDiscardedButNeverOfferedBack() throws {
+    try withTemporaryDirectory { directory in
+        let now = Date()
+        let measurement = try makeFile(
+            in: directory,
+            named: RecoveryFileReaper.measurementFilePrefix + "\(UUID().uuidString).pcmf32",
+            modified: now
+        )
+        // Newest file in the folder, yet "Recover" must not offer it.
+        #expect(RecoveryStore.latestRecoverable(in: directory, now: now, minimumSeconds: 0) == nil)
+        #expect(RecoveryStore.discardAll(in: directory) == 1)
+        #expect(!exists(measurement))
+
+        let stale = try makeFile(
+            in: directory,
+            named: RecoveryFileReaper.measurementFilePrefix + "\(UUID().uuidString).pcmf32",
+            modified: now.addingTimeInterval(-(RecoveryFileReaper.recoveryRetention + 60))
+        )
+        RecoveryFileReaper.reapExpiredRecoveryFiles(in: directory, now: now)
+        #expect(!exists(stale))
+    }
+}

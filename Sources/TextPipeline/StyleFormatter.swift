@@ -45,6 +45,10 @@ public enum StyleFormatter {
         return text.replacingCharacters(in: range, with: String(body))
     }
 
+    private static func isWordCharacter(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber
+    }
+
     /// Lowercases every word except protected terms (dictionary written
     /// forms, matched case-sensitively), all-caps acronyms of two or more
     /// letters, and tokens with inner capitals ("iPhone", "GitHub").
@@ -56,7 +60,15 @@ public enum StyleFormatter {
             var searchStart = text.startIndex
             while searchStart < text.endIndex,
                 let found = text.range(of: term, range: searchStart..<text.endIndex) {
-                protectedRanges.append(found)
+                // Whole words only: a dictionary "Al" or "Ann" must not keep
+                // the capital on "Also" or "Annual".
+                let startsWord = found.lowerBound == text.startIndex
+                    || !Self.isWordCharacter(text[text.index(before: found.lowerBound)])
+                let endsWord = found.upperBound == text.endIndex
+                    || !Self.isWordCharacter(text[found.upperBound])
+                if startsWord, endsWord {
+                    protectedRanges.append(found)
+                }
                 searchStart = found.upperBound
             }
         }

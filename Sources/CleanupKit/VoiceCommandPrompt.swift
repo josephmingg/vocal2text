@@ -88,7 +88,15 @@ public enum VoiceCommandPrompt {
             let firstLine = text[..<newline].trimmingCharacters(in: .whitespaces)
             let lowered = firstLine.lowercased()
             let preambleStarts = ["here", "sure", "certainly", "okay", "ok", "of course", "absolutely"]
-            if firstLine.hasSuffix(":"), preambleStarts.contains(where: { lowered.hasPrefix($0) }) {
+            // Whole words only ("Okinawa trip:" and "Hereford:" are content),
+            // and never a line the user's own selection contains ("Here are
+            // the steps:" heading a list they asked to fix).
+            let opensLikePreamble = preambleStarts.contains { start in
+                guard lowered.hasPrefix(start) else { return false }
+                return lowered.dropFirst(start.count).first.map { !$0.isLetter } ?? true
+            }
+            let fromSelection = (request.selectedText ?? "").lowercased().contains(lowered)
+            if firstLine.hasSuffix(":"), opensLikePreamble, !fromSelection {
                 text = String(text[text.index(after: newline)...])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }

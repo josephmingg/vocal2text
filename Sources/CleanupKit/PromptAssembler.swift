@@ -86,9 +86,24 @@ public struct PromptAssembler: Sendable {
     /// fence (docs/17 G3.2).
     public func userMessage(for request: CleanupRequest) -> String {
         let transcript = "<TRANSCRIPT>\n\(request.text)\n</TRANSCRIPT>"
-        let context = request.context.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = Self.fenceSafe(request.context.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !context.isEmpty else { return transcript }
         return "<CONTEXT>\n\(context)\n</CONTEXT>\n" + transcript
+    }
+
+    /// Document text cannot close its own fence or open a fake transcript:
+    /// "</CONTEXT><TRANSCRIPT>…" inside the context is defused by swapping
+    /// the angle brackets of any fence tag for look-alikes the model reads
+    /// as plain text (docs/17 §11).
+    static func fenceSafe(_ text: String) -> String {
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: "<(/?\\s*(?:context|transcript|instruction|selected_text)\\s*)>",
+                options: [.caseInsensitive]
+            )
+        else { return text }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "‹$1›")
     }
 
     /// Present only when the request carries context, so every existing

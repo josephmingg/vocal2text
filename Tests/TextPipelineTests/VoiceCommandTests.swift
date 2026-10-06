@@ -15,6 +15,9 @@ struct VoiceCommandParserTests {
         ("Hey, Vocal, summarize this.", "Summarize this."),
         ("Vocal what's 15% of 240?", "What's 15% of 240?"),
         ("Vocal: summarize this", "Summarize this"),
+        ("Vocal, fix the grammar.", "Fix the grammar."),
+        ("Vocal, please make it friendlier.", "Please make it friendlier."),
+        ("Vocal! What's 2 plus 2?", "What's 2 plus 2?"),
     ])
     func wakeWordStartsACommand(take: String, instruction: String) {
         #expect(VoiceCommandParser.instruction(afterWakeWordIn: take) == instruction)
@@ -37,6 +40,15 @@ struct VoiceCommandParserTests {
         "Vocal what a performance that was.",
         "Vocal how-to videos are popular.",
         "OK Vocal.",
+        // Round-2 review: a musician's dictation is not a command.
+        "Vocal, instrumental, and drum tracks are done.",
+        "Vocal, guitar and bass are mixed.",
+        "OK vocal, levels are fine.",
+        "Vocal! What a voice she has.",
+        "Vocal fix is in the mix.",
+        "Vocal change was subtle in the bridge.",
+        "Vocal polish makes the track.",
+        "Vocal correct pitch matters.",
     ])
     func ordinaryProseIsNotACommand(take: String) {
         #expect(VoiceCommandParser.instruction(afterWakeWordIn: take) == nil)
@@ -64,6 +76,7 @@ struct LocalCommandToolsTests {
         ("1 divided by 3", "0.333333"),
         ("What's 1,000,000 times 3?", "3000000"),
         ("2 to the power of 64", "1.8446744073709552e+19"),
+        ("What's 1 divided by 10000000?", "1e-07"),
     ])
     func arithmetic(question: String, expected: String) {
         #expect(answer(question) == expected)

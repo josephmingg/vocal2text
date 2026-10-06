@@ -15,6 +15,9 @@ final class CommandPreviewModel: ObservableObject {
     @Published var instruction = ""
     @Published var actsOnSelection = false
     @Published var phase: Phase = .thinking
+    /// The Cancel button's action (the panel is not key while thinking, so
+    /// Escape would go to the user's app instead).
+    var cancel: () -> Void = {}
 }
 
 /// A panel that can take keyboard focus without activating Vocal — so the
@@ -35,6 +38,7 @@ final class CommandPreviewController {
     private var keyMonitor: Any?
     private var resignObserver: NSObjectProtocol?
     private var onInsert: ((String) -> Void)?
+    private var onDismiss: (() -> Void)?
     private(set) var generation = 0
 
     init() {
@@ -64,20 +68,32 @@ final class CommandPreviewController {
     }
 
     var isVisible: Bool { panel.isVisible }
+    /// Whether the preview holds the keyboard (an answer is showing).
+    var isKey: Bool { panel.isKeyWindow }
 
     /// Shows the "working on it" state for a new command and returns the
-    /// token its answer must carry.
+    /// token its answer must carry. The panel does not take keyboard focus
+    /// yet: for the seconds a model can take, the user keeps typing in their
+    /// own app (docs/17 §11). It becomes key when there is something to act
+    /// on. `onDismiss` runs when the preview closes without inserting.
     @discardableResult
     func begin(
         instruction: String,
         actsOnSelection: Bool,
-        onInsert: @escaping (String) -> Void
+        onInsert: @escaping (String) -> Void,
+        onDismiss: @escaping () -> Void = {}
     ) -> Int {
+        // A replaced preview counts as dismissed: its model call must stop.
+        let previous = self.onDismiss
+        self.onDismiss = nil
+        previous?()
         generation += 1
         model.instruction = instruction
         model.actsOnSelection = actsOnSelection
         model.phase = .thinking
+        model.cancel = { [weak self] in self?.dismiss() }
         self.onInsert = onInsert
+        self.onDismiss = onDismiss
         present()
         return generation
     }
@@ -85,16 +101,21 @@ final class CommandPreviewController {
     func show(result: String, for token: Int) {
         guard token == generation, panel.isVisible else { return }
         model.phase = .ready(result)
+        takeFocus()
     }
 
     func show(failure: String, for token: Int) {
         guard token == generation, panel.isVisible else { return }
         model.phase = .failed(failure)
+        takeFocus()
     }
 
     func dismiss() {
         generation += 1
         onInsert = nil
+        let dismissed = onDismiss
+        onDismiss = nil
+        dismissed?()
         if let keyMonitor {
             NSEvent.removeMonitor(keyMonitor)
         }
@@ -116,7 +137,13 @@ final class CommandPreviewController {
                 NSPoint(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2 + frame.height / 6)
             )
         }
-        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
+    }
+
+    /// The answer (or failure) is in: take the keyboard so Return, ⌘C and
+    /// Escape reach the preview. Never steals the app activation.
+    private func takeFocus() {
+        panel.makeKey()
         installKeyMonitor()
         // Clicking anywhere else abandons the preview — Return would
         // otherwise land in whatever the user clicked into.
@@ -154,6 +181,8 @@ final class CommandPreviewController {
         case 36, 76:
             if case .ready(let text) = model.phase {
                 let insert = onInsert
+                // Inserting is not abandoning: the model call is done.
+                onDismiss = nil
                 dismiss()
                 insert?(text)
             }
@@ -199,9 +228,16 @@ private struct CommandPreviewView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             Divider()
-            Text(hint)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if model.phase == .thinking {
+                    Button("Cancel") { model.cancel() }
+                        .controlSize(.small)
+                }
+            }
         }
         .padding(16)
         .frame(width: 520, height: 260)
@@ -232,7 +268,8 @@ private struct CommandPreviewView: View {
     private var hint: String {
         switch model.phase {
         case .ready: "↩ Insert   ⌘C Copy   ⎋ Dismiss"
-        default: "⎋ Dismiss"
+        case .thinking: "Keep typing — the answer appears here"
+        case .failed: "⎋ Dismiss"
         }
     }
 }

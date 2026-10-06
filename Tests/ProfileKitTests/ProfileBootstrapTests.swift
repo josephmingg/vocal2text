@@ -228,3 +228,45 @@ private func versionOneProfiles() -> [Profile] {
     // …but the version stays unrecorded, so the next launch tries again.
     #expect(recorded == nil)
 }
+
+/// docs/17 §11: website routes outrank app routes, so the upgrade must not
+/// hand claude.ai to AI Prompt when the user has their own browser profile.
+@Test func upgradeDoesNotOutrankTheUsersOwnBrowserProfile() {
+    var profiles = versionOneProfiles()
+    profiles.append(Profile(name: "My Browser", routes: [.app(bundleID: "com.google.Chrome")]))
+    let upgraded = ProfileBootstrap.applyingUpgrades(to: profiles, fromVersion: 1, save: { _ in })
+    let resolver = ProfileResolver(profiles: upgraded)
+    #expect(
+        resolver.resolve(frontmostBundleID: "com.google.Chrome", tabHostname: "claude.ai", manualPinProfileID: nil)
+            .profile.name == "My Browser"
+    )
+    // AI Prompt still arrives, for the desktop apps.
+    #expect(
+        resolver.resolve(frontmostBundleID: "com.anthropic.claudefordesktop", tabHostname: nil, manualPinProfileID: nil)
+            .profile.name == "AI Prompt"
+    )
+}
+
+@Test func aFreshInstallWhoseSeedWriteFailedRecordsNoVersion() {
+    struct WriteFailed: Error {}
+    var recorded: Int?
+    _ = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { [] },
+        save: { profile in if profile.name == "AI Prompt" { throw WriteFailed() } },
+        storedVersion: 0,
+        recordVersion: { recorded = $0 }
+    )
+    #expect(recorded == nil)
+}
+
+@Test func aMissingDatabaseIsNotAFreshInstall() {
+    var recorded: Int?
+    let profiles = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { throw ProfileBootstrap.StoreUnavailable() },
+        save: { _ in Issue.record("no store to write to") },
+        storedVersion: 1,
+        recordVersion: { recorded = $0 }
+    )
+    #expect(profiles.count == BuiltInProfiles.makeAll().count)
+    #expect(recorded == nil)
+}

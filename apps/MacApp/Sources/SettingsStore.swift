@@ -192,8 +192,11 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
             ?? .standard
         cleanupUsesSurroundingText =
             defaults.object(forKey: Keys.cleanupUsesSurroundingText) as? Bool ?? false
+        // Validated like the dictation key: a hand-edited or rolled-back
+        // value binding Escape or Caps Lock would be swallowed system-wide.
         commandHotkeySpec = defaults.data(forKey: Keys.commandHotkeySpec)
             .flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) }
+            .flatMap { HotkeySpec.validationError(for: $0.kind) == nil ? $0 : nil }
         wakeWordCommandsEnabled =
             defaults.object(forKey: Keys.wakeWordCommandsEnabled) as? Bool ?? false
         let hotkey = Self.loadHotkeySpec(from: defaults)

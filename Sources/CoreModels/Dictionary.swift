@@ -42,6 +42,21 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
         written.contains(where: \.isNewline) || written.count > 40
     }
 
+    /// Entries written before snippets existed that the derived rule would
+    /// now turn into whole-take snippets — "acme" → a 45-character company
+    /// name used mid-sentence for months would silently stop applying. Run
+    /// once per install: each comes back pinned to its old inline behaviour
+    /// (`snippet: false`) for the caller to save. New entries keep the
+    /// derived default (docs/17 §11).
+    public static func legacyEntriesPinnedInline(_ entries: [DictionaryEntry]) -> [DictionaryEntry] {
+        entries.compactMap { entry in
+            guard entry.snippet == nil, looksLikeSnippet(entry.written) else { return nil }
+            var pinned = entry
+            pinned.snippet = false
+            return pinned
+        }
+    }
+
     public init(
         id: UUID = UUID(),
         spoken: String,

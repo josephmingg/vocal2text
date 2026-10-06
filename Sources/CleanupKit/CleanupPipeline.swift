@@ -32,7 +32,8 @@ public struct CleanupPipeline: Sendable {
 
         let stripped = OutputValidator.strippingThinkBlocks(response.text)
         switch OutputValidator.validate(
-            output: stripped, input: request.text, language: request.language
+            output: stripped, input: request.text, language: request.language,
+            context: request.context
         ) {
         case .rejected(let rule):
             return .fellBack(reason: "validator: \(rule)")

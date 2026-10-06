@@ -18,15 +18,20 @@ public struct CaptureSession: Sendable {
     public var finish: @Sendable () async -> PCMChunk
     /// Abort; audio may still be recoverable per FR-1.6.
     public var cancel: @Sendable () async -> Void
+    /// Abort and delete the recoverable copy too — for takes "Recover" must
+    /// never offer back. nil: the platform keeps no copy, `cancel` suffices.
+    public var discard: (@Sendable () async -> Void)?
 
     public init(
         chunks: AsyncStream<PCMChunk>,
         finish: @escaping @Sendable () async -> PCMChunk,
-        cancel: @escaping @Sendable () async -> Void
+        cancel: @escaping @Sendable () async -> Void,
+        discard: (@Sendable () async -> Void)? = nil
     ) {
         self.chunks = chunks
         self.finish = finish
         self.cancel = cancel
+        self.discard = discard
     }
 }
 

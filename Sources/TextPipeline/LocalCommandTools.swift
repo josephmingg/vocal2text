@@ -128,7 +128,8 @@ public enum LocalCommandTools {
         }
         // Past 15 digits a Double no longer holds every digit; printing them
         // all would show hundreds of exact-looking but invented digits.
-        if abs(value) >= 1e15 {
+        // Below a millionth, six decimals would print a confident "0".
+        if abs(value) >= 1e15 || abs(value) < 1e-6 {
             return String(value)
         }
         var text = String(format: "%.6f", value)

@@ -723,6 +723,21 @@ private let f13 = HotkeySpec(kind: .key(keyCode: HotkeyKeyCode.f13, requiredFlag
     #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == nil)
 }
 
+/// docs/17 §11: the modifier held a while before the shortcut key (right-⌘
+/// held, then Tab) is still a shortcut, not the finishing hold.
+@Test func aSlowShortcutDuringAHandsFreeTakeDoesNotFinishIt() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(5)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(1.5)
+    #expect(driver.send(.keyDown, keyCode: cKey, flags: HotkeyFlagMask.function) == nil)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == nil)
+    driver.advance(1)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == .cancelled)
+}
+
 @Test func aShortcutDuringALockedTakeStillLetsATapFinishIt() {
     var driver = Driver(spec: .fnGlobe)
     driver.lock()

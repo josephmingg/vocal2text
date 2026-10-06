@@ -69,7 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.onPressBegan = { [weak self] in
             guard let self else { return }
             self.appState.noteHotkeyPress()
-            guard !self.appState.isHotkeyTestModeActive else { return }
+            // The command key owns the mic until it is released: brushing
+            // the dictation key must not end (or cancel) its take early.
+            guard !self.appState.isHotkeyTestModeActive, !self.appState.isCommandPressActive else {
+                return
+            }
             // During a locked take the recording is already running; the
             // ending tap's down-edge must not re-arm (its up-edge stops it).
             if !self.isLockModeActive {
@@ -77,13 +81,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         monitor.onPressEnded = { [weak self] in
-            guard let self, !self.appState.isHotkeyTestModeActive else { return }
+            guard let self, !self.appState.isHotkeyTestModeActive,
+                !self.appState.isCommandPressActive
+            else { return }
             let wasLocked = self.isLockModeActive
             self.endLockMode(stopping: false)
             self.appState.stopDictation(isLockMode: wasLocked)
         }
         monitor.onShortTap = { [weak self] in
-            guard let self, !self.appState.isHotkeyTestModeActive else { return }
+            guard let self, !self.appState.isHotkeyTestModeActive,
+                !self.appState.isCommandPressActive
+            else { return }
             // End the take now (mic off); deliver only if no second tap
             // upgrades this into the lock gesture within the window. (The
             // decision core reports a lock-finishing tap as pressEnded, so a
@@ -97,7 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         monitor.onCancel = { [weak self] in
-            guard let self, !self.appState.isHotkeyTestModeActive else { return }
+            guard let self, !self.appState.isHotkeyTestModeActive,
+                !self.appState.isCommandPressActive
+            else { return }
             if self.isLockModeActive {
                 // Escape/chord during a hands-free take discards it (FR-1.6);
                 // finishing-and-transcribing is the tap path (onPressEnded).
@@ -107,6 +117,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         monitor.onLockToggle = { [weak self] in
             guard let self, !self.appState.isHotkeyTestModeActive else { return }
+            if self.appState.isCommandPressActive {
+                // Ignored mid-command — but the decision core now believes
+                // it is in hands-free mode; tell it otherwise, or its
+                // lock-only rules would swallow the next press's release.
+                self.hotkeyMonitor?.noteLockEnded()
+                return
+            }
             if self.isLockModeActive {
                 self.endLockMode(stopping: true)
             } else {
@@ -267,10 +284,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// be re-created — a wake that lands before the window server is ready must
     /// not cost the user their hotkey until the next relaunch.
     private func rearmOrRetry() {
-        _ = commandMonitor?.rearm()
+        let commandArmed = commandMonitor?.rearm() ?? true
         guard let monitor = hotkeyMonitor else { return }
         appState.hotkeyArmed = monitor.rearm()
-        if !appState.hotkeyArmed {
+        // Either tap can lose the race with the window server on wake; the
+        // command key must not stay dead just because dictation came back.
+        if !appState.hotkeyArmed || !commandArmed {
             scheduleArmRetry()
         }
     }
@@ -280,11 +299,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if self.hotkeyMonitor?.start() == true {
-                    // Accessibility just arrived (onboarding): the command
-                    // key's tap failed for the same reason, so arm it too.
-                    _ = self.commandMonitor?.start()
-                    self.appState.hotkeyArmed = true
+                // `start()` is a no-op for a tap that is already live, so
+                // both are retried until both are armed (Accessibility just
+                // arrived at onboarding, or a wake raced the window server).
+                let dictationArmed = self.hotkeyMonitor?.start() == true
+                let commandArmed = self.commandMonitor?.start() ?? true
+                self.appState.hotkeyArmed = dictationArmed
+                if dictationArmed, commandArmed {
                     self.armRetryTimer?.invalidate()
                     self.armRetryTimer = nil
                 }

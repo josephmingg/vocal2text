@@ -6,9 +6,10 @@ import Foundation
 ///
 /// Deliberately narrow, because a false trigger swallows a dictation: only
 /// the very start of the take counts, and "Vocal" (bare or after "hey" /
-/// "ok") triggers only when followed by the recognizer's vocative comma or
-/// by a command verb — so "Vocal cords need rest", "Vocal: Sarah. Drums:
-/// Tom." and "Okay vocal warmups first" stay ordinary prose.
+/// "ok") must be followed by a command verb — after the vocative comma a
+/// wider set, with no punctuation a strict one — so "Vocal cords need
+/// rest", "Vocal, guitar and bass are mixed", "Vocal fix is in the mix" and
+/// "Okay vocal warmups first" stay ordinary prose.
 public enum VoiceCommandParser {
 
     /// The instruction after the wake word, or nil when the take does not
@@ -37,31 +38,39 @@ public enum VoiceCommandParser {
         return nil
     }
 
-    /// Verbs (and question openers) that make a bare "Vocal …" a command.
-    /// Words that read naturally as a noun after "vocal" ("list", "bullet")
-    /// and bare "what" / "how" / "when" ("Vocal what a performance", "vocal
-    /// how-to videos") are deliberately absent.
-    static let commandVerbs = [
-        "make", "rewrite", "rephrase", "shorten", "lengthen", "expand", "summarize",
-        "summarise", "fix", "correct", "translate", "change", "convert",
-        "reply", "respond", "write", "polish", "simplify", "tidy",
-        "clean up", "calculate", "compute", "what's", "whats", "what is", "how much",
-        "how many", "explain",
+    /// What may follow "Vocal" with no punctuation between ("Vocal make
+    /// this shorter"): verbs and question openers that do not read as a noun
+    /// or adjective after "vocal". "Vocal fix is in the mix", "vocal change",
+    /// "vocal polish", "vocal correct pitch", "vocal list" stay prose.
+    static let strictOpeners = [
+        "make", "rewrite", "rephrase", "shorten", "lengthen", "summarize", "summarise",
+        "translate", "convert", "simplify", "calculate", "compute", "explain",
+        "what's", "whats", "what is", "how much", "how many",
     ]
 
-    private static var verbGroup: String {
-        "(?:" + commandVerbs.map { NSRegularExpression.escapedPattern(for: $0) }
+    /// What may follow the vocative punctuation ("Vocal, fix the grammar").
+    /// A command still has to start with one of these: "Vocal, guitar and
+    /// bass are mixed" and "OK vocal, levels are fine" are a musician's
+    /// dictation, not a command — the wake word is too easy to say by
+    /// accident to treat anything after a comma as an instruction.
+    static let punctuatedOpeners = strictOpeners + [
+        "fix", "correct", "change", "polish", "tidy", "clean up", "expand", "reply",
+        "respond", "write", "draft", "format", "turn", "please", "can you", "could you",
+    ]
+
+    private static func group(_ openers: [String]) -> String {
+        "(?:" + openers.map { NSRegularExpression.escapedPattern(for: $0) }
             .joined(separator: "|") + ")(?=\\s)"
     }
 
     private static let patterns: [String] = [
-        // "Hey Vocal, …", "OK Vocal: …", "Hey Vocal summarize this" — but not
-        // "Okay vocal warmups first" or "Hey vocal coach, nice job".
-        "^\\s*(?:hey|ok|okay)[\\s,]+vocal(?:\\s*[,.:!—-]+\\s*(.+)|\\s+(" + verbGroup + ".+))$",
-        // "Vocal, …" / "Vocal! …" — the recognizer's vocative comma.
-        "^\\s*vocal\\s*[,!]\\s*(.+)$",
-        // "Vocal make this shorter", "Vocal: summarize this".
-        "^\\s*vocal(?:\\s*[:—-]\\s*|\\s+)(" + verbGroup + ".+)$",
+        // "Hey Vocal, fix …", "OK Vocal: what's …", "Hey Vocal summarize …"
+        "^\\s*(?:hey|ok|okay)[\\s,]+vocal(?:\\s*[,.:!—-]+\\s*(" + group(punctuatedOpeners)
+            + ".+)|\\s+(" + group(strictOpeners) + ".+))$",
+        // "Vocal, fix …" / "Vocal: translate …" / "Vocal! what's …"
+        "^\\s*vocal\\s*[,:!—-]\\s*(" + group(punctuatedOpeners) + ".+)$",
+        // "Vocal make this shorter"
+        "^\\s*vocal\\s+(" + group(strictOpeners) + ".+)$",
     ]
 
     private static func capitalizedFirst(_ text: String) -> String {

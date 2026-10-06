@@ -27,7 +27,10 @@ final class ProfileStore: ObservableObject {
         // docs/17: built-ins added after first run (AI Prompt, the full
         // terminal list) reach existing installs exactly once.
         self.profiles = ProfileBootstrap.loadSeedingAndUpgrading(
-            load: { try database?.profiles() ?? [] },
+            load: {
+                guard let database else { throw ProfileBootstrap.StoreUnavailable() }
+                return try database.profiles()
+            },
             save: { try database?.save($0) },
             storedVersion: UserDefaults.standard.integer(forKey: Self.builtInVersionKey),
             recordVersion: { UserDefaults.standard.set($0, forKey: Self.builtInVersionKey) }

@@ -126,3 +126,18 @@ struct SnippetTests {
         #expect(Stage4Formatter.spacedOnly("x", precedingContext: nil) == "x")
     }
 }
+
+/// docs/17 §11: entries from before snippets existed keep applying inline.
+@Test func legacyLongEntriesArePinnedInlineAndShortOnesLeftAlone() {
+    let company = DictionaryEntry(spoken: "acme", written: "Acme Corporation International Holdings Ltd")
+    let address = DictionaryEntry(spoken: "my address", written: "1 Main St\nSpringfield")
+    let short = DictionaryEntry(spoken: "cube", written: "Kubernetes")
+    let chosen = DictionaryEntry(spoken: "sig", written: "Best,\nJoseph", snippet: true)
+    let pinned = DictionaryEntry.legacyEntriesPinnedInline([company, address, short, chosen])
+    #expect(pinned.map(\.spoken) == ["acme", "my address"])
+    #expect(pinned.allSatisfy { $0.snippet == false && !$0.isSnippet })
+    let applied = DictionaryEngine.apply(
+        "we signed with acme today", entries: pinned + [short], language: .english
+    )
+    #expect(applied.text.contains("Acme Corporation International Holdings Ltd"))
+}
