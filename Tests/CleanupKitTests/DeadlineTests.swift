@@ -14,16 +14,20 @@ struct DeadlineTests {
         let started = ContinuousClock.now
         do {
             _ = try await Deadline.run(.milliseconds(100)) { () -> Int in
-                // Uncancellable: a plain blocking wait, the way a provider
-                // that never checks for cancellation behaves.
-                blockingWait(seconds: 2)
+                // Uncancellable: suspended on a callback that cancellation
+                // never reaches, the way a provider that ignores it behaves.
+                // (Awaiting, not blocking — a blocked thread would starve
+                // the timer on a two-core CI runner and test nothing real.)
+                await uncancellableWait(seconds: 10)
                 return 1
             }
             Issue.record("expected a timeout")
         } catch {
             #expect(error as? CleanupError == .timedOut)
         }
-        #expect(started.duration(to: .now) < .seconds(1))
+        // Far sooner than the 10 s the work takes; generous for a loaded
+        // two-core CI runner, where scheduling alone can take a second.
+        #expect(started.duration(to: .now) < .seconds(5))
     }
 
     @Test func passesTheWorksErrorThrough() async {
@@ -37,7 +41,12 @@ struct DeadlineTests {
     }
 }
 
-/// A synchronous wait no cancellation can interrupt.
-private func blockingWait(seconds: TimeInterval) {
-    Thread.sleep(forTimeInterval: seconds)
+/// Suspends for `seconds` on a dispatch timer; task cancellation cannot
+/// resume it early.
+private func uncancellableWait(seconds: Double) async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+            continuation.resume()
+        }
+    }
 }
