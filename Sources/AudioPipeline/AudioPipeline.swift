@@ -272,11 +272,13 @@ public enum DiskSpaceGuard {
 
 #if canImport(AVFoundation)
 import AVFoundation
+// VocalLog — used on every platform (the mid-take resampler rebuild), not
+// just the macOS device-selection path.
+import CoreModels
 #if os(macOS)
 // AudioUnitSetProperty + kAudioOutputUnitProperty_CurrentDevice for the
 // input-device selection below (docs/15 step 36 remainder).
 import AudioToolbox
-import CoreModels
 #endif
 
 /// Platform capability probe: true where AVFoundation-backed capture compiles.
