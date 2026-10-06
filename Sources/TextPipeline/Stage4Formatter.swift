@@ -71,22 +71,32 @@ public enum Stage4Formatter: Sendable {
     /// capital: "Wait... are you serious?" → "Wait. Are you serious?", never
     /// a full stop followed by a lowercase word (owner decision, docs/17 F3).
     /// Only words after a *collapsed* run are capitalized — "e.g. this" and
-    /// other single marks keep the speaker's casing.
+    /// other single marks keep the speaker's casing — and a word spelled
+    /// with an inner capital ("iPhone") keeps it. A run of dots between two
+    /// digits is a range ("pages 1..5"), not punctuation, and is kept.
     private static func collapseDuplicateTerminalPunctuation(_ text: String) -> String {
         guard
-            let regex = try? NSRegularExpression(pattern: "([.!?])[.!?]+(?:(\\s+)(\\p{Ll}))?")
+            let regex = try? NSRegularExpression(
+                pattern: "(\\d)(\\.{2,})(?=\\d)|([.!?])[.!?]+(?:(\\s+)(\\p{Ll}[\\p{L}\\p{N}]*))?"
+            )
         else { return text }
         let nsText = text as NSString
         var result = ""
         var cursor = 0
         for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
             result += nsText.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
-            result += nsText.substring(with: match.range(at: 1))
-            if match.range(at: 3).location != NSNotFound {
-                result += nsText.substring(with: match.range(at: 2))
-                result += nsText.substring(with: match.range(at: 3)).uppercased()
-            }
             cursor = match.range.location + match.range.length
+            // Leftmost match wins, so a digit range is claimed at its first
+            // digit before the dots could be read as punctuation.
+            guard match.range(at: 3).location != NSNotFound else {
+                result += nsText.substring(with: match.range)
+                continue
+            }
+            result += nsText.substring(with: match.range(at: 3))
+            if match.range(at: 5).location != NSNotFound {
+                result += nsText.substring(with: match.range(at: 4))
+                result += Stage1Normalizer.capitalizedFirstLetter(nsText.substring(with: match.range(at: 5)))
+            }
         }
         result += nsText.substring(from: cursor)
         return result

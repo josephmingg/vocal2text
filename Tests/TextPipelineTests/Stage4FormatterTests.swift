@@ -42,6 +42,19 @@ struct Stage4FormatterTests {
         }
     }
 
+    @Test func inheritedCapitalsAndDigitRangesSurviveTheCollapse() {
+        let cases: [(String, String)] = [
+            ("Wait... iPhone too?", "Wait. iPhone too?"),
+            ("Done... macOS next.", "Done. macOS next."),
+            ("Read pages 1..5 tonight.", "Read pages 1..5 tonight."),
+            ("I counted to 3... then stopped.", "I counted to 3. Then stopped."),
+        ]
+        for (input, expected) in cases {
+            let out = Stage4Formatter.format(input, language: .english, formatting: defaults, precedingContext: nil)
+            #expect(out == expected, "\(input)")
+        }
+    }
+
     @Test func singleMarksKeepTheSpeakersCasing() {
         let input = "Use a tool, e.g. this one, at 3 p.m. today."
         let out = Stage4Formatter.format(input, language: .english, formatting: defaults, precedingContext: nil)

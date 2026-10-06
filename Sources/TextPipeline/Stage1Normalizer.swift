@@ -69,6 +69,11 @@ public enum Stage1Normalizer: Sendable {
         let first = text[index]
         let upper = String(first).uppercased()
         guard upper != String(first) else { return text }
+        // "iPhone", "eBay", "macOS": a word with a capital after its first
+        // letter is a brand or identifier spelled that way on purpose —
+        // "IPhone" is a typo the pipeline would be introducing.
+        let word = text[text.index(after: index)...].prefix { $0.isLetter || $0.isNumber }
+        guard !word.contains(where: \.isUppercase) else { return text }
         return String(text[..<index]) + upper + String(text[text.index(after: index)...])
     }
 

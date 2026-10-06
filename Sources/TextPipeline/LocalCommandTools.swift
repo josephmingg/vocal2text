@@ -40,46 +40,51 @@ public enum LocalCommandTools {
 
     // MARK: - Date and time
 
+    private static let dateQuestions: Set<String> = [
+        "the date", "today's date", "today", "the date it is", "date", "the day today",
+    ]
+    private static let dayQuestions: Set<String> = [
+        "the day", "the day it is", "day is it", "what day is it", "day of the week",
+        "the day of the week", "what day of the week is it",
+    ]
+    private static let timeQuestions: Set<String> = [
+        "the time", "time is it", "time", "what time is it", "the current time",
+    ]
+
+    /// Only the plain question, optionally ending "now" / "right now" /
+    /// "today". "What time is it in Tokyo?" and "what day is it tomorrow?"
+    /// must not get the local answer — they go to the model, which can say
+    /// it does not know rather than give a confidently wrong time.
     private static func dateAnswer(
         _ text: String, now: Date, locale: Locale, timeZone: TimeZone
     ) -> String? {
+        var question = text
+        for suffix in [" right now", " now", " today"] where question.hasSuffix(suffix) {
+            question = String(question.dropLast(suffix.count))
+            break
+        }
         let formatter = DateFormatter()
         formatter.locale = locale
         formatter.timeZone = timeZone
-        switch text {
-        case "the date", "the date today", "today's date", "the day today", "today",
-            "the date it is", "date":
+        if dateQuestions.contains(question) {
             formatter.dateStyle = .full
             formatter.timeStyle = .none
-            return formatter.string(from: now)
-        case "the day", "the day it is", "day is it", "day is it today", "what day is it",
-            "what day is it today":
+        } else if dayQuestions.contains(question) {
             formatter.setLocalizedDateFormatFromTemplate("EEEE")
-            return formatter.string(from: now)
-        case "the time", "the time now", "time is it", "time", "what time is it",
-            "the current time":
+        } else if timeQuestions.contains(question) {
             formatter.dateStyle = .none
             formatter.timeStyle = .short
-            return formatter.string(from: now)
-        default:
-            break
+        } else {
+            return nil
         }
-        // "what day is it" arrives without its lead-in stripped.
-        if text.hasPrefix("what day is it") {
-            formatter.setLocalizedDateFormatFromTemplate("EEEE")
-            return formatter.string(from: now)
-        }
-        if text.hasPrefix("what time is it") {
-            formatter.dateStyle = .none
-            formatter.timeStyle = .short
-            return formatter.string(from: now)
-        }
-        return nil
+        return formatter.string(from: now)
     }
 
     // MARK: - Arithmetic
 
-    private static let number = "(-?\\d[\\d,]*(?:\\.\\d+)?)"
+    /// A plain number or one with correct thousands groups ("1,000,000") —
+    /// "1,2" is not a number, and reading it as 12 would be a wrong answer.
+    private static let number = "(-?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?)"
 
     /// "15% of 240", "15 percent of 240", "12 times 7", "12 x 7", "12 * 7",
     /// "250 divided by 4", "250 / 4", "3 plus 4", "3 + 4", "10 minus 4",
@@ -120,6 +125,11 @@ public enum LocalCommandTools {
     static func format(_ value: Double) -> String {
         if value == value.rounded(), abs(value) < 1e15 {
             return String(Int64(value))
+        }
+        // Past 15 digits a Double no longer holds every digit; printing them
+        // all would show hundreds of exact-looking but invented digits.
+        if abs(value) >= 1e15 {
+            return String(value)
         }
         var text = String(format: "%.6f", value)
         while text.hasSuffix("0") { text.removeLast() }

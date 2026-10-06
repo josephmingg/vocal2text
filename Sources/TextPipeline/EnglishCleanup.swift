@@ -55,10 +55,11 @@ public enum EnglishCleanup: Sendable {
         // because the filler was carrying the sentence start.
         result = replace(
             "(^|[.!?\\n][\"”’)]?\\s+|\\n)" + startWord + fillerTail
-                + "(?:\\s+" + startWord + fillerTail + ")*\\s+(\\p{L})",
+                + "(?:\\s+" + startWord + fillerTail + ")*\\s+(\\p{L}[\\p{L}\\p{N}]*)",
             in: result
         ) { groups in
-            groups[1] + groups[2].uppercased()
+            // The whole word, so "Um, eBay sold it" keeps "eBay".
+            groups[1] + Stage1Normalizer.capitalizedFirstLetter(groups[2])
         }
 
         // Sentence-final: "I think, um." → "I think."; "yes uh" → "yes";

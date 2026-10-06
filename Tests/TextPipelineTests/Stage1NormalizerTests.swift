@@ -32,6 +32,18 @@ struct Stage1NormalizerTests {
         #expect(out == "Hello world here.")
     }
 
+    /// docs/17 §11 round 2: "IPhone" / "EBay" are typos the pipeline made.
+    @Test(arguments: [
+        ("iPhone is great", "iPhone is great."),
+        ("um, eBay sold it", "eBay sold it."),
+        ("macOS ships today", "macOS ships today."),
+        ("iphone is great", "Iphone is great."),
+    ])
+    func innerCapitalWordsKeepTheirCasingAtSentenceStart(input: String, expected: String) {
+        let out = Stage1Normalizer.normalize(input, language: .english, formatting: defaults)
+        #expect(out == expected)
+    }
+
     @Test func emojiIsPreservedAndPeriodAppendedAfterIt() {
         let out = Stage1Normalizer.normalize("i love this 🎉", language: .english, formatting: defaults)
         #expect(out == "I love this 🎉.")
