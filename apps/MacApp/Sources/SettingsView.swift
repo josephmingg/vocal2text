@@ -59,6 +59,19 @@ private struct GeneralPane: View {
                 // Same control onboarding shows, so the two cannot drift.
                 HotkeyPickerView(appState: appState)
             }
+            Section("Dictation style") {
+                // docs/17 §5: one click, applies to every profile that uses
+                // the global style (Terminal / Code stays verbatim).
+                Picker("Style", selection: $settings.dictationStyle) {
+                    ForEach(DictationStyle.allCases) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(settings.dictationStyle.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Microphone") {
                 // docs/15 step 36 remainder: capture from a specific device
                 // instead of following the system default. Applies to the
@@ -352,6 +365,23 @@ private struct CleanupPane: View {
                     the AI, so short ones take a little longer. Turn off for maximum \
                     speed. For mistakes that keep recurring, a Dictionary entry is \
                     faster and always exact.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Use nearby text as context", isOn: $settings.cleanupUsesSurroundingText)
+                    .disabled(!settings.cleanupMasterSwitch)
+                Text(
+                    """
+                    Off by default. When on, the AI reads up to about 300 \
+                    characters around your cursor, so a dictation that continues \
+                    a sentence keeps its lowercase start, names are spelled the \
+                    way the document spells them, and the tone matches. Read at \
+                    the moment of cleanup, kept only for that one request, never \
+                    saved, never sent off this Mac, and never read from password \
+                    fields.
                     """
                 )
                 .font(.caption)

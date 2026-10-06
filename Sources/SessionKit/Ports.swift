@@ -103,10 +103,19 @@ public protocol SessionConfiguring: Sendable {
     /// context, can catch them — so a user who wants those repaired has to
     /// pay the round-trip on every take.
     var cleanupRunsOnCleanTakes: Bool { get async }
+    /// The one-click output style (docs/17 §5); profiles that ignore the
+    /// global style are unaffected.
+    var dictationStyle: DictationStyle { get async }
+    /// Opt-in (docs/17 G3.2): cleanup may read a bounded slice of the text
+    /// around the cursor for casing, name spelling and tone. Never persisted.
+    var cleanupUsesSurroundingText: Bool { get async }
     func enabledDictionaryEntries() async -> [DictionaryEntry]
 }
 
 extension SessionConfiguring {
     /// Default: keep the latency-saving skip (docs/15 step 20).
     public var cleanupRunsOnCleanTakes: Bool { false }
+    public var dictationStyle: DictationStyle { .standard }
+    /// Default OFF — the owner's choice: reading surrounding text is opt-in.
+    public var cleanupUsesSurroundingText: Bool { false }
 }

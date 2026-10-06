@@ -12,20 +12,30 @@ public struct CleanupRequest: Sendable, Hashable {
     public var stylePrompt: String
     /// Dictionary written forms + user-flagged terms (protected, docs/05 §3.4).
     public var protectedTerms: [String]
+    /// Opt-in (docs/17 G3.2): a bounded slice of the text around the cursor,
+    /// with the insertion point marked — read for casing, name spelling and
+    /// tone, never copied. Empty when the setting is off or nothing could be
+    /// read; lives only for this one request.
+    public var context: String
 
     public init(
         text: String,
         language: Language,
         profilePrompt: String = "",
         stylePrompt: String = "",
-        protectedTerms: [String] = []
+        protectedTerms: [String] = [],
+        context: String = ""
     ) {
         self.text = text
         self.language = language
         self.profilePrompt = profilePrompt
         self.stylePrompt = stylePrompt
         self.protectedTerms = protectedTerms
+        self.context = context
     }
+
+    /// Marks the insertion point inside `context`.
+    public static let cursorMarker = "⟦cursor⟧"
 }
 
 public struct CleanupResponse: Sendable, Hashable {

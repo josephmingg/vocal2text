@@ -38,6 +38,21 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(fixMisheardWords, forKey: Keys.fixMisheardWords) }
     }
 
+    /// The one-click output style (docs/17 §5) — Standard / Casual /
+    /// Lowercase / Raw. Satisfies `SessionConfiguring.dictationStyle`.
+    @Published var dictationStyle: DictationStyle {
+        didSet { Self.defaults.set(dictationStyle.rawValue, forKey: Keys.dictationStyle) }
+    }
+
+    /// Opt-in, ships OFF (owner decision, docs/17 G3.2): cleanup may read a
+    /// bounded slice of the text around the cursor. Satisfies
+    /// `SessionConfiguring.cleanupUsesSurroundingText`.
+    @Published var cleanupUsesSurroundingText: Bool {
+        didSet {
+            Self.defaults.set(cleanupUsesSurroundingText, forKey: Keys.cleanupUsesSurroundingText)
+        }
+    }
+
     /// The push-to-talk binding — a preset or a recorded custom combination
     /// (docs/13). Persisted as JSON so the shape can grow without another
     /// migration.
@@ -150,6 +165,11 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         languageMode = Self.languageMode(from: defaults.string(forKey: Keys.languageMode))
         stylePrompt = defaults.string(forKey: Keys.stylePrompt) ?? ""
         fixMisheardWords = defaults.object(forKey: Keys.fixMisheardWords) as? Bool ?? true
+        dictationStyle =
+            defaults.string(forKey: Keys.dictationStyle).flatMap(DictationStyle.init(rawValue:))
+            ?? .standard
+        cleanupUsesSurroundingText =
+            defaults.object(forKey: Keys.cleanupUsesSurroundingText) as? Bool ?? false
         let hotkey = Self.loadHotkeySpec(from: defaults)
         hotkeySpec = hotkey.spec
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
@@ -252,6 +272,8 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let languageMode = "settings.languageMode"
         static let stylePrompt = "settings.stylePrompt"
         static let fixMisheardWords = "settings.fixMisheardWords"
+        static let dictationStyle = "settings.dictationStyle"
+        static let cleanupUsesSurroundingText = "settings.cleanupUsesSurroundingText"
         static let hotkeySpec = "settings.hotkeySpec"
         /// Pre-spec key, read once by the migration and never written again.
         /// Left in the domain so downgrading to an older build still works.

@@ -85,6 +85,13 @@ struct MenuBarView: View {
                 }
             }
 
+            // docs/17 §5: Glaido-style one-click styles, a menu away.
+            Picker("Style", selection: $settings.dictationStyle) {
+                ForEach(DictationStyle.allCases) { style in
+                    Text(style.displayName).tag(style)
+                }
+            }
+
             Toggle(isOn: $settings.cleanupMasterSwitch) {
                 Text(settings.cleanupMasterSwitch ? "Cleanup: On" : "Cleanup: Off")
             }

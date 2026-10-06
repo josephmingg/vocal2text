@@ -132,6 +132,30 @@ private actor GatedFailFirstEngine: TranscriptionEngine {
     }
 }
 
+/// Records each cleanup request it receives and echoes the text back.
+private actor CapturingCleanupProvider: CleanupProvider {
+    nonisolated let id: CleanupProviderID = .openAICompatible(name: "Capturing")
+    nonisolated let leavesDevice = false
+    private(set) var requests: [CleanupRequest] = []
+
+    func isAvailable() async -> Bool { true }
+    func prewarm() async {}
+
+    func cleanup(_ request: CleanupRequest, timeout: Duration) async throws -> CleanupResponse {
+        requests.append(request)
+        return CleanupResponse(text: request.text, modelName: "capturing")
+    }
+}
+
+/// Counts reads of the surrounding text, so a test can prove the opt-in gate.
+private actor ReadCounter {
+    private(set) var count = 0
+    func read() -> String? {
+        count += 1
+        return "We met Siobhan yesterday" + CleanupRequest.cursorMarker
+    }
+}
+
 private let fixedNow = Date(timeIntervalSince1970: 1_723_000_000)
 
 /// One-shot latch for scripting suspension points (e.g. a profile resolution
@@ -942,6 +966,92 @@ struct DictationSessionTests {
 
         let delivered = await harness.deliverer.deliveredTexts
         #expect(delivered == ["Please sign off on the budget."])
+    }
+
+    // MARK: - docs/17 §5 styles and G3.2 context
+
+    @Test func rawStyleDeliversTheRecognizerTextAndSkipsCleanup() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "um so the the plan works", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
+            config: StaticConfig(masterSwitch: true, style: .raw),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        // Verbatim: no filler removal, no capital, no full stop, no model.
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["um so the the plan works"])
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 0)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.cleanup == .skipped(reason: .rawStyle))
+    }
+
+    @Test func lowercaseStyleRestylesTheDeliveredText() async {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "Sounds good to me", detectedLanguage: .english),
+            config: StaticConfig(style: .lowercase)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["sounds good to me"])
+    }
+
+    @Test func profilesThatIgnoreTheGlobalStyleAreUntouched() async {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "git status", detectedLanguage: .english),
+            profile: Profile(name: "Terminal", formatting: .verbatim, ignoresGlobalStyle: true),
+            config: StaticConfig(style: .lowercase)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["git status"])
+    }
+
+    @Test(arguments: [false, true])
+    func surroundingTextIsReadOnlyWhenTheUserOptedIn(optedIn: Bool) async throws {
+        let provider = CapturingCleanupProvider()
+        let counter = ReadCounter()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                log: CaptureLog()
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "and she said yes", detectedLanguage: .english)
+            ),
+            cleanup: CleanupPipeline(provider: provider),
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(masterSwitch: true, usesSurroundingText: optedIn),
+            profileResolution: {
+                (Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."), .app, "com.example.notes")
+            },
+            now: { fixedNow }
+        )
+        dependencies.readSurroundingContext = { await counter.read() }
+        let session = DictationSession(dependencies: dependencies)
+
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask {
+            await pipeline.value
+        }
+
+        let reads = await counter.count
+        #expect(reads == (optedIn ? 1 : 0))
+        let requests = await provider.requests
+        let request = try #require(requests.first)
+        #expect(request.context == (optedIn ? "We met Siobhan yesterday" + CleanupRequest.cursorMarker : ""))
     }
 
     /// Regression: profile resolution must never gate the microphone. On macOS

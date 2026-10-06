@@ -34,6 +34,13 @@ public enum OutputValidator {
         if loweredForTags.contains("<think") || loweredForTags.contains("<reasoning") {
             return .rejected(rule: "meta-text")
         }
+        // The opt-in context fence leaking into the output means the model
+        // repeated the document instead of cleaning the dictation.
+        if loweredForTags.contains("<context>") || loweredForTags.contains("</context>")
+            || cleaned.contains(CleanupRequest.cursorMarker)
+        {
+            return .rejected(rule: "meta-text")
+        }
 
         // A marker is only evidence of a preamble when the model *introduced*
         // it. "Sure, sounds good." and 「好的，我明天过去。」 are ordinary things

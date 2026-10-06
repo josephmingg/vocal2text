@@ -349,6 +349,17 @@ final class AppState: ObservableObject {
         dependencies.readClipboard = {
             await MainActor.run { NSPasteboard.general.string(forType: .string) }
         }
+        // docs/17 G3.2, opt-in (Settings → Cleanup): the text around the
+        // caret for this one cleanup request. The session asks only when
+        // cleanup will run and the setting is on; secure fields read as nil.
+        dependencies.readSurroundingContext = {
+            await MainActor.run { () -> String? in
+                guard let slice = AXInserter.surroundingText() else { return nil }
+                let joined = slice.before + CleanupRequest.cursorMarker + slice.after
+                return joined.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == CleanupRequest.cursorMarker ? nil : joined
+            }
+        }
 
         self.settings = settings
         self.database = database

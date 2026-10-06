@@ -209,9 +209,9 @@ private func makeProfile(
     #expect(resolution.routeKind == .app)
 }
 
-@Test func builtInsShipFiveProfilesWithOneDefaultOwner() throws {
+@Test func builtInsShipSixProfilesWithOneDefaultOwner() throws {
     let all = BuiltInProfiles.makeAll()
-    #expect(all.count == 5)
+    #expect(all.count == 6)
 
     let owners = all.filter { $0.routes.contains(.defaultRoute) }
     #expect(owners.count == 1)

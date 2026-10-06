@@ -144,6 +144,11 @@ public actor DictationSession {
         /// tag; nil expands it to nothing. Set after init, like the other
         /// optional platform hooks below.
         public var readClipboard: (@Sendable () async -> String?)? = nil
+        /// Reads a bounded slice of the text around the insertion point, with
+        /// `CleanupRequest.cursorMarker` at the caret (docs/17 G3.2). Called
+        /// only when cleanup is about to run *and* the user opted in; nil
+        /// results or a nil hook mean no context. Never persisted.
+        public var readSurroundingContext: (@Sendable () async -> String?)? = nil
 
         /// Fixed-pipeline form: every take uses the same provider. Used by
         /// tests and by platforms with a single built-in provider; the Mac app
@@ -767,7 +772,17 @@ public actor DictationSession {
         let transcriptionSeconds = Self.seconds(transcriptionStart.duration(to: clock.now))
 
         let language = result.detectedLanguage
-        let formatting = profile.formatting
+        // docs/17 §5: the one-click style. Profiles that ignore the global
+        // style (Terminal / Code) are untouched; Raw runs the pipeline
+        // verbatim — artifacts and dictionary only — and skips cleanup.
+        let style: DictationStyle =
+            profile.ignoresGlobalStyle ? .standard : await deps.config.dictationStyle
+        var formatting = profile.formatting
+        if style == .raw {
+            var raw = FormattingOptions.verbatim
+            raw.smartSpacing = profile.formatting.smartSpacing
+            formatting = raw
+        }
 
         let dictionaryStart = clock.now
         let normalized = Stage1Normalizer.normalize(
@@ -815,6 +830,8 @@ public actor DictationSession {
         } else if snippet != nil {
             // The user wrote this text themselves; a model may only damage it.
             cleanupOutcome = .skipped(reason: .notNeeded)
+        } else if style == .raw {
+            cleanupOutcome = .skipped(reason: .rawStyle)
         } else if !Self.cleanupAllowed(for: language, profile: profile) {
             cleanupOutcome = .skipped(reason: .languageOptOut)
         } else if await cleanupHasNothingToDo(stage2Text, language: language, profile: profile) {
@@ -841,12 +858,18 @@ public actor DictationSession {
             let timeout = Self.cleanupBudget(
                 base: await deps.config.cleanupTimeout, characterCount: stage2Text.count
             )
+            var surrounding = ""
+            if await deps.config.cleanupUsesSurroundingText,
+                let read = deps.readSurroundingContext {
+                surrounding = await read() ?? ""
+            }
             let request = CleanupRequest(
                 text: stage2Text,
                 language: language,
                 profilePrompt: profile.promptText,
                 stylePrompt: stylePrompt,
-                protectedTerms: writtenForms
+                protectedTerms: writtenForms,
+                context: surrounding
             )
             let cleanupStart = clock.now
             let outcome = await pipeline.run(request, timeout: timeout)
@@ -890,11 +913,16 @@ public actor DictationSession {
         if snippet != nil {
             formatted = Stage4Formatter.spacedOnly(deliveryText, precedingContext: precedingContext)
         } else {
-            formatted = Stage4Formatter.format(
-                deliveryText,
+            formatted = StyleFormatter.apply(
+                Stage4Formatter.format(
+                    deliveryText,
+                    language: language,
+                    formatting: formatting,
+                    precedingContext: precedingContext
+                ),
+                style: style,
                 language: language,
-                formatting: formatting,
-                precedingContext: precedingContext
+                protectedTerms: writtenForms
             )
         }
 

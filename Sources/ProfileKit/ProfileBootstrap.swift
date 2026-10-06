@@ -38,6 +38,92 @@ public enum ProfileBootstrap: Sendable {
         return seeded
     }
 
+    /// `loadOrSeed` plus the built-in upgrades, for the apps' launch path.
+    /// Upgrades run only against a store that actually loaded — an
+    /// unreadable store gets in-memory built-ins and no writes (the same
+    /// posture as `loadOrSeed`), and its version stays unrecorded so the
+    /// upgrade retries on a launch where the store reads.
+    public static func loadSeedingAndUpgrading(
+        load: () throws -> [Profile],
+        save: (Profile) throws -> Void,
+        storedVersion: Int,
+        recordVersion: (Int) -> Void
+    ) -> [Profile] {
+        let stored: [Profile]
+        do {
+            stored = try load()
+        } catch {
+            return BuiltInProfiles.makeAll()
+        }
+        var profiles = stored
+        if profiles.isEmpty {
+            profiles = BuiltInProfiles.makeAll()
+            for profile in profiles {
+                try? save(profile)
+            }
+        }
+        profiles = applyingUpgrades(to: profiles, fromVersion: storedVersion, save: save)
+        recordVersion(builtInVersion)
+        return profiles
+    }
+
+    // MARK: - Built-in upgrades
+
+    /// Version of the built-in profile set. Seeding happens once, so a
+    /// built-in added or extended later never reaches an existing install on
+    /// its own; `applyingUpgrades` carries each version's additions there.
+    ///
+    /// - 1: the original five starter profiles.
+    /// - 2: every terminal emulator routes to Terminal / Code, and the AI
+    ///   Prompt profile exists (docs/17 §4.4 #7, §6 idea 5).
+    public static let builtInVersion = 2
+
+    /// Applies the built-in changes made after `version`, saving each
+    /// changed or added profile, and returns the updated set. Idempotent and
+    /// conservative: it adds only what no profile already covers, so it never
+    /// steals a route the user gave another profile, never re-adds a profile
+    /// the user already has, and never edits anything else. A failed save
+    /// keeps the change in memory for this launch.
+    public static func applyingUpgrades(
+        to profiles: [Profile],
+        fromVersion version: Int,
+        save: (Profile) throws -> Void
+    ) -> [Profile] {
+        guard version < builtInVersion else { return profiles }
+        var updated = profiles
+        var changed: [UUID] = []
+
+        if version < 2 {
+            let routed = Set(updated.flatMap(\.routes))
+            if let terminalIndex = updated.firstIndex(where: {
+                $0.routes.contains(.app(bundleID: "com.apple.Terminal"))
+            }) {
+                let missing = BuiltInProfiles.terminalBundleIDs
+                    .map { Route.app(bundleID: $0) }
+                    .filter { !routed.contains($0) }
+                if !missing.isEmpty {
+                    updated[terminalIndex].routes.append(contentsOf: missing)
+                    changed.append(updated[terminalIndex].id)
+                }
+            }
+            let hasAIPrompt =
+                updated.contains { $0.name == BuiltInProfiles.aiPromptName }
+                || BuiltInProfiles.aiPromptRoutes.contains { routed.contains($0) }
+            if !hasAIPrompt {
+                let profile = BuiltInProfiles.aiPrompt()
+                updated.append(profile)
+                changed.append(profile.id)
+            }
+        }
+
+        for id in changed {
+            if let profile = updated.first(where: { $0.id == id }) {
+                try? save(profile)
+            }
+        }
+        return updated
+    }
+
     /// Moves the `.defaultRoute` to the profile with `id`, removing it from
     /// every current owner, and returns the full updated set — or nil when
     /// `id` is unknown or already the owner (nothing to change). Keeps the

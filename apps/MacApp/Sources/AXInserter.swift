@@ -130,6 +130,48 @@ extension AXInserter {
     }
 }
 
+extension AXInserter {
+    /// The text around the caret for opt-in context-aware cleanup (docs/17
+    /// G3.2): up to `before` UTF-16 units before the selection and `after`
+    /// beyond it. nil for secure fields, while secure input is on, or where
+    /// AX exposes no value and selection. The caller holds it for one cleanup
+    /// request; nothing here stores it.
+    static func surroundingText(before: Int = 240, after: Int = 80) -> (before: String, after: String)? {
+        guard !SecureInputProbe.isSecureInputActive(), let element = focusedElement() else {
+            return nil
+        }
+        _ = AXUIElementSetMessagingTimeout(element, 0.25)
+        var subroleRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+            == .success,
+            let subrole = subroleRef as? String,
+            subrole == (kAXSecureTextFieldSubrole as String) {
+            return nil
+        }
+        guard let value = readableValue(of: element) else { return nil }
+        var rangeRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, &rangeRef
+            ) == .success,
+            let rangeRef,
+            CFGetTypeID(rangeRef) == AXValueGetTypeID()
+        else { return nil }
+        var cfRange = CFRange()
+        guard AXValueGetValue(unsafeBitCast(rangeRef, to: AXValue.self), .cfRange, &cfRange)
+        else { return nil }
+        let haystack = value as NSString
+        let selectionStart = min(max(0, cfRange.location), haystack.length)
+        let selectionEnd = min(max(selectionStart, cfRange.location + cfRange.length), haystack.length)
+        let start = max(0, selectionStart - before)
+        let end = min(haystack.length, selectionEnd + after)
+        return (
+            haystack.substring(with: NSRange(location: start, length: selectionStart - start)),
+            haystack.substring(with: NSRange(location: selectionEnd, length: end - selectionEnd))
+        )
+    }
+}
+
 /// The undo half of docs/15 step 28: the safety net that makes aggressive
 /// cleanup acceptable. Selects the last occurrence of the delivered text in
 /// the focused element via the Accessibility API and replaces it — with the

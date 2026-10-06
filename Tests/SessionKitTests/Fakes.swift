@@ -201,9 +201,19 @@ struct StaticConfig: SessionConfiguring {
     var timeout = Duration.seconds(5)
     var entries: [DictionaryEntry] = []
     var runsOnCleanTakes = false
+    var style = DictationStyle.standard
+    var usesSurroundingText = false
 
     var cleanupRunsOnCleanTakes: Bool {
         get async { runsOnCleanTakes }
+    }
+
+    var dictationStyle: DictationStyle {
+        get async { style }
+    }
+
+    var cleanupUsesSurroundingText: Bool {
+        get async { usesSurroundingText }
     }
 
     var cleanupMasterSwitch: Bool {

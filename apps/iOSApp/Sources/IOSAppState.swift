@@ -303,9 +303,11 @@ final class IOSAppState: ObservableObject {
     /// profile IDs stay stable across launches, matching the Mac app. iOS has
     /// no profile editor yet — the seeded set is effectively read-only here.
     private static func loadProfiles(database: DatabaseStore?) -> [Profile] {
-        ProfileBootstrap.loadOrSeed(
+        ProfileBootstrap.loadSeedingAndUpgrading(
             load: { try database?.profiles() ?? [] },
-            save: { try database?.save($0) }
+            save: { try database?.save($0) },
+            storedVersion: UserDefaults.standard.integer(forKey: "profiles.builtInVersion"),
+            recordVersion: { UserDefaults.standard.set($0, forKey: "profiles.builtInVersion") }
         )
     }
 
