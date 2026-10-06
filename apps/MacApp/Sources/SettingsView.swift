@@ -509,7 +509,14 @@ private struct DictionaryPane: View {
                                 .foregroundStyle(.secondary)
                             Text(entry.written)
                                 .bold()
+                                .lineLimit(2)
                             Spacer()
+                            // docs/17 F5: a snippet fires only when it is the
+                            // whole dictation; a word fix applies anywhere.
+                            Toggle("Snippet", isOn: snippetBinding(for: entry))
+                                .toggleStyle(.checkbox)
+                                .controlSize(.small)
+                                .help("Snippet: expands only when you say just this phrase. Tags: {date} {time} {clipboard}")
                             Button {
                                 remove(entry)
                             } label: {
@@ -542,6 +549,10 @@ private struct DictionaryPane: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                Text("Snippets expand only when the phrase is the whole dictation, so \"my address\" never fires inside \"I changed my address\". Multi-line or long written forms are snippets by default. Tags: {date}, {time}, {clipboard}.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let errorText {
                     Text(errorText)
                         .font(.caption)
@@ -585,6 +596,23 @@ private struct DictionaryPane: View {
         } catch {
             errorText = "Could not save entry: \(error.localizedDescription)"
         }
+    }
+
+    private func snippetBinding(for entry: DictionaryEntry) -> Binding<Bool> {
+        Binding(
+            get: { entry.isSnippet },
+            set: { isOn in
+                guard let database else { return }
+                var updated = entry
+                updated.snippet = isOn
+                do {
+                    try database.save(updated)
+                    reload()
+                } catch {
+                    errorText = "Could not save entry: \(error.localizedDescription)"
+                }
+            }
+        )
     }
 
     private func remove(_ entry: DictionaryEntry) {

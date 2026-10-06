@@ -852,6 +852,48 @@ struct DictationSessionTests {
         #expect(terms == ["Claude Code"])
     }
 
+    /// docs/17 F5: a whole-take snippet delivers its written form verbatim —
+    /// no cleanup call, no stage-4 reshaping — and never biases the engine.
+    @Test func wholeTakeSnippetDeliversVerbatimAndSkipsCleanup() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let snippet = DictionaryEntry(spoken: "sign off", written: "Best,\nJoseph")
+        let fix = DictionaryEntry(spoken: "cloud code", written: "Claude Code")
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "Sign off.", detectedLanguage: .english),
+            profile: Profile(name: "Email", cleanupEnabled: true, promptText: "Tidy this."),
+            config: StaticConfig(masterSwitch: true, entries: [snippet, fix]),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Best,\nJoseph"])
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 0)
+        let terms = await harness.engine.lastDictionaryTerms
+        #expect(terms == ["Claude Code"])
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .notNeeded))
+    }
+
+    @Test func snippetPhraseInsideASentenceStaysProse() async {
+        let snippet = DictionaryEntry(spoken: "sign off", written: "Best,\nJoseph")
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "please sign off on the budget", detectedLanguage: .english
+            ),
+            config: StaticConfig(entries: [snippet])
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Please sign off on the budget."])
+    }
+
     /// Regression: profile resolution must never gate the microphone. On macOS
     /// it shells out to osascript for the frontmost browser's tab URL (up to
     /// 1.5 s), and every millisecond before capture opens is speech the user

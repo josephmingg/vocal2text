@@ -36,10 +36,11 @@ public enum DictionaryEngine {
     ) -> (text: String, appliedEntryIDs: [UUID]) {
         guard !text.isEmpty else { return (text, []) }
 
+        // Snippets never match inside a sentence (docs/17 F5): "I changed my
+        // address" must not expand the "my address" snippet. They fire only
+        // through `snippet(matching:)`, when they are the whole take.
         let eligible = entries.filter { entry in
-            entry.isEnabled
-                && !entry.spoken.isEmpty
-                && (entry.languages?.contains(language) ?? true)
+            participates(entry, language: language) && !entry.isSnippet
         }
         guard !eligible.isEmpty else { return (text, []) }
 
@@ -87,7 +88,45 @@ public enum DictionaryEngine {
         return (result, accepted.map { $0.entryID })
     }
 
+    // MARK: - Snippets
+
+    /// The snippet whose spoken form *is* the whole transcript, ignoring case,
+    /// surrounding punctuation and whitespace runs ("My address." matches the
+    /// "my address" snippet; "I changed my address" does not). Glaido's rule,
+    /// and the only one that cannot fire inside ordinary prose. The longest
+    /// spoken form wins a tie between equal normalizations.
+    public static func snippet(
+        matching text: String,
+        entries: [DictionaryEntry],
+        language: Language
+    ) -> DictionaryEntry? {
+        let utterance = snippetKey(text)
+        guard !utterance.isEmpty else { return nil }
+        return entries
+            .filter { participates($0, language: language) && $0.isSnippet }
+            .filter { snippetKey($0.spoken) == utterance }
+            .max { $0.spoken.count < $1.spoken.count }
+    }
+
+    /// Lowercased, punctuation stripped from both ends, internal whitespace
+    /// collapsed to single spaces.
+    static func snippetKey(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(
+            in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        )
+        return trimmed
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
+
     // MARK: - Internals
+
+    private static func participates(_ entry: DictionaryEntry, language: Language) -> Bool {
+        entry.isEnabled
+            && !entry.spoken.isEmpty
+            && (entry.languages?.contains(language) ?? true)
+    }
 
     private struct Replacement {
         let entryID: UUID

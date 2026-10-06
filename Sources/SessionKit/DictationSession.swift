@@ -139,6 +139,11 @@ public actor DictationSession {
         /// Wall-clock source for `TranscriptRecord.createdAt`; injectable so
         /// tests pin timestamps.
         public var now: @Sendable () -> Date
+        /// Reads the pasteboard's plain text for a snippet's `{clipboard}` tag
+        /// (docs/17 F5). Called only when the matched snippet carries that
+        /// tag; nil expands it to nothing. Set after init, like the other
+        /// optional platform hooks below.
+        public var readClipboard: (@Sendable () async -> String?)? = nil
 
         /// Fixed-pipeline form: every take uses the same provider. Used by
         /// tests and by platforms with a single built-in provider; the Mac app
@@ -707,7 +712,9 @@ public actor DictationSession {
             languageMode = await deps.config.globalLanguageMode
         }
         let entries = await deps.config.enabledDictionaryEntries()
-        let writtenForms = entries.map(\.written)
+        // Vocabulary only: a snippet's expansion is neither a word for the
+        // recognizer to listen for nor a term cleanup must protect.
+        let writtenForms = entries.vocabularyTerms
 
         // docs/15 step 16: the VAD gate runs inside the transcription timing
         // window — it is part of release-to-text, not free. The engine only
@@ -761,8 +768,23 @@ public actor DictationSession {
         let normalized = Stage1Normalizer.normalize(
             result.text, language: language, formatting: formatting
         )
-        let stage2Text = DictionaryEngine.apply(normalized, entries: entries, language: language)
-            .text
+        // docs/17 F5: a snippet fires only when it is the whole take, and
+        // then its written form *is* the text — tags expanded, no cleanup,
+        // no reformatting beyond a separating space.
+        let snippet = DictionaryEngine.snippet(
+            matching: normalized, entries: entries, language: language
+        )
+        let stage2Text: String
+        if let snippet {
+            var clipboard: String?
+            if SnippetTemplate.needsClipboard(snippet.written), let read = deps.readClipboard {
+                clipboard = await read()
+            }
+            stage2Text = SnippetTemplate.expand(snippet.written, clipboard: clipboard, now: deps.now())
+        } else {
+            stage2Text = DictionaryEngine.apply(normalized, entries: entries, language: language)
+                .text
+        }
         let dictionarySeconds = Self.seconds(dictionaryStart.duration(to: clock.now))
 
         // Nothing left to say: the transcript was only noise tags, a
@@ -785,6 +807,9 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .masterSwitchOff)
         } else if !profile.cleanupEnabled {
             cleanupOutcome = .skipped(reason: .profileDisabled)
+        } else if snippet != nil {
+            // The user wrote this text themselves; a model may only damage it.
+            cleanupOutcome = .skipped(reason: .notNeeded)
         } else if !Self.cleanupAllowed(for: language, profile: profile) {
             cleanupOutcome = .skipped(reason: .languageOptOut)
         } else if await cleanupHasNothingToDo(stage2Text, language: language, profile: profile) {
@@ -856,12 +881,17 @@ public actor DictationSession {
                 precedingContext = last.suffix
             }
         }
-        let formatted = Stage4Formatter.format(
-            deliveryText,
-            language: language,
-            formatting: formatting,
-            precedingContext: precedingContext
-        )
+        let formatted: String
+        if snippet != nil {
+            formatted = Stage4Formatter.spacedOnly(deliveryText, precedingContext: precedingContext)
+        } else {
+            formatted = Stage4Formatter.format(
+                deliveryText,
+                language: language,
+                formatting: formatting,
+                precedingContext: precedingContext
+            )
+        }
 
         transitionIfNoCaptureActive(.delivering)
         let context = DeliveryContext(

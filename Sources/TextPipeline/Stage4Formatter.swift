@@ -70,6 +70,14 @@ public enum Stage4Formatter: Sendable {
         PipelineRegex.replacing(pattern: "([.!?])[.!?]+", in: text, with: "$1")
     }
 
+    /// Spacing only, never casing: a snippet's written form is authoritative
+    /// ("joseph@example.com" must not become "Joseph@example.com" after a
+    /// full stop), but it still needs a separating space after a word.
+    public static func spacedOnly(_ text: String, precedingContext: String?) -> String {
+        guard !text.isEmpty, let context = precedingContext else { return text }
+        return smartSpaced(text, against: context, capitalize: false)
+    }
+
     // Capitalization keys off the last non-whitespace character so "Done. "
     // (space already present) still starts a new sentence; the space prefix keys
     // off the literal last character so an existing space is never doubled.

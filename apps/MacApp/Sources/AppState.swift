@@ -179,7 +179,7 @@ final class AppState: ObservableObject {
         // silence delivers nothing instead of hallucinated text, and the
         // engine only decodes the speech envelope.
         let speechDetector = SileroVoiceActivityDetector()
-        let dependencies = DictationSession.Dependencies(
+        var dependencies = DictationSession.Dependencies(
             audio: MicrophoneCaptureAdapter(microphone: microphone),
             engine: routedEngine,
             // Built per take, only when the session has already decided stage 3
@@ -291,7 +291,7 @@ final class AppState: ObservableObject {
                 )
                 // Shaped like the take's real request so the server's prompt
                 // cache holds the reusable system-prompt prefix, not a "hi".
-                let terms = await settings.enabledDictionaryEntries().map(\.written)
+                let terms = await settings.enabledDictionaryEntries().vocabularyTerms
                 await provider.prewarm(
                     for: CleanupRequest(
                         text: "",
@@ -336,6 +336,13 @@ final class AppState: ObservableObject {
                 )
             }
         )
+
+        // docs/17 F5: a snippet's {clipboard} tag. Read only for a snippet
+        // that carries the tag; Vocal's own transient transcript writes are
+        // restored before a take settles, so this is the user's clipboard.
+        dependencies.readClipboard = {
+            await MainActor.run { NSPasteboard.general.string(forType: .string) }
+        }
 
         self.settings = settings
         self.database = database
@@ -769,7 +776,7 @@ final class AppState: ObservableObject {
                     let clock = ContinuousClock()
                     let start = clock.now
                     let result = try await engine.transcribe(
-                        decoded.audio, languageMode: mode, dictionaryTerms: entries.map(\.written)
+                        decoded.audio, languageMode: mode, dictionaryTerms: entries.vocabularyTerms
                     )
                     let elapsed = start.duration(to: clock.now)
                     let language = result.detectedLanguage

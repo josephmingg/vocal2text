@@ -297,3 +297,32 @@ struct Stage1NormalizerTests {
     )
     #expect(result == input)
 }
+
+// MARK: - docs/17 F1: ASCII runs are content, not decoding loops
+
+@Test(arguments: [
+    ("The code is 100000000.", FormattingOptions()),
+    ("PIN 1212121212", FormattingOptions.verbatim),
+    ("a ======== b", FormattingOptions.verbatim),
+    ("-------- divider", FormattingOptions.verbatim),
+    ("Call 0800 000000000 now.", FormattingOptions()),
+    ("Version 1.1.1.1.1 shipped.", FormattingOptions()),
+    ("hahahahaha that's funny", FormattingOptions(autoPunctuation: false)),
+])
+func asciiRunsSurviveTheUnspacedLoopPass(input: String, formatting: FormattingOptions) {
+    #expect(Stage1Normalizer.normalize(input, language: .english, formatting: formatting) == input)
+}
+
+@Test func unspacedHanLoopStillCollapses() {
+    let out = Stage1Normalizer.normalize(
+        "我们我们我们我们我们", language: .chinese, formatting: .verbatim
+    )
+    #expect(out == "我们")
+}
+
+@Test func unspacedHanLoopNextToDigitsCollapsesOnlyTheLoop() {
+    let out = Stage1Normalizer.normalize(
+        "11111111 谢谢谢谢谢谢谢谢", language: .chinese, formatting: .verbatim
+    )
+    #expect(out == "11111111 谢谢")
+}

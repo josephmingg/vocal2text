@@ -103,4 +103,23 @@ struct SpokenNumberFormatterTests {
         )
         #expect(out == "meet at 3:30 pm")
     }
+
+    // MARK: - docs/17 F4: a number that heads a hyphenated compound is a count
+
+    @Test(
+        "counts heading a compound adjective are not years",
+        arguments: [
+            "I have twenty fifteen-minute slots left",
+            "we sold nineteen fifty-dollar tickets",
+            "there are twenty twenty-one-year-olds here",
+        ]
+    )
+    func compoundCountsAreNotYears(input: String) {
+        #expect(SpokenNumberFormatter.apply(input) == input)
+    }
+
+    @Test func hyphenatedYearsStillConvert() {
+        #expect(SpokenNumberFormatter.apply("back in nineteen fifty-five") == "back in 1955")
+        #expect(SpokenNumberFormatter.apply("in twenty twenty-one we moved") == "in 2021 we moved")
+    }
 }

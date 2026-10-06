@@ -74,6 +74,16 @@ struct EnglishCleanupTests {
         "The food was so so.",
         "He he, that's funny.",
         "My my, look at that.",
+        // docs/17 F2: a phrasal verb meeting a prepositional phrase, and the
+        // pseudo-cleft "what X was was Y", double legitimately.
+        "Check in in five minutes.",
+        "Please log in in the morning.",
+        "Turn it on on Monday.",
+        "Look at at least three options.",
+        "What it was was amazing.",
+        "What they are are excuses.",
+        "Take vitamin A a day.",
+        "Check in, in five minutes.",
     ])
     func grammaticalDoublesSurvive(input: String) {
         #expect(normalize(input) == input)

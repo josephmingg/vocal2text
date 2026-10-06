@@ -128,7 +128,7 @@ final class IOSAppState: ObservableObject {
             prewarmCleanup = { await provider.prewarm() }
         }
         #endif
-        let dependencies = DictationSession.Dependencies(
+        var dependencies = DictationSession.Dependencies(
             audio: IOSCaptureAdapter(microphone: MicrophoneCapture()),
             engine: engine,
             cleanup: cleanup,
@@ -162,6 +162,11 @@ final class IOSAppState: ObservableObject {
                 )
             }
         )
+
+        // docs/17 F5: a snippet's {clipboard} tag, read only when present.
+        dependencies.readClipboard = {
+            await MainActor.run { UIPasteboard.general.string }
+        }
 
         self.database = database
         self.profiles = profiles

@@ -111,7 +111,7 @@ public enum SpokenNumberFormatter {
             // "twenty ten" … "twenty nineteen", "twenty twenty one" …
             // "twenty twenty nine": the third word makes these unambiguous.
             pattern:
-                "\\btwenty (\(teenPattern)|twenty[ -](?:\(unitPattern)))\\b",
+                "\\btwenty (\(teenPattern)|twenty[ -](?:\(unitPattern)))\\b(?!-\\p{L})",
             in: text
         ) { groups in
             guard let part = groups[1].flatMap(smallNumber) else { return nil }
@@ -131,7 +131,7 @@ public enum SpokenNumberFormatter {
         result = replacing(
             // "nineteen ninety five" → 1995; the two-part shape is the anchor.
             pattern:
-                "\\bnineteen ((?:\(tenPattern))(?:[ -](?:\(unitPattern)))?)\\b",
+                "\\bnineteen ((?:\(tenPattern))(?:[ -](?:\(unitPattern)))?)\\b(?!-\\p{L})",
             in: result
         ) { groups in
             guard let part = groups[1].flatMap(smallNumber) else { return nil }

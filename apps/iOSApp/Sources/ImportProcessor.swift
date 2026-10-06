@@ -147,7 +147,7 @@ final class ImportProcessor: ObservableObject {
         let result = try await appState.transcriptionEngine.transcribe(
             decoded.audio,
             languageMode: languageMode,
-            dictionaryTerms: entries.map(\.written)
+            dictionaryTerms: entries.vocabularyTerms
         )
         try Task.checkCancellation()
 

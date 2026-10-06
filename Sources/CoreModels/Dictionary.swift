@@ -23,6 +23,24 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
     public var createdAt: Date
     public var lastAppliedAt: Date?
     public var applyCount: Int
+    /// Explicit snippet choice; nil derives it from the written form (see
+    /// `isSnippet`). Optional so documents written before it existed decode
+    /// unchanged and older builds simply ignore the key.
+    public var snippet: Bool?
+
+    /// A snippet is a voice shortcut ("my address" → a multi-line address),
+    /// not a spelling fix: it fires only when it is the *whole* dictation
+    /// (docs/17 F5), its written form is never fed to the recognizer as a
+    /// bias term, and cleanup never sees it as a protected term. Unset, a
+    /// multi-line or long (> 40 characters) written form makes an entry a
+    /// snippet — the same line the recognizer's bias filter already drew.
+    public var isSnippet: Bool {
+        snippet ?? Self.looksLikeSnippet(written)
+    }
+
+    public static func looksLikeSnippet(_ written: String) -> Bool {
+        written.contains(where: \.isNewline) || written.count > 40
+    }
 
     public init(
         id: UUID = UUID(),
@@ -33,7 +51,8 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
         isEnabled: Bool = true,
         createdAt: Date = .init(timeIntervalSince1970: 0),
         lastAppliedAt: Date? = nil,
-        applyCount: Int = 0
+        applyCount: Int = 0,
+        snippet: Bool? = nil
     ) {
         self.id = id
         self.spoken = spoken
@@ -49,6 +68,15 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
         self.createdAt = createdAt
         self.lastAppliedAt = lastAppliedAt
         self.applyCount = applyCount
+        self.snippet = snippet
+    }
+}
+
+extension Array where Element == DictionaryEntry {
+    /// Written forms that are vocabulary — recognizer bias terms and
+    /// cleanup's protected terms. Snippets are expansions, not words.
+    public var vocabularyTerms: [String] {
+        filter { !$0.isSnippet }.map(\.written)
     }
 }
 
