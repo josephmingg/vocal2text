@@ -53,6 +53,11 @@ final class CommandPreviewController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
+        // Titled only for the rounded corners and shadow: a transient
+        // preview has no business showing close/minimise/zoom buttons.
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(button)?.isHidden = true
+        }
         panel.contentView = NSHostingView(rootView: CommandPreviewView(model: model))
         self.model = model
         self.panel = panel

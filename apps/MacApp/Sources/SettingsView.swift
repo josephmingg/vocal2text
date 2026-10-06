@@ -62,6 +62,19 @@ private struct GeneralPane: View {
                 // Same control onboarding shows, so the two cannot drift.
                 HotkeyPickerView(appState: appState)
             }
+            Section("Dictation style") {
+                // docs/17 §5: one click, applies to every profile that uses
+                // the global style (Terminal / Code stays verbatim).
+                Picker("Style", selection: $settings.dictationStyle) {
+                    ForEach(DictationStyle.allCases) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(settings.dictationStyle.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Commands") {
                 // docs/17 G4 (after Glaido's Commands): select text, hold the
                 // command key, say what to do — a preview shows the result,
@@ -90,19 +103,6 @@ private struct GeneralPane: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            }
-            Section("Dictation style") {
-                // docs/17 §5: one click, applies to every profile that uses
-                // the global style (Terminal / Code stays verbatim).
-                Picker("Style", selection: $settings.dictationStyle) {
-                    ForEach(DictationStyle.allCases) { style in
-                        Text(style.displayName).tag(style)
-                    }
-                }
-                .pickerStyle(.segmented)
-                Text(settings.dictationStyle.summary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             Section("Microphone") {
                 // docs/15 step 36 remainder: capture from a specific device

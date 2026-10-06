@@ -513,3 +513,42 @@ Still open: 1, 5, 10, 11, 12, plus which five commands you use most.
 | 9 | Hands-free: during a locked take press Fn+arrow (or right-⌘+Tab); the take keeps recording. Double-tap out; no new locked take starts | §4.3 #1, #2 |
 | 10 | The HUD never blocks clicks; dictating into kitty or WezTerm gives verbatim text | §4.3 #3, #7 |
 | 11 | "Keep audio: Never", then cancel a take: there's no Recover menu item | §4.3 #6 |
+| 12 | Double-tap the command key, then hold it and type ⌥+a letter mid-command: the take still ends on release | review #2 |
+| 13 | "Fix the grammar" on already-correct selected text: "Already fine — nothing changed", no duplicate | review #3 |
+| 14 | Cancel a Speed Check passage: no Recover item appears | review #4 |
+
+---
+
+## 10. Stress test as a user (2026-10-06): what was proven, and what was not
+
+This container has no macOS, display or microphone, so the real app could not be clicked
+through. What was stress-tested is everything a user's actions flow through, in the Swift 6.0
+CI image. Each harness was **mutation-tested**: a fixed bug was put back, and the harness
+had to catch it.
+
+| Harness | Scale | Result on this branch | Mutation check |
+|---|---|---|---|
+| `HotkeyFuzzTests`: seeded holds, taps, double-taps, shortcuts, Escape, key bounce and disabled taps, mapped to the app exactly as `AppDelegate` does | 6 key presets × 150 seeds × 60 gestures = 54,000 gestures | 0 violations | Shortcut-during-lock bug: 306 violations. Lock-exit double-tap bug: 784 violations (the first run missed it; an invariant was added) |
+| `SessionStressTests`: a fast user (dictations, Escape, command key, snippets) overlapping a jittery engine, through the real `DictationSession` | 30 seeds × 10 takes | Every take delivered once, in press order; history matches; every mic closed; idle; no stale error | Breaking pipeline ordering: 30/30 seeds fail (the first version caught only 1/30; timing was tightened) |
+| `RealLifeCorpusTests`: Whisper-shaped emails, chat, numbers/IDs/emails/URLs, code talk, disfluency, names, quotes, long-form | 47 inputs × 4 styles | Non-empty, idempotent, no stray spacing, numbers/emails/URLs exact, no content word lost, Raw unchanged | Digit-collapse bug: caught in all four styles |
+
+**Found by the stress pass and fixed:**
+- the review's command-key lock flag (a command could keep the mic open);
+- identical-text replacement pasting twice;
+- context or commands reaching a remote Ollama;
+- cancelled command and Speed Check takes being offered back by Recover;
+- the stale HUD hint after a command;
+- window buttons on the preview;
+- Settings order.
+
+**Found and *not* changed (owner decision):** keeping the ellipsis collapse produces
+"Wait... are you serious?" → **"Wait. are you serious?"**, a full stop followed by a
+lowercase word.
+
+**Not verified here; needs the real Mac:** everything in the §9 hardware checklist,
+plus:
+- how the preview panel looks and how focus behaves;
+- HUD animation smoothness;
+- audio-device quirks;
+- real Whisper/Parakeet/Ollama/Apple-model latency (Speed Check measures this on your
+  machine).

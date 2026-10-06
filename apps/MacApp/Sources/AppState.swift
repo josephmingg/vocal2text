@@ -749,6 +749,8 @@ final class AppState: ObservableObject {
     func stopCommand() {
         guard commandPressActive else { return }
         commandPressActive = false
+        // "Say what to do" is stale the moment the key comes up.
+        hudState.partialText = "Command — working on it"
         DeliverySounds.playStop(enabled: settings.soundsEnabled)
         enqueueControl { session in await session.pressEnded() }
     }
