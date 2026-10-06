@@ -62,9 +62,13 @@ public enum ProfileBootstrap: Sendable {
                 try? save(profile)
             }
         }
-        profiles = applyingUpgrades(to: profiles, fromVersion: storedVersion, save: save)
-        recordVersion(builtInVersion)
-        return profiles
+        let upgrade = upgrading(profiles, fromVersion: storedVersion, save: save)
+        // A failed upgrade write keeps its change in memory for this launch
+        // and leaves the version unrecorded, so the next launch retries it.
+        if upgrade.allSaved {
+            recordVersion(builtInVersion)
+        }
+        return upgrade.profiles
     }
 
     // MARK: - Built-in upgrades
@@ -89,7 +93,15 @@ public enum ProfileBootstrap: Sendable {
         fromVersion version: Int,
         save: (Profile) throws -> Void
     ) -> [Profile] {
-        guard version < builtInVersion else { return profiles }
+        upgrading(profiles, fromVersion: version, save: save).profiles
+    }
+
+    static func upgrading(
+        _ profiles: [Profile],
+        fromVersion version: Int,
+        save: (Profile) throws -> Void
+    ) -> (profiles: [Profile], allSaved: Bool) {
+        guard version < builtInVersion else { return (profiles, true) }
         var updated = profiles
         var changed: [UUID] = []
 
@@ -116,12 +128,17 @@ public enum ProfileBootstrap: Sendable {
             }
         }
 
+        var allSaved = true
         for id in changed {
             if let profile = updated.first(where: { $0.id == id }) {
-                try? save(profile)
+                do {
+                    try save(profile)
+                } catch {
+                    allSaved = false
+                }
             }
         }
-        return updated
+        return (updated, allSaved)
     }
 
     /// Moves the `.defaultRoute` to the profile with `id`, removing it from

@@ -40,10 +40,18 @@ public actor DictationSession {
     public struct CleanupSelection: Sendable {
         public var pipeline: CleanupPipeline
         public var providerID: CleanupProviderID
+        /// True when this provider sends text off the device (a remote
+        /// OpenAI-compatible URL). The opt-in surrounding-text context is
+        /// never sent to such a provider (docs/17 G3.2: "never leaves this
+        /// Mac").
+        public var leavesDevice: Bool
 
-        public init(pipeline: CleanupPipeline, providerID: CleanupProviderID) {
+        public init(
+            pipeline: CleanupPipeline, providerID: CleanupProviderID, leavesDevice: Bool = false
+        ) {
             self.pipeline = pipeline
             self.providerID = providerID
+            self.leavesDevice = leavesDevice
         }
     }
 
@@ -797,7 +805,9 @@ public actor DictationSession {
             // platform's recovery store so the menu can offer them back.
             // Recovery re-runs (source == .recovered) skip this: the caller
             // still holds the original file and keeps it on a false return.
-            if source == .dictation, let preserve = deps.preserveFailedAudio {
+            // A failed *command* is not kept: "Recover" re-runs takes as
+            // dictation, which would type the spoken instruction.
+            if source == .dictation, kind == .dictation, let preserve = deps.preserveFailedAudio {
                 await preserve(audio)
             }
             finishPipeline()
@@ -927,7 +937,8 @@ public actor DictationSession {
                 base: await deps.config.cleanupTimeout, characterCount: stage2Text.count
             )
             var surrounding = ""
-            if await deps.config.cleanupUsesSurroundingText,
+            if !selection.leavesDevice,
+                await deps.config.cleanupUsesSurroundingText,
                 let read = deps.readSurroundingContext {
                 surrounding = await read() ?? ""
             }

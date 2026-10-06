@@ -219,7 +219,8 @@ final class AppState: ObservableObject {
                 }
                 return DictationSession.CleanupSelection(
                     pipeline: CleanupPipeline(provider: provider),
-                    providerID: .ollama(model: model)
+                    providerID: .ollama(model: model),
+                    leavesDevice: provider.leavesDevice
                 )
             },
             // FR-5.1 (docs/11 G9): "Keep audio" in Settings → History & Privacy
@@ -755,7 +756,18 @@ final class AppState: ObservableObject {
     func cancelCommand() {
         guard commandPressActive else { return }
         commandPressActive = false
-        cancelDictation()
+        let startedAt = Date()
+        enqueueControl { [weak self] session in
+            await session.cancel()
+            // "Recover" re-runs a take as dictation, which would type the
+            // spoken instruction. The newest sidecar is this command's own:
+            // it was written during this press.
+            if let candidate = RecoveryStore.latestRecoverable(),
+                candidate.modified.timeIntervalSince(startedAt) > -2 {
+                RecoveryStore.discard(at: candidate.url)
+            }
+            await self?.refreshRecoverableTake()
+        }
     }
 
     /// A transcribed command: answer it locally when the deterministic tools
@@ -771,10 +783,11 @@ final class AppState: ObservableObject {
         )
         let target = command.pressTimeBundleID
         let language = command.language
+        let selected = command.selectedText
         let token = preview.begin(
             instruction: command.instruction, actsOnSelection: request.hasSelection
         ) { [weak self] text in
-            self?.insertCommandResult(text, into: target, language: language)
+            self?.insertCommandResult(text, replacing: selected, into: target, language: language)
         }
         if !request.hasSelection,
             let answer = LocalCommandTools.answer(command.instruction, now: Date()) {
@@ -792,11 +805,17 @@ final class AppState: ObservableObject {
                 return
             }
             do {
-                let response = try await runner.runCommand(
-                    system: VoiceCommandPrompt.system(for: request),
-                    user: VoiceCommandPrompt.user(for: request),
-                    timeout: .seconds(30)
-                )
+                // A hard deadline whatever the provider does with its own
+                // timeout (Apple's model takes none) — the preview must never
+                // spin forever.
+                let response = try await Self.withDeadline(.seconds(30)) {
+                    try await runner.runCommand(
+                        system: VoiceCommandPrompt.system(for: request),
+                        user: VoiceCommandPrompt.user(for: request),
+                        maxTokens: VoiceCommandPrompt.maxTokens(for: request),
+                        timeout: .seconds(30)
+                    )
+                }
                 if let text = VoiceCommandPrompt.sanitized(response.text, request: request) {
                     self?.commandPreview?.show(result: text, for: token)
                 } else {
@@ -815,10 +834,34 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Runs `operation`, throwing `CleanupError.timedOut` if it has not
+    /// finished within `deadline` (the operation is cancelled).
+    nonisolated static func withDeadline<T: Sendable>(
+        _ deadline: Duration, _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(for: deadline)
+                throw CleanupError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw CleanupError.timedOut }
+            return first
+        }
+    }
+
     /// Return in the preview: insert into the app the command was spoken
     /// in, replacing the selection it acted on (AX-first, paste fallback —
     /// the same ladder as dictation).
-    private func insertCommandResult(_ text: String, into bundleID: String?, language: Language) {
+    private func insertCommandResult(
+        _ text: String, replacing selected: String?, into bundleID: String?, language: Language
+    ) {
+        // Nothing to change: say so rather than re-typing the same words.
+        if let selected, selected == text {
+            showNotice("Already fine — nothing changed")
+            return
+        }
         let overrides = settings.insertionStrategyOverrides
         Task { @MainActor in
             if let bundleID,
@@ -839,15 +882,17 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Ollama when it answers (the user's configured model), else Apple's
-    /// on-device model on macOS 26 with Apple Intelligence, else nothing.
+    /// Ollama when it answers on this Mac (the user's configured model),
+    /// else Apple's on-device model on macOS 26 with Apple Intelligence,
+    /// else nothing. A remote Ollama URL is skipped: a command carries the
+    /// user's selection, and Settings promises nothing leaves this Mac.
     nonisolated static func commandRunner(baseURL: URL, model: String) async -> (any CommandRunning)? {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             let ollama = OpenAICompatibleProvider(
                 baseURL: baseURL, model: trimmed, id: .ollama(model: trimmed)
             )
-            if await ollama.isAvailable() {
+            if !ollama.leavesDevice, await ollama.isAvailable() {
                 return ollama
             }
         }
@@ -890,10 +935,14 @@ final class AppState: ObservableObject {
         let discardRecording = !AudioRetentionPolicy.keepsAudio(
             retentionDays: settings.audioRetentionDays
         )
-        enqueueControl { session in
+        commandPressActive = false
+        enqueueControl { [weak self] session in
             await session.cancel()
             if discardRecording {
                 RecoveryStore.discardAll()
+                // The `.cancelled` phase already rescanned — before the files
+                // were gone. Rescan so the menu stops offering them.
+                await self?.refreshRecoverableTake()
             }
         }
     }
@@ -1145,13 +1194,13 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// How long after delivery "Undo last insertion" stays offered.
+    private static let undoWindowSeconds: TimeInterval = 10 * 60
+
     /// The undo safety net (docs/15 step 28, Part 2b form): replace the last
     /// insertion with the raw transcription, or remove it entirely. AX-only —
     /// where the focused element can't be read and edited, nothing changes
     /// and the HUD says so, which beats guessing with synthesized keystrokes.
-    /// How long after delivery "Undo last insertion" stays offered.
-    private static let undoWindowSeconds: TimeInterval = 10 * 60
-
     func undoLastInsertion(replaceWithRaw: Bool) {
         guard let record = latestDeliveredRecord() else {
             showNotice("Nothing to undo yet")
@@ -1267,6 +1316,9 @@ final class AppState: ObservableObject {
             hudState.mode = .processing(stage: .delivering)
         case .cancelled:
             hintGeneration += 1
+            // Whatever ended the take, a later command-key release must not
+            // end a dictation it never started (docs/17 review #5).
+            commandPressActive = false
             pendingLowDiskNotice = false
             // A device change queued its notice for a take the user then
             // cancelled — the flag must not survive to caption the next take.
@@ -1283,6 +1335,7 @@ final class AppState: ObservableObject {
             // The take is over: any first-run hint still in flight is stale
             // (docs/11 G16).
             hintGeneration += 1
+            commandPressActive = false
             // The session clears lastError at every pressBegan, so any error
             // visible when it returns to idle belongs to this take. The error
             // outranks the guards' pending notices — a take a guard ended

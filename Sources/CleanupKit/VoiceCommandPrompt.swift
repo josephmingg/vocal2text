@@ -25,7 +25,9 @@ public struct VoiceCommandRequest: Sendable, Hashable {
 /// A provider that can run a free-form instruction (as opposed to the
 /// dictation cleanup transform). Ollama and Apple's on-device model both do.
 public protocol CommandRunning: Sendable {
-    func runCommand(system: String, user: String, timeout: Duration) async throws -> CleanupResponse
+    func runCommand(
+        system: String, user: String, maxTokens: Int, timeout: Duration
+    ) async throws -> CleanupResponse
 }
 
 /// Prompt and output handling for command mode. Unlike dictation cleanup,

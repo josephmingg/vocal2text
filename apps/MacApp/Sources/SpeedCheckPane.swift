@@ -76,6 +76,10 @@ final class SpeedCheckModel: ObservableObject {
         guard case .recording = stage, let session else { return }
         self.session = nil
         await session.cancel()
+        // A cancelled capture keeps its crash sidecar for "Recover" (FR-1.6);
+        // a Speed Check passage is not a dictation and must not be offered
+        // back — the pane promises recordings are discarded.
+        RecoveryStore.discard(at: session.recoveryFileURL)
         stage = .idle
     }
 
@@ -148,6 +152,10 @@ struct SpeedCheckPane: View {
             }
         }
         .padding(16)
+        // Closing Settings mid-passage must not leave the microphone open.
+        .onDisappear {
+            Task { await model.cancelRecording() }
+        }
     }
 
     @ViewBuilder

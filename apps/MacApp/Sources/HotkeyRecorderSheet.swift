@@ -19,6 +19,9 @@ struct HotkeyRecorderSheet: View {
     /// Without this, holding the current hotkey to see it captured would also
     /// start a real dictation behind the sheet.
     private let hotkeyMonitor: HotkeyMonitor?
+    /// The command key's tap (docs/17 G4), suspended alongside — pressing it
+    /// while recording must not open a command behind the sheet.
+    private let commandMonitor: HotkeyMonitor?
     /// Called with the recorded binding when the user commits it.
     private let onUse: (HotkeySpec) -> Void
 
@@ -28,10 +31,12 @@ struct HotkeyRecorderSheet: View {
     init(
         currentBinding: HotkeySpec,
         hotkeyMonitor: HotkeyMonitor?,
+        commandMonitor: HotkeyMonitor? = nil,
         onUse: @escaping (HotkeySpec) -> Void
     ) {
         self.currentBinding = currentBinding
         self.hotkeyMonitor = hotkeyMonitor
+        self.commandMonitor = commandMonitor
         self.onUse = onUse
     }
 
@@ -88,11 +93,13 @@ struct HotkeyRecorderSheet: View {
             recorder.onEscape = { dismiss() }
             recorder.onCommit = { commit() }
             hotkeyMonitor?.suspend()
+            commandMonitor?.suspend()
             recorder.start()
         }
         .onDisappear {
             recorder.stop()
             hotkeyMonitor?.resume()
+            commandMonitor?.resume()
         }
     }
 

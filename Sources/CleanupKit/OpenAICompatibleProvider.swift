@@ -491,10 +491,10 @@ struct ChatCompletionResponse: Codable, Sendable {
 
 extension OpenAICompatibleProvider: CommandRunning {
     public func runCommand(
-        system: String, user: String, timeout: Duration
+        system: String, user: String, maxTokens: Int, timeout: Duration
     ) async throws -> CleanupResponse {
         try await complete(
-            makeCommandBody(system: system, user: user, maxTokens: 1024), timeout: timeout
+            makeCommandBody(system: system, user: user, maxTokens: maxTokens), timeout: timeout
         )
     }
 }

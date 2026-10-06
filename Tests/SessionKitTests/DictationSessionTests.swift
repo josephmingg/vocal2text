@@ -1161,6 +1161,80 @@ struct DictationSessionTests {
         #expect(delivered == ["Vocal cords need rest."])
     }
 
+    /// docs/17 review #1: the opt-in context never goes to a provider that
+    /// sends text off the device, even with the setting on.
+    @Test func surroundingTextIsNeverReadForARemoteProvider() async throws {
+        let provider = CapturingCleanupProvider()
+        let counter = ReadCounter()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                log: CaptureLog()
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "and she said yes", detectedLanguage: .english)
+            ),
+            selectCleanup: { _ in
+                DictationSession.CleanupSelection(
+                    pipeline: CleanupPipeline(provider: provider),
+                    providerID: .openAICompatible(name: "remote.example.com"),
+                    leavesDevice: true
+                )
+            },
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(masterSwitch: true, usesSurroundingText: true),
+            profileResolution: {
+                (Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."), .app, "com.example.notes")
+            },
+            now: { fixedNow }
+        )
+        dependencies.readSurroundingContext = { await counter.read() }
+        let session = DictationSession(dependencies: dependencies)
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+
+        let reads = await counter.count
+        #expect(reads == 0)
+        let requests = await provider.requests
+        #expect(requests.first?.context == "")
+    }
+
+    /// docs/17 review #6: a failed command is not kept for "Recover", which
+    /// would re-run it as dictation and type the spoken instruction.
+    @Test func aFailedCommandTakeIsNotPreservedForRecovery() async {
+        let preserved = LockedStrings()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                log: CaptureLog()
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "x", detectedLanguage: .english),
+                failure: .engineUnavailable("down")
+            ),
+            preserveFailedAudio: { _ in preserved.append("kept") },
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(),
+            profileResolution: { (Profile(name: "Default"), .app, "com.example.notes") },
+            now: { fixedNow }
+        )
+        dependencies.handleCommand = { _ in }
+        let session = DictationSession(dependencies: dependencies)
+        await session.pressBegan(kind: .command)
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        #expect(preserved.snapshot().isEmpty)
+
+        // A failed dictation still is.
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        #expect(preserved.snapshot() == ["kept"])
+    }
+
     /// Regression: profile resolution must never gate the microphone. On macOS
     /// it shells out to osascript for the frontmost browser's tab URL (up to
     /// 1.5 s), and every millisecond before capture opens is speech the user

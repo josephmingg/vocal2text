@@ -219,9 +219,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Re-create the tap after wake/unlock, and keep retrying if it could not
-    /// be re-created — a wake that lands before the window server is ready must
-    /// not cost the user their hotkey until the next relaunch.
     /// (Re)builds the command-key monitor from settings. Hold to speak an
     /// instruction; a tap, a double-tap or a chord ends or cancels it — there
     /// is no hands-free command. Inert during a hands-free dictation.
@@ -229,9 +226,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         commandMonitor?.stop()
         commandMonitor = nil
         appState.commandHotkeyMonitor = nil
-        guard let spec = appState.settings.commandHotkeySpec,
-            spec.kind != appState.settings.hotkeySpec.kind
-        else { return }
+        guard let spec = appState.settings.commandHotkeySpec else { return }
+        guard spec.kind != appState.settings.hotkeySpec.kind else {
+            // The dictation key was just set to the command key's binding:
+            // one key cannot do both, so the command key turns off visibly
+            // (the Settings picker shows "Off") instead of silently.
+            appState.settings.commandHotkeySpec = nil
+            return
+        }
         let monitor = HotkeyMonitor(spec: spec)
         monitor.onPressBegan = { [weak self] in
             guard let self, !self.appState.isHotkeyTestModeActive, !self.isLockModeActive else {
@@ -244,7 +246,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         monitor.onPressEnded = end
         monitor.onShortTap = end
-        monitor.onLockToggle = end
+        // There is no hands-free command: a double-tap just ends the take.
+        // The decision core believes it entered lock mode, so tell it the
+        // lock is over — otherwise its lock-only shortcut rule swallows the
+        // next press's release and the command take never stops (docs/17
+        // review #2).
+        monitor.onLockToggle = { [weak self] in
+            self?.appState.stopCommand()
+            self?.commandMonitor?.noteLockEnded()
+        }
         monitor.onCancel = { [weak self] in
             self?.appState.cancelCommand()
         }
@@ -253,6 +263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appState.commandHotkeyMonitor = monitor
     }
 
+    /// Re-create the tap after wake/unlock, and keep retrying if it could not
+    /// be re-created — a wake that lands before the window server is ready must
+    /// not cost the user their hotkey until the next relaunch.
     private func rearmOrRetry() {
         _ = commandMonitor?.rearm()
         guard let monitor = hotkeyMonitor else { return }

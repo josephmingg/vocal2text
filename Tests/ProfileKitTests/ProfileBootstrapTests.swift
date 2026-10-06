@@ -212,3 +212,19 @@ private func versionOneProfiles() -> [Profile] {
     #expect(saved.count == profiles.count)
     #expect(recorded == ProfileBootstrap.builtInVersion)
 }
+
+@Test func aFailedUpgradeWriteIsRetriedNextLaunch() {
+    struct WriteFailed: Error {}
+    var recorded: Int?
+    let stored = versionOneProfiles()
+    let profiles = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { stored },
+        save: { _ in throw WriteFailed() },
+        storedVersion: 1,
+        recordVersion: { recorded = $0 }
+    )
+    // The change still applies in memory for this launch…
+    #expect(profiles.contains { $0.name == "AI Prompt" })
+    // …but the version stays unrecorded, so the next launch tries again.
+    #expect(recorded == nil)
+}

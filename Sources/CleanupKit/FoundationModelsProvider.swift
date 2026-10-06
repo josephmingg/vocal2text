@@ -82,7 +82,7 @@ public actor FoundationModelsProvider: CleanupProvider {
 @available(macOS 26.0, iOS 26.0, *)
 extension FoundationModelsProvider: CommandRunning {
     public func runCommand(
-        system: String, user: String, timeout: Duration
+        system: String, user: String, maxTokens: Int, timeout: Duration
     ) async throws -> CleanupResponse {
         guard await isAvailable() else {
             throw CleanupError.providerUnavailable("Apple Intelligence model unavailable")

@@ -40,6 +40,16 @@ enum AXInserter {
         // element with no readable value cannot confirm the write, and a
         // paste after an unconfirmed-but-landed write duplicates the text.
         guard let before = readableValue(of: element) else { return false }
+        // Replacing a selection with identical text leaves the value as it
+        // was — that is success, not a silent no-op, and falling through to
+        // paste would insert a second copy (command mode's "fix the grammar"
+        // on text that was already fine).
+        var selectedRef: CFTypeRef?
+        var selectedBefore: String?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedRef)
+            == .success {
+            selectedBefore = selectedRef as? String
+        }
 
         guard
             AXUIElementSetAttributeValue(
@@ -56,7 +66,10 @@ enum AXInserter {
         // field that already says "Thanks!" passed containment even when the
         // app ACKed the write and ignored it — reported as inserted, nothing
         // pasted, text silently lost (docs/17 §4.4 #4).
-        guard let after = readableValue(of: element), after != before else { return false }
+        guard let after = readableValue(of: element) else { return false }
+        if after == before {
+            return selectedBefore == text
+        }
         let needle = text.filter { !$0.isWhitespace }
         if needle.isEmpty { return true }
         return after.filter { !$0.isWhitespace }.contains(needle)
