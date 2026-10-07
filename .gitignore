@@ -20,3 +20,6 @@ __pycache__/
 
 # Derived from project.yml by scripts/free-account-spec.py.
 project-free.yml
+
+# Your Apple Team ID for `make install` (scripts/signing-team.sh).
+.signing-team

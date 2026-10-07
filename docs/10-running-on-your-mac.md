@@ -13,9 +13,15 @@ make generate          # produces Vocal.xcodeproj (gitignored)
 open Vocal.xcodeproj
 ```
 
-> **⚠️ Every `make generate` rebuilds `Vocal.xcodeproj` and RESETS your signing
-> Team selection.** After any `make generate`, re-open Signing & Capabilities
-> and re-pick your team (30 seconds), or the build fails with a signing error.
+> **⚠️ Every `make generate` rebuilds `Vocal.xcodeproj` and RESETS the signing
+> Team picked in Xcode.** `make install` and `make mac` don't depend on that
+> pick: they pass your Team ID to `xcodebuild` themselves, from `$VOCAL_TEAM`,
+> else a gitignored `.signing-team` file, else the Apple Development
+> certificate in your keychain (`scripts/signing-team.sh`). Run `make team`
+> once to detect and save it; with certificates from several Teams it won't
+> guess, so write yours by hand: `echo YOURTEAMID > .signing-team`. The build
+> prints `Signing with Team …` when it found one. Building from Xcode (⌘R)
+> still needs the Team re-picked after each `make generate`.
 > You only need `make generate` when `project.yml` changed — a plain `git pull`
 > of source-code changes needs no regeneration.
 > A build log that says `Signing Identity: "Sign to Run Locally"` means the

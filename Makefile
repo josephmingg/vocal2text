@@ -1,6 +1,6 @@
 # Vocal — developer entry points. CI and humans use the same commands.
 
-.PHONY: test build generate generate-free mac clean reset-tcc eval-cleanup bench-latency release
+.PHONY: test build generate generate-free mac team install clean reset-tcc eval-cleanup bench-latency release
 
 # Latency percentiles from the app's own history (docs/15 step 47) — the
 # numbers you actually felt, per stage, bucketed by utterance length.
@@ -50,24 +50,38 @@ generate-free:
 # nothing is broken.
 mac: generate
 	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
-	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug build
+	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Debug $(TEAM_SETTING) build
+
+# The Apple Team to sign with, handed to xcodebuild so it outlives `make
+# generate` (which resets the Team picked in Xcode). From $VOCAL_TEAM, else
+# .signing-team (gitignored), else your keychain's Apple Development
+# certificate — see scripts/signing-team.sh. Empty: the project's own setting.
+TEAM := $(shell sh scripts/signing-team.sh 2>/dev/null)
+TEAM_SETTING = $(if $(TEAM),DEVELOPMENT_TEAM=$(TEAM))
+
+# Detect your Team ID and save it to .signing-team (once per clone).
+team:
+	@sh scripts/signing-team.sh --save >/dev/null
 
 LSREGISTER = /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
 
 # Release-build VocalMac and install it to /Applications as Vocal.app.
-# Requires the signing Team to be selected once in Xcode (Signing & Capabilities).
+# Signs with $(TEAM) when one is known, so no Xcode Team pick is needed;
+# otherwise with the Team selected in Xcode (Signing & Capabilities).
 # The build retries once after a symlink repair: the very first build is the
 # one that extracts the artifacts, so a mangled framework only becomes
 # repairable after that build has already failed at CodeSign.
 install:
+	@[ -n "$(TEAM)" ] && echo "Signing with Team $(TEAM)" || \
+		echo "⚠️  No Team ID found — using the Team set in Xcode. Run 'make team' (docs/10)."
 	@sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts
 	rm -rf build/Build/Products/Release/VocalMac.app
 	xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Release \
-		-derivedDataPath build -allowProvisioningUpdates build \
+		-derivedDataPath build -allowProvisioningUpdates $(TEAM_SETTING) build \
 	|| { sh scripts/repair-framework-symlinks.sh build/SourcePackages/artifacts && \
 		rm -rf build/Build/Products/Release/VocalMac.app && \
 		xcodebuild -project Vocal.xcodeproj -scheme VocalMac -configuration Release \
-			-derivedDataPath build -allowProvisioningUpdates build; }
+			-derivedDataPath build -allowProvisioningUpdates $(TEAM_SETTING) build; }
 	rm -rf /Applications/Vocal.app
 	ditto build/Build/Products/Release/VocalMac.app /Applications/Vocal.app
 	@# Xcode registers the build product with Launch Services, so the Finder and
