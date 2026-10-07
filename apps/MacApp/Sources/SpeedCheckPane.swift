@@ -2,6 +2,7 @@ import AppKit
 import ASRKit
 import AudioPipeline
 import BenchKit
+import CoreModels
 import SwiftUI
 
 /// Recording and scoring state for the Speed Check pane (docs/17 G0).
@@ -131,7 +132,9 @@ final class SpeedCheckModel: ObservableObject {
         if size > 0 {
             var buffer = [CChar](repeating: 0, count: size)
             if sysctlbyname("hw.model", &buffer, &size, nil, 0) == 0 {
-                model = String(cString: buffer)
+                // Up to the NUL terminator, decoded as UTF-8.
+                let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+                model = String(bytes: bytes, encoding: .utf8) ?? model
             }
         }
         return "\(model), \(ProcessInfo.processInfo.operatingSystemVersionString)"
@@ -143,8 +146,15 @@ final class SpeedCheckModel: ObservableObject {
 @MainActor
 struct SpeedCheckPane: View {
     let appState: AppState
+    /// Observed so "Use Parakeet for English" reflects the change at once.
+    @ObservedObject private var settings: SettingsStore
     @StateObject private var model = SpeedCheckModel()
     @State private var savedNote: String?
+
+    init(appState: AppState) {
+        self.appState = appState
+        _settings = ObservedObject(wrappedValue: appState.settings)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -265,6 +275,20 @@ struct SpeedCheckPane: View {
             .font(.callout)
             Text(SpeedCheck.recommendation(model.summaries))
                 .font(.callout.weight(.medium))
+            if SpeedCheck.verdict(model.summaries) == .useParakeet {
+                // One click to act on the result (docs/17 G2.1): Parakeet
+                // only handles dictation with the language set to English.
+                if settings.parakeetEnglishEnabled, settings.languageMode == .pinned(.english) {
+                    Label("Parakeet is on for English.", systemImage: "checkmark.circle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.green)
+                } else {
+                    Button("Use Parakeet for English") {
+                        settings.parakeetEnglishEnabled = true
+                        settings.languageMode = .pinned(.english)
+                    }
+                }
+            }
         }
     }
 

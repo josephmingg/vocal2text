@@ -827,7 +827,7 @@ struct DictationSessionTests {
                         text: "hello there friend", detectedLanguage: .english
                     )
                 ),
-                previewTranscribe: { _ in await script.next() },
+                previewTranscribe: { _ in await script.nextResult() },
                 onPartial: { partials.append($0) },
                 previewInterval: .milliseconds(10),
                 deliverer: deliverer,
@@ -874,7 +874,7 @@ struct DictationSessionTests {
                 engine: FakeTranscriptionEngine(
                     result: TranscriptionResult(text: "hello", detectedLanguage: .english)
                 ),
-                previewTranscribe: { _ in await script.next() },
+                previewTranscribe: { _ in await script.nextResult() },
                 onPartial: { partials.append($0) },
                 previewInterval: .milliseconds(10),
                 deliverer: RecordingTextDeliverer(),
@@ -893,6 +893,76 @@ struct DictationSessionTests {
         await feed.push(PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate)))
         try await Task.sleep(for: .milliseconds(60))
         #expect(partials.snapshot().isEmpty)
+    }
+
+    @Test func previewDecodesATrailingWindowNotTheWholeTake() async throws {
+        // docs/17 G2.3: a long take must not re-decode everything said so
+        // far. With a 3 s window that keeps 1 s, every decode stays near the
+        // window size however long the take runs, and the frozen words stay
+        // on screen ahead of the window.
+        let feed = ChunkFeed()
+        let partials = LockedStrings()
+        let decodedLengths = DecodedLengths()
+
+        var dependencies = DictationSession.Dependencies(
+            audio: StreamingAudioCapturing(
+                finishChunk: PCMChunk(
+                    samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)
+                ),
+                feed: feed
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "done", detectedLanguage: .english)
+            ),
+            previewTranscribe: { chunk in
+                await decodedLengths.record(chunk.samples.count)
+                // A word every half second, all agreeing, with timings
+                // relative to the chunk like a real engine reports them.
+                let count = Int(chunk.durationSeconds / 0.5)
+                let words = (0..<count).map {
+                    TranscriptionResult.TimedSegment(
+                        text: "word", start: Double($0) * 0.5, end: Double($0) * 0.5 + 0.4
+                    )
+                }
+                return TranscriptionResult(
+                    text: words.map(\.text).joined(separator: " "),
+                    detectedLanguage: .english,
+                    segments: words
+                )
+            },
+            onPartial: { partials.append($0) },
+            previewInterval: .milliseconds(5),
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(),
+            profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+            now: { fixedNow }
+        )
+        dependencies.previewWindow = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
+        let session = DictationSession(dependencies: dependencies)
+
+        await session.pressBegan()
+        let second = PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate))
+        let seconds = 12
+        for pushed in 1...seconds {
+            await feed.push(second)
+            try await waitUntil("partial for second \(pushed)") {
+                partials.snapshot().count >= pushed
+            }
+        }
+        await session.pressEnded()
+        if let task = await session.pipelineTask { await task.value }
+
+        let lengths = await decodedLengths.values
+        #expect(lengths.count == seconds)
+        // Never more than the window plus the second that arrived since.
+        #expect(lengths.allSatisfy { $0 <= 4 * PCMChunk.sampleRate })
+        #expect((lengths.last ?? .max) < seconds * PCMChunk.sampleRate)
+        // Frozen words stay on screen: the line holds more words than any
+        // single window could.
+        let lastLine = partials.snapshot().last ?? ""
+        let shownWords = lastLine.split(separator: " ").count
+        #expect(shownWords > 8)
     }
 
     // MARK: - VAD gate + trim (docs/15 step 16)

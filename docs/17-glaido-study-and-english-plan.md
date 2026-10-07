@@ -490,10 +490,13 @@ Still open: 1, 5, 10, 11, 12, plus which five commands you use most.
 | G3.4 | **AI Prompt** built-in profile (Claude, ChatGPT, claude.ai, chatgpt.com, gemini.google.com); idempotent built-in upgrades for existing installs | Linux |
 | G4.1–4.4 | **Command mode**: a command key (Settings → General → Commands, off by default) plus an opt-in "Vocal, …" wake word; the selection captured at press; arithmetic and date/time answered locally; otherwise Ollama, falling back to Apple's on-device model; a key-capable non-activating preview where **Return inserts**, ⌘C copies and Escape or clicking away dismisses | Linux (parser, tools, prompt, sanitizer, session routing, request body); app code for the key, panel and insertion |
 | G0.1 | **Speed Check** (Settings tab): three passages, the same audio decoded by Whisper and Parakeet after a warm-up, p50/p95, real-time factor, WER, the G0.3 recommendation, and a Markdown report to copy or save as `docs/benchmarks/M0-results.md` | Linux (scoring, report) |
+| G2.1 | **Parakeet is the default English engine.** The toggle is ON unless you switched it off, and Auto still uses Whisper. Settings → Models offers **Use English** when the language is Auto, and Speed Check offers **Use Parakeet for English** when its verdict says so | Linux (verdict); app code for the toggle and buttons |
+| G2.2 F9/F10 | **Parakeet listens for Dictionary words.** FluidAudio's CTC keyword spotter (parakeet-ctc-110m) rescores each take against your Dictionary and swaps a word only when the audio supports the term (Settings → Models → "Listen for Dictionary words", ON). The model downloads in the background the first time there is a word to listen for, never inside a take. Dictionary terms are now ranked most-used first and listed once, so Whisper's 24-term prompt and Parakeet's 256-term cap keep your most-used words | Linux (ranking, term filter); app/engine code for the boost |
+| G2.3 F6/F7 | **Live text is on by default** with Parakeet (it follows the G2.1 default), and the preview decodes only a **trailing window**: past 14 s, committed words that end before the last 6 s are frozen on screen and never decoded again. A long take now costs the same per tick as a short one, and the preview buffer drops audio it no longer needs | Linux (window logic, session wiring) |
 
 ### Not built (still in the plan)
-- G2: Parakeet as the default, vocabulary boosting, trailing-window preview. The gate is
-  now met (see "Speed Check result" below); building it waits on your go-ahead.
+- G2.4: the insertion fast path. It needs per-app insertion timings from your Mac first.
+- G2.5: commit-the-prefix for Whisper. Dropped, since Parakeet is now the English engine.
 - G3.1: Ollama is still tried first, then Apple's model; cleanup is still OFF by default.
 - G3.5: speculative cleanup.
 - G3.6: deterministic "scratch that".
@@ -539,6 +542,10 @@ G0.3's rule says Parakeet for English, so G2.1's gate is met.
 | 12 | Double-tap the command key, then hold it and type ⌥+a letter mid-command: the take still ends on release | review #2 |
 | 13 | "Fix the grammar" on already-correct selected text: "Already fine — nothing changed", no duplicate | review #3 |
 | 14 | Cancel a Speed Check passage: no Recover item appears | review #4 |
+| 15 | With the language on English, dictate: words appear in the HUD while you speak, and the first take after relaunch is still fast | G2.1, G2.3 |
+| 16 | Add "sync" to the Dictionary, wait a minute (the boost model downloads once), then say "move our weekly sync to Thursday": it comes out "sync", and "the kitchen sink is full" still says "sink" | G2.2 |
+| 17 | Hold a hands-free take for 2+ minutes: the HUD keeps up, and the text appears promptly at release | G2.3 |
+| 18 | Run Speed Check again: Parakeet's numbers should match the first run (the boost is not part of Speed Check) | G2 regression |
 
 ---
 
@@ -714,3 +721,36 @@ put the bug back and confirmed its test fails (25 mutation runs, all caught).
 - **Mac and iOS app targets:** compiled by CI only. The Mac items above are verified
   by reading the code, not by running them.
 
+
+## 12. G2: the fastest English path (2026-10-07)
+
+Built on the owner's go-ahead, after the Speed Check met the G2.1 gate (§9). What shipped
+is in the §9 table (G2.1, G2.2, G2.3); checklist items 15–18 cover it on hardware.
+
+**Choices worth knowing**
+- Auto still uses Whisper, so mixed-language speech keeps working. Parakeet needs the
+  language set to English; Settings → Models and Speed Check each offer one click for it.
+- An existing install that had the language pinned to English but never touched the
+  Parakeet toggle now uses Parakeet. Its model downloads once in the background at the
+  next launch (the usual preload, gated on a previous successful model load).
+- The vocabulary boost only swaps a word when FluidAudio's CTC spotter finds acoustic
+  evidence for a Dictionary term. When it changes the text, the take's word timings are
+  dropped rather than left contradicting it. The preview never runs the boost.
+- Dictionary terms are ranked most-used first everywhere they are used (Whisper's prompt,
+  Parakeet's boost, cleanup's protected terms), and a written form is listed once.
+
+**Not built:** G2.4 (needs insertion timings from your Mac), G2.5 (dropped: Parakeet is
+the English engine).
+
+### Evidence
+- **Linux:** `swift build --build-tests && swift test` in `swift:6.0-noble`: 824 tests pass,
+  up from 807. The preview tests also passed 8 runs in a row limited to 2 CPUs.
+- **SwiftLint:** exits 0; no warnings on the changed lines.
+- **Mutation checks:** 11 runs. 9 re-introduced bugs were caught. One mutant survived at
+  first (freezing words the hypothesis no longer agrees with); a test was added and it is
+  now caught. One mutant was equivalent (the buffer drops old audio just before the read)
+  and was replaced by one that decodes the whole take, which is caught.
+- **Not verified here:** everything in `ParakeetEngine` and the Mac app. FluidAudio only
+  builds on Apple platforms, so its API use was checked against the pinned 0.15.6 source
+  and is compiled by CI. The boost's accuracy and its added latency per take are
+  unmeasured; Speed Check does not include the boost.

@@ -83,12 +83,14 @@ public actor DictationSession {
     /// never cost the user the transcript.
     public typealias AudioArchiving = @Sendable (PCMChunk, UUID) async -> String?
 
-    /// Produces the current hypothesis for the audio captured so far (docs/15
+    /// Produces the current hypothesis for a window of the live audio (docs/15
     /// step 22 streaming preview), or nil when preview is unavailable for the
     /// current configuration (engine not loaded, route not preview-capable).
+    /// Word timings in `segments`, relative to the chunk's first sample, let
+    /// the window slide (docs/17 G2.3); without them only silence slides.
     /// Called serially, at most one in flight; must be cheap enough that a
     /// release landing mid-call waits a fraction of a second at worst.
-    public typealias PreviewTranscribing = @Sendable (PCMChunk) async -> String?
+    public typealias PreviewTranscribing = @Sendable (PCMChunk) async -> TranscriptionResult?
 
     /// Preserves a failed take's audio for later recovery (docs/15 step 35):
     /// invoked only when transcription fails, with the exact samples the take
@@ -131,6 +133,8 @@ public actor DictationSession {
         public var onPartial: (@Sendable (String) -> Void)?
         /// Cadence of the preview decode loop; tests shorten it.
         public var previewInterval: Duration
+        /// The preview's decode window (docs/17 G2.3); tests shrink it.
+        public var previewWindow = TrailingWindowPreview()
         /// Fired fire-and-forget at hotkey press so the model is hot at
         /// release (docs/03 §2). Wire to `CleanupProvider.prewarm`; defaults
         /// to a no-op.
@@ -592,18 +596,22 @@ public actor DictationSession {
     // MARK: - Streaming preview (docs/15 step 22)
 
     /// Consumes the live chunk stream and periodically re-transcribes the
-    /// audio captured so far, pushing a prefix-committed line to `onPartial`.
-    /// Display-only per FR-4.1: nothing here touches the take's audio path or
-    /// the batch pass that produces the delivered text.
+    /// trailing window of the audio captured so far, pushing a
+    /// prefix-committed line to `onPartial`. Display-only per FR-4.1: nothing
+    /// here touches the take's audio path or the batch pass that produces
+    /// the delivered text.
     ///
     /// Two children: a reader that drains the stream promptly (the capture
     /// layer's buffer is bounded, so a slow consumer would drop chunks) into
     /// a private accumulator, and a decoder that wakes on `previewInterval`,
     /// re-decodes once at least a second of new audio exists, and commits
-    /// the stable prefix so the display never flickers.
+    /// the stable prefix so the display never flickers. The decoder only
+    /// decodes `TrailingWindowPreview`'s window (docs/17 G2.3), so a long
+    /// take costs the same per tick as a short one.
     private func startPreview(chunks: AsyncStream<PCMChunk>) {
         guard let preview = deps.previewTranscribe, let onPartial = deps.onPartial else { return }
         let interval = deps.previewInterval
+        let window = deps.previewWindow
         previewTask = Task {
             let buffer = PreviewSampleBuffer()
             await withTaskGroup(of: Void.self) { group in
@@ -613,21 +621,29 @@ public actor DictationSession {
                     }
                 }
                 group.addTask {
-                    var committer = PrefixCommitter()
+                    var windowState = window
                     var decodedSampleCount = 0
                     while !Task.isCancelled {
                         try? await Task.sleep(for: interval)
                         if Task.isCancelled { break }
-                        let samples = await buffer.snapshot()
-                        guard samples.count - decodedSampleCount >= PCMChunk.sampleRate else {
+                        let total = await buffer.totalCount
+                        guard total - decodedSampleCount >= PCMChunk.sampleRate else {
                             continue
                         }
-                        decodedSampleCount = samples.count
+                        decodedSampleCount = total
+                        // Audio before the window is never decoded again.
+                        await buffer.discard(before: windowState.windowStart)
+                        let samples = await buffer.samples(from: windowState.windowStart)
                         guard
+                            !samples.isEmpty,
                             let hypothesis = await preview(PCMChunk(samples: samples)),
                             !Task.isCancelled
                         else { continue }
-                        let line = committer.ingest(hypothesis)
+                        let line = windowState.ingest(
+                            text: hypothesis.text,
+                            words: hypothesis.segments,
+                            windowSampleCount: samples.count
+                        )
                         if !line.isEmpty {
                             onPartial(line)
                         }
@@ -1203,14 +1219,32 @@ public actor DictationSession {
 /// Accumulates the live capture for the preview decoder (docs/15 step 22).
 /// Deliberately separate from the capture layer's own accumulation: the
 /// preview must never touch the take's authoritative audio path.
+///
+/// Indexed by absolute sample position from the start of the take; audio
+/// before the preview window is dropped, so a long take holds only the
+/// window in memory, not the whole recording twice.
 private actor PreviewSampleBuffer {
     private var samples: [Float] = []
+    /// Absolute index of `samples[0]`.
+    private var offset = 0
+
+    var totalCount: Int { offset + samples.count }
 
     func append(_ newSamples: [Float]) {
         samples.append(contentsOf: newSamples)
     }
 
-    func snapshot() -> [Float] {
-        samples
+    /// The samples from absolute index `start` to the end.
+    func samples(from start: Int) -> [Float] {
+        let local = min(max(0, start - offset), samples.count)
+        return Array(samples[local...])
+    }
+
+    /// Drops the samples before absolute index `start`.
+    func discard(before start: Int) {
+        let count = min(max(0, start - offset), samples.count)
+        guard count > 0 else { return }
+        samples.removeFirst(count)
+        offset += count
     }
 }

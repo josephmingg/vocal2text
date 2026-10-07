@@ -61,6 +61,17 @@ struct SpeedCheckTests {
         #expect(SpeedCheck.recommendation(summaries).hasPrefix("Run the check with both engines"))
     }
 
+    @Test func theVerdictMatchesTheRecommendation() {
+        // The pane's "Use Parakeet for English" button keys off the verdict,
+        // so it must agree with the sentence the pane shows.
+        let fast = SpeedCheck.summarize([measure("Whisper", 0, decode: 1), measure("Parakeet", 0, decode: 0.1)])
+        #expect(SpeedCheck.verdict(fast) == .useParakeet)
+        let slow = SpeedCheck.summarize([measure("Whisper", 0, decode: 0.1), measure("Parakeet", 0, decode: 1)])
+        #expect(SpeedCheck.verdict(slow) == .keepWhisperNotFaster)
+        #expect(SpeedCheck.recommendation(slow).hasPrefix("Keep Whisper: Parakeet was not faster"))
+        #expect(SpeedCheck.verdict(SpeedCheck.summarize([])) == .needBothEngines)
+    }
+
     @Test func markdownReportHasTheTableRecommendationAndTranscripts() {
         let report = SpeedCheck.markdown(
             measurements: [measure("Whisper", 0, decode: 1), measure("Parakeet", 0, decode: 0.1)],

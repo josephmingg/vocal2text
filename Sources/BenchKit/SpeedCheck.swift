@@ -114,23 +114,41 @@ public enum SpeedCheck {
         }
     }
 
+    /// The outcome of the docs/17 G0.3 gate.
+    public enum Verdict: Sendable, Equatable {
+        case needBothEngines
+        case useParakeet
+        case keepWhisperLessAccurate
+        case keepWhisperNotFaster
+    }
+
     /// The docs/17 G0.3 gate: Parakeet earns the English default when it is
     /// faster and no more than one point of WER worse than Whisper.
-    public static func recommendation(_ summaries: [Summary]) -> String {
+    public static func verdict(_ summaries: [Summary]) -> Verdict {
         guard
             let whisper = summaries.first(where: { $0.engine.lowercased().contains("whisper") }),
             let parakeet = summaries.first(where: { $0.engine.lowercased().contains("parakeet") })
         else {
-            return "Run the check with both engines to get a recommendation."
+            return .needBothEngines
         }
         let faster = parakeet.releaseToTextP50 < whisper.releaseToTextP50
         let accurateEnough = parakeet.wordErrorRate <= whisper.wordErrorRate + 0.01
         switch (faster, accurateEnough) {
-        case (true, true):
+        case (true, true): return .useParakeet
+        case (true, false): return .keepWhisperLessAccurate
+        case (false, _): return .keepWhisperNotFaster
+        }
+    }
+
+    public static func recommendation(_ summaries: [Summary]) -> String {
+        switch verdict(summaries) {
+        case .needBothEngines:
+            return "Run the check with both engines to get a recommendation."
+        case .useParakeet:
             return "Turn on Parakeet for English: it was faster and about as accurate on your voice."
-        case (true, false):
+        case .keepWhisperLessAccurate:
             return "Keep Whisper: Parakeet was faster but noticeably less accurate on your voice."
-        case (false, _):
+        case .keepWhisperNotFaster:
             return "Keep Whisper: Parakeet was not faster on this Mac."
         }
     }

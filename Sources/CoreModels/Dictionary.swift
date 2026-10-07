@@ -90,8 +90,36 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
 extension Array where Element == DictionaryEntry {
     /// Written forms that are vocabulary — recognizer bias terms and
     /// cleanup's protected terms. Snippets are expansions, not words.
+    ///
+    /// Most-used first (docs/17 F10): Whisper's prompt keeps only the first
+    /// 24 terms, and Parakeet's boost list is capped, so the words you say
+    /// most must lead. Ranked by `applyCount`, then `lastAppliedAt`; ties
+    /// keep the stored order. A written form listed twice (any casing) is
+    /// one term.
     public var vocabularyTerms: [String] {
-        filter { !$0.isSnippet }.map(\.written)
+        let ranked = enumerated()
+            .filter { !$0.element.isSnippet }
+            .sorted { lhs, rhs in
+                let left = lhs.element
+                let right = rhs.element
+                if left.applyCount != right.applyCount {
+                    return left.applyCount > right.applyCount
+                }
+                switch (left.lastAppliedAt, right.lastAppliedAt) {
+                case let (leftDate?, rightDate?) where leftDate != rightDate:
+                    return leftDate > rightDate
+                case (.some, .none):
+                    return true
+                case (.none, .some):
+                    return false
+                default:
+                    return lhs.offset < rhs.offset
+                }
+            }
+        var seen = Set<String>()
+        return ranked.compactMap { item in
+            seen.insert(item.element.written.lowercased()).inserted ? item.element.written : nil
+        }
     }
 }
 

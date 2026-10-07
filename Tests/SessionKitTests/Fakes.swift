@@ -130,6 +130,18 @@ actor ScriptedHypotheses {
         last = value
         return value
     }
+
+    /// The next hypothesis as the preview seam returns it: text, no timings.
+    func nextResult() -> TranscriptionResult? {
+        next().map { TranscriptionResult(text: $0, detectedLanguage: .english) }
+    }
+}
+
+/// Records the sample count of every preview decode.
+actor DecodedLengths {
+    private(set) var values: [Int] = []
+
+    func record(_ count: Int) { values.append(count) }
 }
 
 /// Thread-safe string recorder for synchronous callback seams (`onPartial`).

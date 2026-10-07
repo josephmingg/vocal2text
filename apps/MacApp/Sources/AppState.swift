@@ -196,9 +196,11 @@ final class AppState: ObservableObject {
         // straight from defaults so a Settings flip applies to the next
         // dictation; auto mode and pinned ZH stay on WhisperKit, so
         // code-switching accuracy is untouched.
-        let parakeetEngine = ParakeetEngine()
+        let parakeetEngine = ParakeetEngine(
+            boostEnabled: { SettingsStore.parakeetVocabularyBoostIsOn() }
+        )
         let englishRoute = SwitchedEngine(
-            isOn: { UserDefaults.standard.bool(forKey: SettingsStore.parakeetEnglishDefaultsKey) },
+            isOn: { SettingsStore.parakeetEnglishIsOn() },
             on: parakeetEngine,
             off: engine
         )
@@ -294,9 +296,11 @@ final class AppState: ObservableObject {
                 // Never trigger the ~600 MB download from a preview tick; the
                 // preload and the take's own path own that moment.
                 guard await parakeetEngine.isModelLoaded else { return nil }
+                // No dictionary terms: the boost is for the delivered text,
+                // and the preview must stay as cheap as one decode.
                 return try? await parakeetEngine.transcribe(
                     audio, languageMode: .pinned(.english), dictionaryTerms: []
-                ).text
+                )
             },
             onPartial: { text in
                 Task { @MainActor in
@@ -511,6 +515,19 @@ final class AppState: ObservableObject {
                 }
             }
             .store(in: &settingsSinks)
+        // Turning the vocabulary boost on loads its model in the background
+        // (docs/17 G2.2), under the same gates as the Parakeet route.
+        settings.$parakeetVocabularyBoost
+            .dropFirst()
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.settings.languageMode == .pinned(.english) else { return }
+                    self.preloadEngineIfWarmedBefore()
+                }
+            }
+            .store(in: &settingsSinks)
         // Settings → Models switches the primary model live (docs/15 step
         // 15): drop the resident pipe, then warm the chosen model in the
         // background so the next take doesn't pay the load.
@@ -651,6 +668,8 @@ final class AppState: ObservableObject {
         let engine = routedEngine
         let languageMode = mode ?? settings.languageMode
         let detector = speechDetector
+        let parakeetEngine = parakeetEngine
+        let settings = settings
         Task.detached(priority: .utility) {
             // The VAD's ~0.6 MB model first, so the very next take is gated;
             // then the big ASR load.
@@ -662,6 +681,15 @@ final class AppState: ObservableObject {
                     "background model preload failed: \(String(describing: error), privacy: .public)"
                 )
             }
+            // The Parakeet route's vocabulary boost (docs/17 G2.2), only
+            // when it would be used: there are Dictionary words to boost.
+            guard languageMode == .pinned(.english),
+                SettingsStore.parakeetEnglishIsOn(),
+                SettingsStore.parakeetVocabularyBoostIsOn()
+            else { return }
+            let terms = await settings.enabledDictionaryEntries().vocabularyTerms
+            guard !VocabularyBoost.eligibleTerms(terms).isEmpty else { return }
+            await parakeetEngine.prepareVocabularyBoost()
         }
     }
 

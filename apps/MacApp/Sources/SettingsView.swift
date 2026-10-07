@@ -254,17 +254,42 @@ private struct ModelsPane: View {
             }
             Section("English fast path") {
                 Toggle(
-                    "Use Parakeet v2 for pinned English",
+                    "Use Parakeet v2 for English",
                     isOn: $settings.parakeetEnglishEnabled
                 )
                 Text(
                     """
-                    Parakeet TDT runs on the Neural Engine at roughly 100× \
-                    real time — the docs/15 raw-speed lever — and enables the \
-                    live text preview in the HUD while you speak. Applies to \
-                    the next dictation with the language pinned to English; \
-                    Auto, 中文, and မြန်မာ keep their engines. First use \
-                    downloads ~600 MB (FluidAudio manages its own files).
+                    Parakeet TDT runs on the Neural Engine at over 100× real \
+                    time, and shows your words in the HUD while you speak. It \
+                    handles dictation with the language set to English; Auto, \
+                    中文, and မြန်မာ keep their engines. First use downloads \
+                    ~600 MB (FluidAudio manages its own files).
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                if settings.parakeetEnglishEnabled, settings.languageMode == .auto {
+                    // Auto routes to Whisper so mixed-language speech works;
+                    // an English speaker gains Parakeet's speed by pinning.
+                    HStack {
+                        Text("The language is set to Auto, so Whisper is used.")
+                            .font(.caption)
+                        Spacer()
+                        Button("Use English") { settings.languageMode = .pinned(.english) }
+                            .controlSize(.small)
+                    }
+                }
+                Toggle(
+                    "Listen for Dictionary words",
+                    isOn: $settings.parakeetVocabularyBoost
+                )
+                .disabled(!settings.parakeetEnglishEnabled)
+                Text(
+                    """
+                    A small second model checks each take for the words in \
+                    your Dictionary and fixes one Parakeet misheard, only when \
+                    the audio supports it. Downloads once, the first time your \
+                    Dictionary has a word to listen for.
                     """
                 )
                 .font(.caption)

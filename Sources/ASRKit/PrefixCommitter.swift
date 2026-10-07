@@ -24,6 +24,17 @@ public struct PrefixCommitter: Sendable {
 
     public init() {}
 
+    /// Starts with `words` already committed. The trailing-window preview
+    /// hands the committed words still inside its new window to a fresh
+    /// committer, so sliding the window never un-commits them on screen.
+    public init(committedWords words: [String]) {
+        committedWords = words
+        previousWords = words
+    }
+
+    /// The committed words, in order.
+    public var committedWordList: [String] { committedWords }
+
     /// The words committed so far, joined — never shrinks.
     public var committedText: String {
         committedWords.joined(separator: " ")

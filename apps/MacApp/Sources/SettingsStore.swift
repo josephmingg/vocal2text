@@ -155,16 +155,32 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     }
 
     /// docs/15 step 14: route pinned-English dictations to Parakeet TDT v2
-    /// on the Neural Engine. Ships OFF until the owner benchmarks it with
-    /// vocal-bench; the routing seam reads the defaults key directly (see
-    /// `parakeetEnglishDefaultsKey`) so a flip applies to the next dictation.
+    /// on the Neural Engine. ON by default since the owner's Speed Check
+    /// (docs/benchmarks/M0-results.md: 77 ms vs Whisper's 693 ms at the same
+    /// accuracy, docs/17 G2.1); an explicit OFF is kept. The routing seam
+    /// reads defaults directly (`parakeetEnglishIsOn`) so a flip applies to
+    /// the next dictation.
     @Published var parakeetEnglishEnabled: Bool {
         didSet { Self.defaults.set(parakeetEnglishEnabled, forKey: Keys.parakeetEnglish) }
     }
 
-    /// The raw defaults key behind `parakeetEnglishEnabled`, read by the
-    /// engine router off the main actor (UserDefaults is thread-safe).
-    nonisolated static var parakeetEnglishDefaultsKey: String { Keys.parakeetEnglish }
+    /// The engine router's read of `parakeetEnglishEnabled`, off the main
+    /// actor (UserDefaults is thread-safe). One definition of the default,
+    /// so the router and the toggle cannot disagree.
+    nonisolated static func parakeetEnglishIsOn() -> Bool {
+        UserDefaults.standard.object(forKey: Keys.parakeetEnglish) as? Bool ?? true
+    }
+
+    /// docs/17 G2.2: let Parakeet listen for Dictionary words (a small CTC
+    /// keyword spotter, downloaded once on first need). ON by default.
+    @Published var parakeetVocabularyBoost: Bool {
+        didSet { Self.defaults.set(parakeetVocabularyBoost, forKey: Keys.parakeetVocabularyBoost) }
+    }
+
+    /// The Parakeet engine's per-take read of `parakeetVocabularyBoost`.
+    nonisolated static func parakeetVocabularyBoostIsOn() -> Bool {
+        UserDefaults.standard.object(forKey: Keys.parakeetVocabularyBoost) as? Bool ?? true
+    }
 
     /// Set by the composition root once the database opens; dictionary lookups
     /// degrade to empty when the store is unavailable.
@@ -216,7 +232,8 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
         whisperKitModel =
             defaults.string(forKey: Keys.whisperKitModel) ?? WhisperKitEngine.defaultModelName
-        parakeetEnglishEnabled = defaults.object(forKey: Keys.parakeetEnglish) as? Bool ?? false
+        parakeetEnglishEnabled = Self.parakeetEnglishIsOn()
+        parakeetVocabularyBoost = Self.parakeetVocabularyBoostIsOn()
 
         // Settle the legacy hotkey migration on first launch so later reads are
         // plain decodes. `didSet` does not fire from `init`, hence the explicit
@@ -322,6 +339,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let ollamaModel = "settings.ollamaModel"
         static let whisperKitModel = "settings.whisperKitModel"
         static let parakeetEnglish = "settings.parakeetEnglish"
+        static let parakeetVocabularyBoost = "settings.parakeetVocabularyBoost"
         static let modelWarmedOnce = "settings.modelWarmedOnce"
     }
 }

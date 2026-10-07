@@ -288,3 +288,29 @@ func myanmarScriptDetection(text: String, expected: Bool) {
     )
     #expect(try roundTrip(profile) == profile)
 }
+
+// MARK: - Ranked vocabulary (docs/17 F10)
+
+@Test func vocabularyTermsPutTheMostUsedWordsFirst() {
+    let older = Date(timeIntervalSince1970: 1_000)
+    let newer = Date(timeIntervalSince1970: 2_000)
+    let entries = [
+        DictionaryEntry(spoken: "a", written: "Never Used"),
+        DictionaryEntry(spoken: "b", written: "Used Twice", lastAppliedAt: older, applyCount: 2),
+        DictionaryEntry(spoken: "c", written: "Used Once Recently", lastAppliedAt: newer, applyCount: 1),
+        DictionaryEntry(spoken: "d", written: "Used Once Long Ago", lastAppliedAt: older, applyCount: 1),
+        DictionaryEntry(spoken: "e", written: "Also Never Used"),
+    ]
+    #expect(entries.vocabularyTerms == [
+        "Used Twice", "Used Once Recently", "Used Once Long Ago", "Never Used", "Also Never Used",
+    ])
+}
+
+@Test func vocabularyTermsListAWrittenFormOnce() {
+    let entries = [
+        DictionaryEntry(spoken: "sink", written: "sync"),
+        DictionaryEntry(spoken: "think", written: "Sync"),
+        DictionaryEntry(spoken: "cube", written: "Kubernetes"),
+    ]
+    #expect(entries.vocabularyTerms == ["sync", "Kubernetes"])
+}
