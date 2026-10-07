@@ -473,6 +473,39 @@ public final class DatabaseStore: @unchecked Sendable {
         return entries
     }
 
+    /// Counts a delivered take's dictionary replacements (docs/17 F10):
+    /// `applyCount` grows by each entry's occurrences and `lastAppliedAt`
+    /// moves to `date`, so the most-used words lead the recognizer's bias
+    /// list. Updated in place, so the Dictionary keeps its order.
+    public func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) throws {
+        guard !entryIDs.isEmpty else { return }
+        var occurrences: [UUID: Int] = [:]
+        for id in entryIDs { occurrences[id, default: 0] += 1 }
+        try dbQueue.write { db in
+            for (id, count) in occurrences {
+                guard let row = try Row.fetchOne(
+                    db,
+                    sql: "SELECT id, document FROM dictionary_entry WHERE id = ?",
+                    arguments: [id.uuidString]
+                ),
+                    var entry = Self.decodedDocuments(
+                        DictionaryEntry.self, from: [row], column: "dictionary_entry.document"
+                    ).first
+                else { continue }
+                entry.applyCount += count
+                entry.lastAppliedAt = date
+                try db.execute(
+                    sql: "UPDATE dictionary_entry SET document = ? WHERE id = ?",
+                    arguments: [
+                        try Self.encodeJSON(entry, column: "dictionary_entry.document"),
+                        id.uuidString,
+                    ]
+                )
+            }
+        }
+        invalidateDictionaryCache()
+    }
+
     public func deleteDictionaryEntry(id: UUID) throws {
         try dbQueue.write { db in
             try db.execute(

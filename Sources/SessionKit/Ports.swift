@@ -118,6 +118,10 @@ public protocol SessionConfiguring: Sendable {
     /// "Hey Vocal …" becomes a command instead of being typed.
     var wakeWordCommandsEnabled: Bool { get async }
     func enabledDictionaryEntries() async -> [DictionaryEntry]
+    /// Counts the dictionary entries a delivered take applied, one ID per
+    /// replacement (docs/17 F10: the recognizer's bias list leads with the
+    /// most-used words). Called after delivery, off the latency path.
+    func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async
 }
 
 extension SessionConfiguring {
@@ -127,6 +131,8 @@ extension SessionConfiguring {
     /// Default OFF — the owner's choice: reading surrounding text is opt-in.
     public var cleanupUsesSurroundingText: Bool { false }
     public var wakeWordCommandsEnabled: Bool { false }
+    /// Default: nothing is counted.
+    public func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async {}
 }
 
 /// What a press is for (docs/17 G4): ordinary dictation, or a spoken

@@ -262,8 +262,9 @@ private struct ModelsPane: View {
                     Parakeet TDT runs on the Neural Engine at over 100× real \
                     time, and shows your words in the HUD while you speak. It \
                     handles dictation with the language set to English; Auto, \
-                    中文, and မြန်မာ keep their engines. First use downloads \
-                    ~600 MB (FluidAudio manages its own files).
+                    中文, and မြန်မာ keep their engines. It downloads ~600 MB \
+                    once, in the background; English uses Whisper until it is \
+                    ready, and whenever Parakeet fails.
                     """
                 )
                 .font(.caption)

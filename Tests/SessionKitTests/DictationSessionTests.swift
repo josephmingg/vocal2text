@@ -802,6 +802,42 @@ struct DictationSessionTests {
         #expect(delivered == ["Let's meet on saturday.", "Let's meet on saturday."])
     }
 
+    // MARK: - Dictionary use counts (docs/17 F10)
+
+    @Test func aDeliveredTakeCountsEveryDictionaryReplacement() async throws {
+        let cube = DictionaryEntry(spoken: "cube", written: "Kubernetes")
+        let unused = DictionaryEntry(spoken: "vee ess code", written: "VS Code")
+        let usage = DictionaryUsageLog()
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "deploy cube then restart cube", detectedLanguage: .english
+            ),
+            config: StaticConfig(usage: usage, entries: [cube, unused])
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.first?.contains("Kubernetes") == true)
+        // One ID per replacement, and nothing for the entry that never fired.
+        #expect(await usage.calls == [[cube.id, cube.id]])
+    }
+
+    @Test func aTakeThatDoesNotLandCountsNothing() async throws {
+        let cube = DictionaryEntry(spoken: "cube", written: "Kubernetes")
+        let usage = DictionaryUsageLog()
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "deploy cube", detectedLanguage: .english),
+            config: StaticConfig(usage: usage, entries: [cube]),
+            deliveryOutcome: .blockedSecureField(culpritApp: nil)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        #expect(await usage.calls.isEmpty)
+    }
+
     // MARK: - Streaming preview (docs/15 step 22)
 
     @Test func streamingPreviewCommitsThePrefixAcrossHypotheses() async throws {
@@ -897,12 +933,14 @@ struct DictationSessionTests {
 
     @Test func previewDecodesATrailingWindowNotTheWholeTake() async throws {
         // docs/17 G2.3: a long take must not re-decode everything said so
-        // far. With a 3 s window that keeps 1 s, every decode stays near the
-        // window size however long the take runs, and the frozen words stay
-        // on screen ahead of the window.
+        // far. Each half-second of audio carries its own index as its sample
+        // value, and the fake engine "hears" one word per half-second run,
+        // so a wrong window start, offset, or a word lost or repeated across
+        // a slide shows up in the final line.
         let feed = ChunkFeed()
         let partials = LockedStrings()
         let decodedLengths = DecodedLengths()
+        let half = PCMChunk.sampleRate / 2
 
         var dependencies = DictationSession.Dependencies(
             audio: StreamingAudioCapturing(
@@ -916,19 +954,7 @@ struct DictationSessionTests {
             ),
             previewTranscribe: { chunk in
                 await decodedLengths.record(chunk.samples.count)
-                // A word every half second, all agreeing, with timings
-                // relative to the chunk like a real engine reports them.
-                let count = Int(chunk.durationSeconds / 0.5)
-                let words = (0..<count).map {
-                    TranscriptionResult.TimedSegment(
-                        text: "word", start: Double($0) * 0.5, end: Double($0) * 0.5 + 0.4
-                    )
-                }
-                return TranscriptionResult(
-                    text: words.map(\.text).joined(separator: " "),
-                    detectedLanguage: .english,
-                    segments: words
-                )
+                return Self.wordsPerRun(chunk)
             },
             onPartial: { partials.append($0) },
             previewInterval: .milliseconds(5),
@@ -942,12 +968,13 @@ struct DictationSessionTests {
         let session = DictationSession(dependencies: dependencies)
 
         await session.pressBegan()
-        let second = PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate))
         let seconds = 12
-        for pushed in 1...seconds {
-            await feed.push(second)
-            try await waitUntil("partial for second \(pushed)") {
-                partials.snapshot().count >= pushed
+        for second in 0..<seconds {
+            let samples = [Float](repeating: Float(2 * second), count: half)
+                + [Float](repeating: Float(2 * second + 1), count: half)
+            await feed.push(PCMChunk(samples: samples))
+            try await waitUntil("partial for second \(second)") {
+                partials.snapshot().count >= second + 1
             }
         }
         await session.pressEnded()
@@ -957,12 +984,35 @@ struct DictationSessionTests {
         #expect(lengths.count == seconds)
         // Never more than the window plus the second that arrived since.
         #expect(lengths.allSatisfy { $0 <= 4 * PCMChunk.sampleRate })
-        #expect((lengths.last ?? .max) < seconds * PCMChunk.sampleRate)
-        // Frozen words stay on screen: the line holds more words than any
-        // single window could.
-        let lastLine = partials.snapshot().last ?? ""
-        let shownWords = lastLine.split(separator: " ").count
-        #expect(shownWords > 8)
+        // Every half-second, once, in order: frozen words plus the window.
+        // The newest word is still tail-only, so the last line holds all 24.
+        let expected = (0..<(2 * seconds)).map { "w\($0)" }.joined(separator: " ")
+        #expect(partials.snapshot().last == expected)
+    }
+
+    /// One word per run of equal samples at least a quarter second long,
+    /// named after the run's value and timed like a real engine: relative
+    /// to the chunk, ending a little before the next run.
+    private static func wordsPerRun(_ chunk: PCMChunk) -> TranscriptionResult {
+        let rate = Double(PCMChunk.sampleRate)
+        var words: [TranscriptionResult.TimedSegment] = []
+        var runStart = 0
+        let samples = chunk.samples
+        for index in 1...samples.count where index == samples.count || samples[index] != samples[runStart] {
+            if index - runStart >= PCMChunk.sampleRate / 4 {
+                words.append(.init(
+                    text: "w\(Int(samples[runStart]))",
+                    start: Double(runStart) / rate,
+                    end: Double(index) / rate - 0.05
+                ))
+            }
+            runStart = index
+        }
+        return TranscriptionResult(
+            text: words.map(\.text).joined(separator: " "),
+            detectedLanguage: .english,
+            segments: words
+        )
     }
 
     // MARK: - VAD gate + trim (docs/15 step 16)

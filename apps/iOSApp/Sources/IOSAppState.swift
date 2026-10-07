@@ -440,4 +440,9 @@ private final class IOSSessionConfig: SessionConfiguring, @unchecked Sendable {
         guard let database else { return [] }
         return (try? database.dictionaryEntries().filter(\.isEnabled)) ?? []
     }
+
+    /// docs/17 F10: count what a delivered take used.
+    func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async {
+        try? database?.recordDictionaryUse(entryIDs, at: date)
+    }
 }

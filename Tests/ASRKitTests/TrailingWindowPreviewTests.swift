@@ -94,6 +94,93 @@ struct TrailingWindowPreviewTests {
         #expect(after == "a1 a2 a3 a4 a5 a6 a7 a8 a9")
     }
 
+    /// Commits a1…a6 and slides past them, leaving `carried` committed but
+    /// unfrozen (they end after the cut at 3 s).
+    private static func previewAfterASlide() -> TrailingWindowPreview {
+        var preview = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
+        let texts = (1...7).map { "a\($0)" }
+        _ = preview.ingest(text: "", words: Self.words(texts), windowSampleCount: 3 * Self.rate)
+        // Words of 0.4 s every 0.5 s: a1…a6 end by 2.9 s, a7 ends at 3.4 s.
+        _ = preview.ingest(text: "", words: Self.words(texts), windowSampleCount: 4 * Self.rate)
+        return preview
+    }
+
+    @Test func capitalsAndPunctuationDoNotBreakAgreement() {
+        var preview = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
+        _ = preview.ingest(
+            text: "", words: Self.words(["hello", "there", "my", "friend"]), windowSampleCount: 2 * Self.rate
+        )
+        // Parakeet re-decodes with a capital and a comma: still the same words.
+        _ = preview.ingest(
+            text: "", words: Self.words(["Hello,", "there", "my", "friend", "how", "are", "you", "today"]),
+            windowSampleCount: 4 * Self.rate
+        )
+        // Committed words keep the spelling of the hypothesis that committed
+        // them, and that is what freezes.
+        #expect(preview.frozenText == "Hello, there my friend")
+    }
+
+    @Test func aWindowThatDropsTheFirstCarriedWordKeepsIt() {
+        var preview = Self.previewAfterASlide()
+        #expect(preview.frozenText == "a1 a2 a3 a4 a5 a6")
+        // The carried word a7 is committed but not frozen. The new window
+        // starts mid-a7 and does not hear it.
+        let line = preview.ingest(
+            text: "", words: Self.words(["a8", "a9"], from: 0.5), windowSampleCount: 2 * Self.rate
+        )
+        #expect(line == "a1 a2 a3 a4 a5 a6 a7 a8 a9")
+    }
+
+    @Test func aWindowThatRepeatsTheLastFrozenWordShowsItOnce() {
+        var preview = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
+        let texts = (1...6).map { "a\($0)" }
+        _ = preview.ingest(text: "", words: Self.words(texts), windowSampleCount: 3 * Self.rate)
+        _ = preview.ingest(text: "", words: Self.words(texts), windowSampleCount: 4 * Self.rate)
+        #expect(preview.frozenText == texts.joined(separator: " "))
+        // A cut without a pause: the new window hears the end of a6 again.
+        let line = preview.ingest(
+            text: "", words: Self.words(["a6", "a7"], from: 0.0), windowSampleCount: 2 * Self.rate
+        )
+        #expect(line == "a1 a2 a3 a4 a5 a6 a7")
+    }
+
+    @Test func theCutPrefersAPause() {
+        var preview = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
+        // Fluent speech: words touch, except a pause after "two".
+        let words: [TranscriptionResult.TimedSegment] = [
+            .init(text: "one", start: 0.0, end: 0.5),
+            .init(text: "two", start: 0.5, end: 1.0),
+            .init(text: "three", start: 1.5, end: 2.0),
+            .init(text: "four", start: 2.0, end: 2.5),
+            .init(text: "five", start: 2.5, end: 3.5),
+        ]
+        _ = preview.ingest(text: "", words: words, windowSampleCount: 3 * Self.rate)
+        _ = preview.ingest(text: "", words: words, windowSampleCount: 4 * Self.rate)
+        // "four" also ends before the cut, but only "two" is followed by a pause.
+        #expect(preview.frozenText == "one two")
+        #expect(preview.windowStart == Int(1.25 * Double(Self.rate)))
+    }
+
+    @Test func silenceAfterSpeechKeepsTheCommittedWords() {
+        var preview = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
+        _ = preview.ingest(text: "", words: Self.words(["hi", "there"]), windowSampleCount: 2 * Self.rate)
+        _ = preview.ingest(text: "", words: Self.words(["hi", "there"]), windowSampleCount: 3 * Self.rate)
+        // The engine now hears nothing in the window: the words stay shown.
+        let line = preview.ingest(text: "", words: [], windowSampleCount: 5 * Self.rate)
+        #expect(line == "hi there")
+        #expect(preview.frozenText == "hi there")
+        let next = preview.ingest(text: "", words: Self.words(["again"]), windowSampleCount: 2 * Self.rate)
+        #expect(next == "hi there again")
+    }
+
+    @Test func sameWordIgnoresCaseAndEdgePunctuation() {
+        #expect(PrefixCommitter.sameWord("Seven,", "seven"))
+        #expect(PrefixCommitter.sameWord("\"quote\"", "Quote"))
+        #expect(!PrefixCommitter.sameWord("meet", "meat"))
+        #expect(PrefixCommitter.sameWord("—", "—"))
+        #expect(!PrefixCommitter.sameWord("—", "."))
+    }
+
     @Test func silenceSlidesTheWindow() {
         var preview = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
         _ = preview.ingest(text: "", words: [], windowSampleCount: 5 * Self.rate)

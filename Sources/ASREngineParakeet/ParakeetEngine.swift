@@ -37,10 +37,15 @@ public actor ParakeetEngine: TranscriptionEngine {
     private let boostEnabled: @Sendable () -> Bool
     private var ctcModels: CtcModels?
     private var ctcTokenizer: CtcTokenizer?
-    private var isLoadingBoostModels = false
     private var boostLoadFailedAt: Date?
-    /// The boosting session for the last term list; rebuilt when it changes.
-    private var boost: (terms: [String], session: VocabularyBoostingSession)?
+    /// The boosting session and the term set it was built for.
+    private var boost: (key: [String], session: VocabularyBoostingSession)?
+    /// The term set of the background build in flight, if any.
+    private var boostBuildKey: [String]?
+    /// The single in-flight load of the boost models; builds wait on it.
+    private var boostModelLoad: Task<Void, Never>?
+    /// Bumped by `unload`, so a build that finishes afterwards is dropped.
+    private var boostGeneration = 0
 
     /// - Parameter boostEnabled: Read at every take, so a Settings toggle
     ///   applies to the next dictation.
@@ -59,6 +64,13 @@ public actor ParakeetEngine: TranscriptionEngine {
         return AsrModels.modelsExist(at: cache, version: .v2)
             ? .ready
             : .needsDownload(bytes: Self.approximateDownloadBytes)
+    }
+
+    /// True when the Parakeet models are downloaded. The router sends a
+    /// take here only then (docs/17 G2.1): until the download finishes in
+    /// the background, English keeps working on Whisper.
+    public static func modelsAreOnDisk() -> Bool {
+        AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: .v2), version: .v2)
     }
 
     public func prepare(languageMode: LanguageMode) async throws {
@@ -101,7 +113,7 @@ public actor ParakeetEngine: TranscriptionEngine {
 
         let boostTerms = VocabularyBoost.eligibleTerms(dictionaryTerms)
         if !boostTerms.isEmpty, boostEnabled(), !text.isEmpty,
-            let session = await boostSession(for: boostTerms) {
+            let session = readyBoostSession(for: boostTerms) {
             try Task.checkCancellation()
             // Absorbs its own failures: boosting never breaks a take.
             if let rescored = await session.rescore(
@@ -123,10 +135,13 @@ public actor ParakeetEngine: TranscriptionEngine {
         return ASRKit.TranscriptionResult(text: text, detectedLanguage: detected, segments: segments)
     }
 
-    /// Loads the vocabulary boost's models in the background, so the first
-    /// take that has dictionary words can use them. Safe to call often.
-    public func prepareVocabularyBoost() {
-        startBoostModelLoad()
+    /// Loads the vocabulary boost's models and builds its session for
+    /// `terms` in the background, so a later take can use it. Safe to call
+    /// often: a build for the same terms is not repeated.
+    public func prepareVocabularyBoost(terms: [String]) {
+        let eligible = VocabularyBoost.eligibleTerms(terms)
+        guard !eligible.isEmpty else { return }
+        startBoostBuild(for: eligible)
     }
 
     public nonisolated func transcribeStream(
@@ -163,6 +178,8 @@ public actor ParakeetEngine: TranscriptionEngine {
 
     public func unload() async {
         manager = nil
+        boostGeneration += 1
+        boostBuildKey = nil
         boost = nil
         ctcModels = nil
         ctcTokenizer = nil
@@ -170,55 +187,96 @@ public actor ParakeetEngine: TranscriptionEngine {
 
     // MARK: - Vocabulary boost
 
-    /// The boosting session for `terms`, or nil when the boost models are
-    /// not loaded yet (their load is started, and this take goes unboosted).
-    private func boostSession(for terms: [String]) async -> VocabularyBoostingSession? {
-        if let boost, boost.terms == terms { return boost.session }
-        guard let models = ctcModels, let tokenizer = ctcTokenizer else {
-            startBoostModelLoad()
-            return nil
+    /// One key per term set, whatever order the ranking gives it, so a
+    /// reshuffle of use counts does not rebuild the session.
+    private static func boostKey(_ terms: [String]) -> [String] {
+        terms.map { $0.lowercased() }.sorted()
+    }
+
+    /// The session for `terms` if it is already built. Never builds inside a
+    /// take: a missing or stale session starts a background build, and this
+    /// take goes unboosted.
+    private func readyBoostSession(for terms: [String]) -> VocabularyBoostingSession? {
+        if let boost, boost.key == Self.boostKey(terms) { return boost.session }
+        startBoostBuild(for: terms)
+        return nil
+    }
+
+    private func startBoostBuild(for terms: [String]) {
+        let key = Self.boostKey(terms)
+        if boost?.key == key || boostBuildKey == key { return }
+        // Offline or a failed download: retry at most every ten minutes
+        // instead of on every take.
+        if ctcModels == nil, let failedAt = boostLoadFailedAt,
+            Date().timeIntervalSince(failedAt) < 600 {
+            return
         }
+        // A build for an older term set may still be running; it is not
+        // cancelled (it may be mid-download), it just loses to this one.
+        boostBuildKey = key
+        let generation = boostGeneration
+        Task(priority: .utility) {
+            await self.buildBoost(terms: terms, key: key, generation: generation)
+        }
+    }
+
+    private func buildBoost(terms: [String], key: [String], generation: Int) async {
+        defer {
+            if boostBuildKey == key { boostBuildKey = nil }
+        }
+        await loadBoostModelsOnce()
+        guard generation == boostGeneration, boostBuildKey == key,
+            let models = ctcModels, let tokenizer = ctcTokenizer
+        else { return }
         let vocabularyTerms = terms.compactMap { term -> CustomVocabularyTerm? in
             let tokenIds = tokenizer.encode(term)
             return tokenIds.isEmpty ? nil : CustomVocabularyTerm(text: term, ctcTokenIds: tokenIds)
         }
-        guard !vocabularyTerms.isEmpty else { return nil }
+        guard !vocabularyTerms.isEmpty else { return }
         do {
             let session = try await VocabularyBoostingSession(
                 vocabulary: CustomVocabularyContext(terms: vocabularyTerms),
                 ctcModels: models
             )
-            boost = (terms, session)
-            return session
+            // A newer term set started meanwhile: its own build takes over.
+            guard generation == boostGeneration, boostBuildKey == key else { return }
+            boost = (key, session)
+            VocalLog.engine.info("vocabulary boost ready for \(vocabularyTerms.count) terms")
         } catch {
             VocalLog.engine.error(
                 "vocabulary boost setup failed: \(String(describing: error), privacy: .public)"
             )
-            return nil
         }
     }
 
-    private func startBoostModelLoad() {
-        guard ctcModels == nil, !isLoadingBoostModels else { return }
-        // Offline or a failed download: retry at most every ten minutes
-        // instead of on every take.
-        if let failedAt = boostLoadFailedAt, Date().timeIntervalSince(failedAt) < 600 { return }
-        isLoadingBoostModels = true
-        Task(priority: .utility) { await self.loadBoostModels() }
+    /// Loads the CTC models and tokenizer, once: concurrent builds share the
+    /// same download instead of racing on one cache directory.
+    private func loadBoostModelsOnce() async {
+        if ctcModels != nil, ctcTokenizer != nil { return }
+        if let load = boostModelLoad {
+            await load.value
+            return
+        }
+        let generation = boostGeneration
+        let load = Task(priority: .utility) {
+            await self.loadBoostModels(generation: generation)
+        }
+        boostModelLoad = load
+        await load.value
+        boostModelLoad = nil
     }
 
-    private func loadBoostModels() async {
-        defer { isLoadingBoostModels = false }
+    private func loadBoostModels(generation: Int) async {
         do {
             VocalLog.engine.info("loading the vocabulary boost model (parakeet-ctc-110m)")
             let models = try await CtcModels.downloadAndLoad(variant: .ctc110m)
             let tokenizer = try await CtcTokenizer.load(
                 from: CtcModels.defaultCacheDirectory(for: .ctc110m)
             )
+            guard generation == boostGeneration else { return }
             ctcModels = models
             ctcTokenizer = tokenizer
             boostLoadFailedAt = nil
-            VocalLog.engine.info("vocabulary boost ready")
         } catch {
             boostLoadFailedAt = Date()
             VocalLog.engine.error(

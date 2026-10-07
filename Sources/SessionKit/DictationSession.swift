@@ -929,7 +929,10 @@ public actor DictationSession {
         // clipboard is often a password or token copied a moment ago, and
         // the history database is searchable (docs/17 §11).
         var historyText: String?
+        // What this take used from the Dictionary, counted once it lands.
+        var appliedEntryIDs: [UUID] = []
         if let snippet {
+            appliedEntryIDs = [snippet.id]
             var clipboard: String?
             if SnippetTemplate.needsClipboard(snippet.written), let read = deps.readClipboard {
                 clipboard = await read()
@@ -939,8 +942,9 @@ public actor DictationSession {
             }
             stage2Text = SnippetTemplate.expand(snippet.written, clipboard: clipboard, now: deps.now())
         } else {
-            stage2Text = DictionaryEngine.apply(normalized, entries: entries, language: language)
-                .text
+            let applied = DictionaryEngine.apply(normalized, entries: entries, language: language)
+            stage2Text = applied.text
+            appliedEntryIDs = applied.appliedEntryIDs
         }
         let dictionarySeconds = Self.seconds(dictionaryStart.duration(to: clock.now))
 
@@ -1132,6 +1136,9 @@ public actor DictationSession {
         // PersistenceKit, not here).
         let archive = deps.archiveAudio
         let store = deps.store
+        let config = deps.config
+        let usedAt = record.createdAt
+        let usedEntryIDs = appliedEntryIDs
         let previousPersist = persistenceTask
         persistenceTask = Task {
             await previousPersist?.value
@@ -1140,6 +1147,9 @@ public actor DictationSession {
                 record.audioPath = await archive(audio, transcriptID)
             }
             try? await store.save(record)
+            if !usedEntryIDs.isEmpty {
+                await config.recordDictionaryUse(usedEntryIDs, at: usedAt)
+            }
         }
         finishPipeline()
         return true

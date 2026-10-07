@@ -211,7 +211,15 @@ actor InMemoryStore: TranscriptStoring {
 }
 
 /// `SessionConfiguring` fake with fixed values.
+/// Records `recordDictionaryUse` calls.
+actor DictionaryUsageLog {
+    private(set) var calls: [[UUID]] = []
+
+    func record(_ ids: [UUID]) { calls.append(ids) }
+}
+
 struct StaticConfig: SessionConfiguring {
+    var usage: DictionaryUsageLog?
     var masterSwitch = false
     var languageMode = LanguageMode.auto
     var stylePrompt = ""
@@ -223,6 +231,10 @@ struct StaticConfig: SessionConfiguring {
 
     var cleanupRunsOnCleanTakes: Bool {
         get async { runsOnCleanTakes }
+    }
+
+    func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async {
+        await usage?.record(entryIDs)
     }
 
     var dictationStyle: DictationStyle {

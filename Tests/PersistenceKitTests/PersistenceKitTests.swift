@@ -559,6 +559,28 @@ private func makeV1Database(at path: String) throws -> DatabaseQueue {
     #expect(try store.allTranscripts().count == 3)
 }
 
+@Test func recordingDictionaryUseCountsAndKeepsTheOrder() throws {
+    let (store, path) = try makeStore()
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let first = DictionaryEntry(spoken: "cube", written: "Kubernetes")
+    let second = DictionaryEntry(spoken: "sink", written: "sync")
+    try store.save(first)
+    try store.save(second)
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    try store.recordDictionaryUse([second.id, first.id, second.id], at: now)
+
+    let entries = try store.dictionaryEntries()
+    // Updated in place: the Dictionary's order is unchanged.
+    #expect(entries.map(\.id) == [first.id, second.id])
+    #expect(entries.map(\.applyCount) == [1, 2])
+    #expect(entries.allSatisfy { $0.lastAppliedAt == now })
+    // The counts feed the recognizer's ranking.
+    #expect(entries.vocabularyTerms == ["sync", "Kubernetes"])
+    // An unknown ID (an entry deleted meanwhile) is ignored.
+    try store.recordDictionaryUse([UUID()], at: now)
+    #expect(try store.dictionaryEntries().map(\.applyCount) == [1, 2])
+}
 
 #else
 

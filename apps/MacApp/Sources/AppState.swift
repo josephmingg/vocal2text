@@ -199,10 +199,15 @@ final class AppState: ObservableObject {
         let parakeetEngine = ParakeetEngine(
             boostEnabled: { SettingsStore.parakeetVocabularyBoostIsOn() }
         )
+        // Parakeet takes a take only once its models are on disk, and a
+        // Parakeet failure falls back to Whisper (docs/17 G2.1): a default
+        // that changed under an existing install must never cost a take,
+        // offline or mid-download.
         let englishRoute = SwitchedEngine(
-            isOn: { SettingsStore.parakeetEnglishIsOn() },
+            isOn: { SettingsStore.parakeetEnglishIsOn() && ParakeetEngine.modelsAreOnDisk() },
             on: parakeetEngine,
-            off: engine
+            off: engine,
+            fallsBackOnFailure: true
         )
         let routedEngine = LanguageRoutingEngine(
             primary: engine,
@@ -681,15 +686,26 @@ final class AppState: ObservableObject {
                     "background model preload failed: \(String(describing: error), privacy: .public)"
                 )
             }
-            // The Parakeet route's vocabulary boost (docs/17 G2.2), only
-            // when it would be used: there are Dictionary words to boost.
-            guard languageMode == .pinned(.english),
-                SettingsStore.parakeetEnglishIsOn(),
-                SettingsStore.parakeetVocabularyBoostIsOn()
-            else { return }
+            guard languageMode == .pinned(.english), SettingsStore.parakeetEnglishIsOn() else {
+                return
+            }
+            // The router used Whisper above if Parakeet is not downloaded
+            // yet: fetch it now, in the background, so a later take is fast.
+            if !ParakeetEngine.modelsAreOnDisk() {
+                do {
+                    try await parakeetEngine.prepare(languageMode: languageMode)
+                } catch {
+                    VocalLog.engine.error(
+                        "background Parakeet download failed: \(String(describing: error), privacy: .public)"
+                    )
+                    return
+                }
+            }
+            // The vocabulary boost (docs/17 G2.2), only when it would be
+            // used: there are Dictionary words to listen for.
+            guard SettingsStore.parakeetVocabularyBoostIsOn() else { return }
             let terms = await settings.enabledDictionaryEntries().vocabularyTerms
-            guard !VocabularyBoost.eligibleTerms(terms).isEmpty else { return }
-            await parakeetEngine.prepareVocabularyBoost()
+            await parakeetEngine.prepareVocabularyBoost(terms: terms)
         }
     }
 
@@ -715,17 +731,19 @@ final class AppState: ObservableObject {
         let engine = engine
         let burmeseEngine = burmeseEngine
         let parakeetEngine = parakeetEngine
-        let parakeetOn = settings.parakeetEnglishEnabled
+        // Routed exactly as the engine router decides: Parakeet only once
+        // its models are on disk; Whisper until then (docs/17 G2.1).
+        let parakeetRoutes = settings.parakeetEnglishEnabled && ParakeetEngine.modelsAreOnDisk()
         let mode = settings.languageMode
         hintGeneration += 1
         let generation = hintGeneration
         Task { [weak self] in
-            if mode == .pinned(.english), parakeetOn {
+            if mode == .pinned(.english), parakeetRoutes {
                 let loaded = await parakeetEngine.isModelLoaded
                 guard !loaded else { return }
                 guard let self, self.hintGeneration == generation else { return }
                 self.hudState.partialText =
-                    "First Parakeet run: downloading the fast English model (~600 MB) and preparing it — later dictations are instant."
+                    "Loading the fast English model — the first dictation after launch takes a moment longer."
             } else if mode == .pinned(.burmese) {
                 let loaded = await burmeseEngine.isModelLoaded
                 guard !loaded else { return }
@@ -756,8 +774,8 @@ final class AppState: ObservableObject {
     /// the comparison is fair — and scores it. Each engine is prepared first
     /// (a download on first use) and, when `warmUp`, run once untimed so a
     /// first-inference compile never lands in the numbers. Dictionary terms
-    /// are left out: Parakeet does not use them, and the check compares
-    /// engines, not dictionaries.
+    /// are left out, so neither Whisper's prompt bias nor Parakeet's
+    /// vocabulary boost is measured: the check compares the engines alone.
     func speedCheckDecode(
         _ audio: PCMChunk, passageIndex: Int, includeParakeet: Bool, warmUp: Bool
     ) async -> (measurements: [SpeedCheck.Measurement], failures: [String]) {

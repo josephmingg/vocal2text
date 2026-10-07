@@ -311,6 +311,9 @@ func myanmarScriptDetection(text: String, expected: Bool) {
         DictionaryEntry(spoken: "sink", written: "sync"),
         DictionaryEntry(spoken: "think", written: "Sync"),
         DictionaryEntry(spoken: "cube", written: "Kubernetes"),
+        DictionaryEntry(spoken: "sinc", written: "sync"),
     ]
-    #expect(entries.vocabularyTerms == ["sync", "Kubernetes"])
+    // Exact duplicates collapse; another casing is a different spelling
+    // that cleanup must still protect.
+    #expect(entries.vocabularyTerms == ["sync", "Sync", "Kubernetes"])
 }

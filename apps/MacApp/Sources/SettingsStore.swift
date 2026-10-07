@@ -262,6 +262,13 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     /// MainActor, but the entry read does not. The store serves it from its
     /// in-memory cache after the first take (docs/15 step 48), so this is a
     /// SQLite read only immediately after launch or a dictionary edit.
+    /// docs/17 F10: count what a delivered take used, so the most-used
+    /// words lead the recognizer's bias list.
+    nonisolated func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async {
+        let database = await MainActor.run { self.database }
+        try? database?.recordDictionaryUse(entryIDs, at: date)
+    }
+
     nonisolated func enabledDictionaryEntries() async -> [DictionaryEntry] {
         let database = await MainActor.run { self.database }
         guard let database else { return [] }

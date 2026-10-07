@@ -21,8 +21,18 @@ public struct TrailingWindowPreview: Sendable {
 
     private var frozenWords: [String] = []
     private var committer = PrefixCommitter()
+    /// Set by a slide: the next hypothesis starts in a new window and is
+    /// lined up with the words carried over before it is ingested.
+    private var needsAlignment = false
+    /// End times, relative to the new window, of the committed words the
+    /// last slide carried into it (nil where the hypothesis had no timing).
+    private var carriedEnds: [Double?] = []
     private let maxWindowSamples: Int
     private let keepSamples: Int
+
+    /// A word-to-word gap at least this long marks a pause: the preferred
+    /// place to restart the window, so no word straddles the cut.
+    private static let pauseSeconds = 0.08
 
     /// - Parameters:
     ///   - maxWindowSeconds: The longest window decoded before it slides.
@@ -50,72 +60,139 @@ public struct TrailingWindowPreview: Sendable {
         words: [TranscriptionResult.TimedSegment],
         windowSampleCount: Int
     ) -> String {
-        let hypothesisWords = words.isEmpty
-            ? text.split(whereSeparator: \.isWhitespace).map(String.init)
-            : words.map { $0.text.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        let windowLine = committer.ingest(hypothesisWords.joined(separator: " "))
+        var timed = words.isEmpty
+            ? text.split(whereSeparator: \.isWhitespace).map {
+                TranscriptionResult.TimedSegment(text: String($0), start: 0, end: 0)
+            }
+            : words.compactMap { word -> TranscriptionResult.TimedSegment? in
+                let trimmed = word.text.trimmingCharacters(in: .whitespaces)
+                return trimmed.isEmpty
+                    ? nil : TranscriptionResult.TimedSegment(text: trimmed, start: word.start, end: word.end)
+            }
+        if needsAlignment {
+            needsAlignment = false
+            timed = alignedAfterSlide(timed, hasTimings: !words.isEmpty)
+        }
+        let windowLine = committer.ingest(timed.map(\.text).joined(separator: " "))
         let display = Self.join(frozenText, windowLine)
-        slideIfNeeded(text: text, words: words, windowSampleCount: windowSampleCount)
+        slideIfNeeded(timed: words.isEmpty ? [] : timed, text: text, windowSampleCount: windowSampleCount)
         return display
     }
 
+    /// The first hypothesis after a slide is decoded from audio that starts
+    /// at the cut. At a cut without a pause, it can repeat the last frozen
+    /// word or drop the first carried-over one; line it up so the screen
+    /// shows each word once.
+    private func alignedAfterSlide(
+        _ timed: [TranscriptionResult.TimedSegment], hasTimings: Bool
+    ) -> [TranscriptionResult.TimedSegment] {
+        let carried = committer.committedWordList
+        guard let first = timed.first else { return timed }
+        guard !carried.isEmpty else {
+            // A clipped tail of the last frozen word at the very start.
+            if hasTimings, let last = frozenWords.last, first.start < 0.3,
+                PrefixCommitter.sameWord(first.text, last) {
+                return Array(timed.dropFirst())
+            }
+            return timed
+        }
+        if PrefixCommitter.sameWord(first.text, carried[0]) { return timed }
+        // An extra word ahead of the carried ones: the edge of a frozen word.
+        if timed.count > 1, PrefixCommitter.sameWord(timed[1].text, carried[0]) {
+            return Array(timed.dropFirst())
+        }
+        // Carried words the new window did not hear: by text (the
+        // hypothesis starts at the second carried word) or by time (they
+        // ended before the hypothesis's first word starts).
+        var missing = 0
+        if carried.count > 1, PrefixCommitter.sameWord(first.text, carried[1]) {
+            missing = 1
+        }
+        if hasTimings {
+            while missing < carried.count, missing < carriedEnds.count,
+                let end = carriedEnds[missing], end <= first.start + 0.05 {
+                missing += 1
+            }
+        }
+        guard missing > 0 else { return timed }
+        let restored = carried.prefix(missing).map {
+            TranscriptionResult.TimedSegment(text: $0, start: 0, end: 0)
+        }
+        return restored + timed
+    }
+
     private mutating func slideIfNeeded(
+        timed: [TranscriptionResult.TimedSegment],
         text: String,
-        words: [TranscriptionResult.TimedSegment],
         windowSampleCount: Int
     ) {
         guard windowSampleCount > maxWindowSamples else { return }
         let rate = Double(PCMChunk.sampleRate)
         let cutSeconds = Double(windowSampleCount - keepSamples) / rate
 
-        guard !words.isEmpty else {
-            // Nothing heard in the whole window: drop the silence. Text
-            // without timings cannot be cut safely, so that window grows.
+        guard !timed.isEmpty else {
+            // Nothing heard in the whole window: drop the silence. Words
+            // already committed stay on screen, frozen, since their audio is
+            // gone. Text without timings cannot be cut safely, so that
+            // window grows.
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 windowStart += windowSampleCount - keepSamples
+                frozenWords += committer.committedWordList
+                committer = PrefixCommitter()
+                carriedEnds = []
+                needsAlignment = true
             }
             return
         }
 
-        let timed = words.map {
-            (text: $0.text.trimmingCharacters(in: .whitespaces), start: $0.start, end: $0.end)
-        }.filter { !$0.text.isEmpty }
-        guard !timed.isEmpty else { return }
-
-        // Freeze the committed words that the hypothesis agrees with and
-        // that end before the cut.
+        // Freezable: the committed words the hypothesis agrees with that
+        // end before the cut.
         let committed = committer.committedWordList
-        var frozenCount = 0
-        while frozenCount < committed.count, frozenCount < timed.count,
-            timed[frozenCount].text == committed[frozenCount],
-            timed[frozenCount].end <= cutSeconds {
-            frozenCount += 1
+        var agreed = 0
+        while agreed < committed.count, agreed < timed.count,
+            PrefixCommitter.sameWord(timed[agreed].text, committed[agreed]),
+            timed[agreed].end <= cutSeconds {
+            agreed += 1
         }
-
-        var remainingCommitted = Array(committed.dropFirst(frozenCount))
-        if frozenCount == 0 {
+        var freezeCount = agreed
+        if freezeCount == 0 {
             // No agreement for a long stretch (a mumbled or churning start).
-            // Past twice the window, cost wins over display stability:
-            // freeze what the latest hypothesis heard before the cut.
+            // Past twice the window, cost wins: cut by the latest
+            // hypothesis's timings, but show the committed words where they
+            // exist, so nothing already on screen changes.
             guard windowSampleCount > 2 * maxWindowSamples else { return }
-            while frozenCount < timed.count, timed[frozenCount].end <= cutSeconds {
-                frozenCount += 1
-            }
-            guard frozenCount > 0 else { return }
-            frozenWords += timed.prefix(frozenCount).map(\.text)
-            remainingCommitted = []
+            freezeCount = timed.prefix { $0.end <= cutSeconds }.count
+            guard freezeCount > 0 else { return }
         } else {
-            frozenWords += committed.prefix(frozenCount)
+            // Prefer to cut at a pause, so no word straddles the boundary.
+            if let pause = (1...freezeCount).last(where: { count in
+                count == timed.count
+                    || timed[count].start - timed[count - 1].end >= Self.pauseSeconds
+            }) {
+                freezeCount = pause
+            }
         }
 
-        // Restart in the gap after the last frozen word.
-        let lastFrozenEnd = timed[frozenCount - 1].end
-        let boundarySeconds = frozenCount < timed.count
-            ? max(lastFrozenEnd, (lastFrozenEnd + timed[frozenCount].start) / 2)
+        let shown = (0..<freezeCount).map { index in
+            index < committed.count ? committed[index] : timed[index].text
+        }
+        frozenWords += shown
+        let lastFrozenEnd = timed[freezeCount - 1].end
+        let boundarySeconds = freezeCount < timed.count
+            ? max(lastFrozenEnd, (lastFrozenEnd + timed[freezeCount].start) / 2)
             : lastFrozenEnd
         let advance = min(max(0, Int(boundarySeconds * rate)), windowSampleCount - 1)
         windowStart += advance
-        committer = PrefixCommitter(committedWords: remainingCommitted)
+        let carried = Array(committed.dropFirst(freezeCount))
+        carriedEnds = carried.indices.map { offset in
+            let index = freezeCount + offset
+            guard index < timed.count,
+                PrefixCommitter.sameWord(timed[index].text, carried[offset])
+            else { return nil }
+            return timed[index].end - Double(advance) / rate
+        }
+        committer = PrefixCommitter(committedWords: carried)
+        needsAlignment = true
     }
 
     private static func join(_ head: String, _ tail: String) -> String {

@@ -94,8 +94,9 @@ extension Array where Element == DictionaryEntry {
     /// Most-used first (docs/17 F10): Whisper's prompt keeps only the first
     /// 24 terms, and Parakeet's boost list is capped, so the words you say
     /// most must lead. Ranked by `applyCount`, then `lastAppliedAt`; ties
-    /// keep the stored order. A written form listed twice (any casing) is
-    /// one term.
+    /// keep the stored order. A written form listed twice is one term;
+    /// different casings stay distinct, because cleanup protects each exact
+    /// spelling (the recognizer lists fold case themselves).
     public var vocabularyTerms: [String] {
         let ranked = enumerated()
             .filter { !$0.element.isSnippet }
@@ -118,7 +119,7 @@ extension Array where Element == DictionaryEntry {
             }
         var seen = Set<String>()
         return ranked.compactMap { item in
-            seen.insert(item.element.written.lowercased()).inserted ? item.element.written : nil
+            seen.insert(item.element.written).inserted ? item.element.written : nil
         }
     }
 }

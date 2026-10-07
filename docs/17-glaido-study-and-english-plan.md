@@ -490,8 +490,8 @@ Still open: 1, 5, 10, 11, 12, plus which five commands you use most.
 | G3.4 | **AI Prompt** built-in profile (Claude, ChatGPT, claude.ai, chatgpt.com, gemini.google.com); idempotent built-in upgrades for existing installs | Linux |
 | G4.1–4.4 | **Command mode**: a command key (Settings → General → Commands, off by default) plus an opt-in "Vocal, …" wake word; the selection captured at press; arithmetic and date/time answered locally; otherwise Ollama, falling back to Apple's on-device model; a key-capable non-activating preview where **Return inserts**, ⌘C copies and Escape or clicking away dismisses | Linux (parser, tools, prompt, sanitizer, session routing, request body); app code for the key, panel and insertion |
 | G0.1 | **Speed Check** (Settings tab): three passages, the same audio decoded by Whisper and Parakeet after a warm-up, p50/p95, real-time factor, WER, the G0.3 recommendation, and a Markdown report to copy or save as `docs/benchmarks/M0-results.md` | Linux (scoring, report) |
-| G2.1 | **Parakeet is the default English engine.** The toggle is ON unless you switched it off, and Auto still uses Whisper. Settings → Models offers **Use English** when the language is Auto, and Speed Check offers **Use Parakeet for English** when its verdict says so | Linux (verdict); app code for the toggle and buttons |
-| G2.2 F9/F10 | **Parakeet listens for Dictionary words.** FluidAudio's CTC keyword spotter (parakeet-ctc-110m) rescores each take against your Dictionary and swaps a word only when the audio supports the term (Settings → Models → "Listen for Dictionary words", ON). The model downloads in the background the first time there is a word to listen for, never inside a take. Dictionary terms are now ranked most-used first and listed once, so Whisper's 24-term prompt and Parakeet's 256-term cap keep your most-used words | Linux (ranking, term filter); app/engine code for the boost |
+| G2.1 | **Parakeet is the default English engine.** The toggle is ON unless you switched it off, and Auto still uses Whisper. A take goes to Parakeet only once its models are on disk (they download in the background), and a Parakeet failure falls back to Whisper for that take. Settings → Models offers **Use English** when the language is Auto, and Speed Check offers **Use Parakeet for English** when its verdict says so | Linux (verdict, fallback); app code for the toggle, routing and buttons |
+| G2.2 F9/F10 | **Parakeet listens for Dictionary words.** FluidAudio's CTC keyword spotter (parakeet-ctc-110m) rescores each take against your Dictionary and swaps a word only when the audio supports the term (Settings → Models → "Listen for Dictionary words", ON). The model downloads and the boost is built in the background, never inside a take; a take uses the boost only once it is ready. Each delivered take now records which Dictionary entries it used (`applyCount`, `lastAppliedAt` were never written before), and terms are ranked most-used first, so Whisper's 24-term prompt and Parakeet's 256-term cap keep your most-used words | Linux (use counts, ranking, term filter); app/engine code for the boost |
 | G2.3 F6/F7 | **Live text is on by default** with Parakeet (it follows the G2.1 default), and the preview decodes only a **trailing window**: past 14 s, committed words that end before the last 6 s are frozen on screen and never decoded again. A long take now costs the same per tick as a short one, and the preview buffer drops audio it no longer needs | Linux (window logic, session wiring) |
 
 ### Not built (still in the plan)
@@ -731,26 +731,52 @@ is in the §9 table (G2.1, G2.2, G2.3); checklist items 15–18 cover it on hard
 - Auto still uses Whisper, so mixed-language speech keeps working. Parakeet needs the
   language set to English; Settings → Models and Speed Check each offer one click for it.
 - An existing install that had the language pinned to English but never touched the
-  Parakeet toggle now uses Parakeet. Its model downloads once in the background at the
-  next launch (the usual preload, gated on a previous successful model load).
+  Parakeet toggle now uses Parakeet once its model is downloaded. The download runs once
+  in the background at the next launch (the usual preload, gated on a previous successful
+  model load); until it finishes, and offline, English keeps using Whisper.
 - The vocabulary boost only swaps a word when FluidAudio's CTC spotter finds acoustic
   evidence for a Dictionary term. When it changes the text, the take's word timings are
   dropped rather than left contradicting it. The preview never runs the boost.
 - Dictionary terms are ranked most-used first everywhere they are used (Whisper's prompt,
-  Parakeet's boost, cleanup's protected terms), and a written form is listed once.
+  Parakeet's boost, cleanup's protected terms). An exact duplicate is listed once;
+  another casing stays, since cleanup protects each exact spelling.
+- The preview compares words without case or edge punctuation (Parakeet capitalizes a
+  window that starts mid-sentence), restarts the window at a pause when it can, and
+  lines up the first hypothesis after a slide so a word at the cut is shown once.
 
 **Not built:** G2.4 (needs insertion timings from your Mac), G2.5 (dropped: Parakeet is
 the English engine).
 
+### Independent review (before the push)
+A cold reviewer checked every FluidAudio call against the pinned 0.15.6 source (no compile
+problems found) and reported four behaviour bugs, each verified and fixed:
+1. **The preview matched words exactly.** A window restarting mid-sentence comes back
+   capitalized ("Seven," for "seven"), so nothing froze and words got rewritten; a word at
+   the cut could show twice or vanish. Fixed: matching ignores case and edge punctuation,
+   cuts prefer pauses, and the first hypothesis after a slide is lined up with the carried
+   words (by text and by timing). Silence now freezes the words already shown.
+2. **Default ON had no fallback.** With English pinned and Parakeet not yet downloaded, an
+   offline take would fail where it used Whisper before. Fixed: Parakeet takes a take only
+   once its models are on disk, the download runs in the background, and a Parakeet
+   failure falls back to Whisper.
+3. **The ranking had nothing to rank.** `applyCount`/`lastAppliedAt` were never written.
+   Fixed: delivered takes record the entries they used (in place, so the Dictionary keeps
+   its order), on Mac and iOS.
+4. **The boost was built inside a take.** Fixed: models load and the session builds in the
+   background (one shared download), keyed by the term set so a re-ranking does not
+   rebuild it; a take uses the boost only when it is ready.
+Also: cleanup's protected terms keep each casing again, and `unload` drops a boost build
+that finishes afterwards.
+
 ### Evidence
-- **Linux:** `swift build --build-tests && swift test` in `swift:6.0-noble`: 824 tests pass,
-  up from 807. The preview tests also passed 8 runs in a row limited to 2 CPUs.
+- **Linux:** `swift build --build-tests && swift test` in `swift:6.0-noble`: 834 tests pass,
+  up from 807. The preview tests passed 8 runs in a row limited to 2 CPUs.
 - **SwiftLint:** exits 0; no warnings on the changed lines.
-- **Mutation checks:** 11 runs. 9 re-introduced bugs were caught. One mutant survived at
-  first (freezing words the hypothesis no longer agrees with); a test was added and it is
-  now caught. One mutant was equivalent (the buffer drops old audio just before the read)
-  and was replaced by one that decodes the whole take, which is caught.
-- **Not verified here:** everything in `ParakeetEngine` and the Mac app. FluidAudio only
-  builds on Apple platforms, so its API use was checked against the pinned 0.15.6 source
-  and is compiled by CI. The boost's accuracy and its added latency per take are
-  unmeasured; Speed Check does not include the boost.
+- **Mutation checks:** 25 runs over both passes. Every re-introduced bug that Linux can
+  test was caught. One mutant was equivalent and was replaced. One runs on macOS only (the
+  use-count write in PersistenceKit): its GRDB code and test are not compiled on Linux.
+- **Not verified here:** everything in `ParakeetEngine`, the Mac app, and
+  `DatabaseStore.recordDictionaryUse` with its test. They first compile and run in CI's
+  macOS jobs. FluidAudio's API use was checked against its pinned source. The boost's
+  accuracy and its added latency per take are unmeasured; Speed Check does not include
+  the boost.
