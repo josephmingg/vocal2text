@@ -56,6 +56,32 @@ struct SpeedCheckTests {
         #expect(SpeedCheck.recommendation(summaries).hasPrefix("Keep Whisper: Parakeet was faster"))
     }
 
+    @Test func oneOrTwoWordsWorseIsStillAboutAsAccurate() {
+        // The owner's second run: Parakeet heard "sink" for "sync" where
+        // Whisper did not, and the old one-point rule flipped to Keep Whisper
+        // on that single word (docs/17 §9).
+        let passage = SpeedCheck.passages[1]
+        let oneWord = passage.replacingOccurrences(of: "sync", with: "sink")
+        let twoWords = oneWord.replacingOccurrences(of: "dentist", with: "dense")
+        let threeWords = twoWords.replacingOccurrences(of: "onboarding", with: "boarding")
+        for (text, expected) in [
+            (oneWord, SpeedCheck.Verdict.useParakeet),
+            (twoWords, .useParakeet),
+            (threeWords, .keepWhisperLessAccurate),
+        ] {
+            let summaries = SpeedCheck.summarize([
+                measure("Whisper", 1, decode: 1), measure("Parakeet", 1, decode: 0.1, text: text),
+            ])
+            #expect(SpeedCheck.verdict(summaries) == expected, "\(summaries.map(\.wordErrors))")
+        }
+    }
+
+    @Test func theToleranceIsTwoWordsOrOnePointOfWER() {
+        #expect(SpeedCheck.errorTolerance(words: 94) == 2)
+        #expect(SpeedCheck.errorTolerance(words: 0) == 2)
+        #expect(SpeedCheck.errorTolerance(words: 600) == 6)
+    }
+
     @Test func oneEngineGetsNoRecommendation() {
         let summaries = SpeedCheck.summarize([measure("Whisper", 0, decode: 1)])
         #expect(SpeedCheck.recommendation(summaries).hasPrefix("Run the check with both engines"))
@@ -82,5 +108,6 @@ struct SpeedCheckTests {
         #expect(report.contains("| Whisper | 1 | 1002 ms |"))
         #expect(report.contains("**Recommendation:** Turn on Parakeet"))
         #expect(report.contains("**Parakeet**, passage 1"))
+        #expect(report.contains("Word errors, of 34 words: Whisper 0, Parakeet 0."))
     }
 }

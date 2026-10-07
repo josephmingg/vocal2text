@@ -525,6 +525,31 @@ Run on the owner's Mac (Mac16,5, macOS 26.7.1); the full report is
 
 G0.3's rule says Parakeet for English, so G2.1's gate is met.
 
+### Speed Check, second run (2026-10-07, checklist #18)
+
+After G2, a fresh recording; full report in
+[`docs/benchmarks/M0-results-run2.md`](benchmarks/M0-results-run2.md).
+
+| Engine | Release→text p50 / p95 | Real-time factor | WER (word errors of 94) |
+|---|---|---|---|
+| Whisper large-v3 turbo | 689 / 707 ms | 18x | 6.4% (6) |
+| Parakeet (English) | 82 / 82 ms | 163x | 7.4% (7) |
+
+- **Speed: unchanged.** Parakeet 82 ms against 77 ms in run 1; G2's per-take work (word
+  timings) costs nothing visible. #18 passes.
+- **Accuracy: the same, swapped.** Run 1 was 7 against 6 errors in Parakeet's favour; run 2
+  is 6 against 7 the other way. Both times the deciding word was "sync": this time Whisper
+  heard it and Parakeet wrote "sink". Over both runs each engine made 13 errors in 188
+  words. Passage 3 errors were identical across engines ("fix" for "find", "launch" for
+  "lunch"), which points at the reading, not the engine.
+- **The rule flipped on that one word.** One point of WER is one word in this check, so
+  the app said "Keep Whisper: … noticeably less accurate". Fixed: Parakeet now counts as
+  about as accurate when it makes at most two more word errors (or one point, for longer
+  samples), and the report prints the error counts. Parakeet stayed the English engine
+  throughout; the verdict only decides whether the pane offers its button.
+- Speed Check runs both engines without your Dictionary, so the boost (#16) is not in
+  these numbers.
+
 ### Hardware checklist (run once on your Mac after `make install`)
 | # | Check | Why |
 |---|---|---|
@@ -545,7 +570,7 @@ G0.3's rule says Parakeet for English, so G2.1's gate is met.
 | 15 | With the language on English, dictate: words appear in the HUD while you speak, and the first take after relaunch is still fast | G2.1, G2.3 |
 | 16 | Add "sync" to the Dictionary, wait a minute (the boost model downloads once), then say "move our weekly sync to Thursday": it comes out "sync", and "the kitchen sink is full" still says "sink" | G2.2 |
 | 17 | Hold a hands-free take for 2+ minutes: the HUD keeps up, and the text appears promptly at release | G2.3 |
-| 18 | Run Speed Check again: Parakeet's numbers should match the first run (the boost is not part of Speed Check) | G2 regression |
+| 18 | ✅ 2026-10-07. Run Speed Check again: Parakeet's numbers should match the first run (the boost is not part of Speed Check) | G2 regression |
 
 ---
 

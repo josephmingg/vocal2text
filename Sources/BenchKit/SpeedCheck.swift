@@ -81,6 +81,11 @@ public enum SpeedCheck {
         public var realTimeFactor: Double
         /// Word-weighted across passages.
         public var wordErrorRate: Double
+        /// Words in the passages this engine read; WER's denominator.
+        public var referenceWords: Int = 0
+
+        /// Wrong, missing or extra words, counted against the passages.
+        public var wordErrors: Int { Int((wordErrorRate * Double(referenceWords)).rounded()) }
     }
 
     /// One summary per engine, in first-seen order.
@@ -109,7 +114,8 @@ public enum SpeedCheck {
                 releaseToTextP50: Percentile.value(latencies, 50),
                 releaseToTextP95: Percentile.value(latencies, 95),
                 realTimeFactor: decode > 0 ? audio / decode : 0,
-                wordErrorRate: words > 0 ? errors / words : 0
+                wordErrorRate: words > 0 ? errors / words : 0,
+                referenceWords: Int(words)
             )
         }
     }
@@ -122,8 +128,18 @@ public enum SpeedCheck {
         case keepWhisperNotFaster
     }
 
+    /// How many more word errors Parakeet may make and still count as about
+    /// as accurate. The check reads about 94 words, so one point of WER is a
+    /// single word, and one reading of the same passage varies by a word or
+    /// two: the owner's two runs split 6 against 7 errors, once each way, on
+    /// the same "sync"/"sink" word. A gap that small is the reading, not the
+    /// engine. Longer samples get one point of WER instead.
+    static func errorTolerance(words: Int) -> Int {
+        max(2, Int((Double(words) * 0.01).rounded()))
+    }
+
     /// The docs/17 G0.3 gate: Parakeet earns the English default when it is
-    /// faster and no more than one point of WER worse than Whisper.
+    /// faster and makes no more than `errorTolerance` extra word errors.
     public static func verdict(_ summaries: [Summary]) -> Verdict {
         guard
             let whisper = summaries.first(where: { $0.engine.lowercased().contains("whisper") }),
@@ -132,7 +148,8 @@ public enum SpeedCheck {
             return .needBothEngines
         }
         let faster = parakeet.releaseToTextP50 < whisper.releaseToTextP50
-        let accurateEnough = parakeet.wordErrorRate <= whisper.wordErrorRate + 0.01
+        let words = max(whisper.referenceWords, parakeet.referenceWords)
+        let accurateEnough = parakeet.wordErrors <= whisper.wordErrors + errorTolerance(words: words)
         switch (faster, accurateEnough) {
         case (true, true): return .useParakeet
         case (true, false): return .keepWhisperLessAccurate
@@ -174,6 +191,10 @@ public enum SpeedCheck {
                     + String(format: "%.0fx", summary.realTimeFactor) + " | "
                     + String(format: "%.1f%%", summary.wordErrorRate * 100) + " |"
             )
+        }
+        if let words = summaries.map(\.referenceWords).max(), words > 0 {
+            let counts = summaries.map { "\($0.engine) \($0.wordErrors)" }.joined(separator: ", ")
+            lines += ["", "Word errors, of \(words) words: \(counts)."]
         }
         lines += ["", "**Recommendation:** \(recommendation(summaries))", "", "## Transcripts", ""]
         for measurement in measurements {
