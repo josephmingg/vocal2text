@@ -492,13 +492,35 @@ Still open: 1, 5, 10, 11, 12, plus which five commands you use most.
 | G0.1 | **Speed Check** (Settings tab): three passages, the same audio decoded by Whisper and Parakeet after a warm-up, p50/p95, real-time factor, WER, the G0.3 recommendation, and a Markdown report to copy or save as `docs/benchmarks/M0-results.md` | Linux (scoring, report) |
 
 ### Not built (still in the plan)
-- G2: Parakeet as the default, vocabulary boosting, trailing-window preview. Waits on your
-  Speed Check numbers.
+- G2: Parakeet as the default, vocabulary boosting, trailing-window preview. The gate is
+  now met (see "Speed Check result" below); building it waits on your go-ahead.
 - G3.1: Ollama is still tried first, then Apple's model; cleanup is still OFF by default.
 - G3.5: speculative cleanup.
 - G3.6: deterministic "scratch that".
 - G4.5: MCP tools.
 - G5: the learning loop, quick fix, hands-free chord, ⌘K, and two-stage first run.
+
+### Speed Check result (2026-10-07, checklist #1 done)
+
+Run on the owner's Mac (Mac16,5, macOS 26.7.1); the full report is
+[`docs/benchmarks/M0-results.md`](benchmarks/M0-results.md).
+
+| Engine | Release→text p50 / p95 | Real-time factor | WER |
+|---|---|---|---|
+| Whisper large-v3 turbo | 693 / 700 ms | 19x | 7.4% |
+| Parakeet (English) | 77 / 81 ms | 177x | 6.4% |
+
+- **Speed:** Parakeet is about 9x faster. The gap is consistent across all three passages.
+- **Accuracy:** the sample is about 110 words, so 1 point of WER is roughly one word.
+  The two engines are as accurate as each other here; this run does not show Parakeet
+  is *more* accurate.
+- **Shared mishearings:** both wrote "sink" for "sync" and "rename" for "renamed".
+  "sync" is a natural first vocabulary-boost term for G2.2.
+- **Whisper only:** it dropped words in passage 1 ("I already did this morning" for
+  "I read it this morning").
+- **Parakeet only:** it joined two sentences with a comma in passage 3.
+
+G0.3's rule says Parakeet for English, so G2.1's gate is met.
 
 ### Hardware checklist (run once on your Mac after `make install`)
 | # | Check | Why |
