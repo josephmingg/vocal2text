@@ -464,8 +464,9 @@ final class AppState: ObservableObject {
                 }
             }
             // docs/15 step 36: an AirPods connect or input switch mid-take
-            // reconfigures the engine under the tap; end the take through the
-            // normal stop path so the audio captured so far is delivered.
+            // reconfigures the engine under the tap. Capture reopens the input
+            // itself; this fires only when it could not recover, and ends the
+            // take through the normal stop path so the audio so far is kept.
             await microphone.setConfigurationChangeHandler {
                 Task { @MainActor in
                     relay.noteDeviceChange()

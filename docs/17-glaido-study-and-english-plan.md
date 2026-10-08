@@ -567,10 +567,21 @@ After G2, a fresh recording; full report in
 | 12 | Double-tap the command key, then hold it and type ⌥+a letter mid-command: the take still ends on release | review #2 |
 | 13 | "Fix the grammar" on already-correct selected text: "Already fine — nothing changed", no duplicate | review #3 |
 | 14 | Cancel a Speed Check passage: no Recover item appears | review #4 |
-| 15 | With the language on English, dictate: words appear in the HUD while you speak, and the first take after relaunch is still fast | G2.1, G2.3 |
+| 15 | ✅ 2026-10-08 (words show in the HUD). With the language on English, dictate: words appear in the HUD while you speak, and the first take after relaunch is still fast | G2.1, G2.3 |
 | 16 | Add "sync" to the Dictionary, wait a minute (the boost model downloads once), then say "move our weekly sync to Thursday": it comes out "sync", and "the kitchen sink is full" still says "sink" | G2.2 |
 | 17 | Hold a hands-free take for 2+ minutes: the HUD keeps up, and the text appears promptly at release | G2.3 |
 | 18 | ✅ 2026-10-07. Run Speed Check again: Parakeet's numbers should match the first run (the boost is not part of Speed Check) | G2 regression |
+| 19 | With AirPods connected (as the input, or just connected), dictate a sentence: the text arrives, and no "Audio device changed — take saved" notice appears | AirPods fix below |
+
+**AirPods did not dictate at all (reported 2026-10-08).** Cause, from reading the code
+(not yet confirmed on the Mac): opening the AirPods microphone switches the headset to its
+call profile, which reconfigures the audio input a moment after the take starts. Vocal
+treated every such change as "the device went away" and ended the take at once, so an
+AirPods take never got going. Now capture moves its tap to a fresh engine on the input as
+it is, and the take carries on: up to three reopens per take, with one short settle-and-
+retry if the new format is not ready. Only when that fails does the take end with what was
+captured. The fraction of a second spoken while the headset switches is still lost. The
+log says `input reconfigured mid-take — reopened at … Hz` each time it happens.
 
 ---
 
