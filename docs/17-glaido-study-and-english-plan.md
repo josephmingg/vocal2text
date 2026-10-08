@@ -571,10 +571,11 @@ After G2, a fresh recording; full report in
 | 16 | Add "sync" to the Dictionary, wait a minute (the boost model downloads once), then say "move our weekly sync to Thursday": it comes out "sync", and "the kitchen sink is full" still says "sink" | G2.2 |
 | 17 | Hold a hands-free take for 2+ minutes: the HUD keeps up, and the text appears promptly at release | G2.3 |
 | 18 | ✅ 2026-10-07. Run Speed Check again: Parakeet's numbers should match the first run (the boost is not part of Speed Check) | G2 regression |
-| 19 | With AirPods connected (as the input, or just connected), dictate a sentence: the text arrives, and no "Audio device changed — take saved" notice appears | AirPods fix below |
+| 19 | ✅ 2026-10-08 (owner: "I think it works now"). With AirPods connected (as the input, or just connected), dictate a sentence: the text arrives, and no "Audio device changed — take saved" notice appears | AirPods fix below |
 
 **AirPods did not dictate at all (reported 2026-10-08).** Cause, from reading the code
-(not yet confirmed on the Mac): opening the AirPods microphone switches the headset to its
+(the fix made AirPods work on the owner's Mac, which supports it; the log lines below
+were not checked): opening the AirPods microphone switches the headset to its
 call profile, which reconfigures the audio input a moment after the take starts. Vocal
 treated every such change as "the device went away" and ended the take at once, so an
 AirPods take never got going. Now capture moves its tap to a fresh engine on the input as
