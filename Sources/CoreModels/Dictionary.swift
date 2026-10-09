@@ -23,6 +23,39 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
     public var createdAt: Date
     public var lastAppliedAt: Date?
     public var applyCount: Int
+    /// Explicit snippet choice; nil derives it from the written form (see
+    /// `isSnippet`). Optional so documents written before it existed decode
+    /// unchanged and older builds simply ignore the key.
+    public var snippet: Bool?
+
+    /// A snippet is a voice shortcut ("my address" → a multi-line address),
+    /// not a spelling fix: it fires only when it is the *whole* dictation
+    /// (docs/17 F5), its written form is never fed to the recognizer as a
+    /// bias term, and cleanup never sees it as a protected term. Unset, a
+    /// multi-line or long (> 40 characters) written form makes an entry a
+    /// snippet — the same line the recognizer's bias filter already drew.
+    public var isSnippet: Bool {
+        snippet ?? Self.looksLikeSnippet(written)
+    }
+
+    public static func looksLikeSnippet(_ written: String) -> Bool {
+        written.contains(where: \.isNewline) || written.count > 40
+    }
+
+    /// Entries written before snippets existed that the derived rule would
+    /// now turn into whole-take snippets — "acme" → a 45-character company
+    /// name used mid-sentence for months would silently stop applying. Run
+    /// once per install: each comes back pinned to its old inline behaviour
+    /// (`snippet: false`) for the caller to save. New entries keep the
+    /// derived default (docs/17 §11).
+    public static func legacyEntriesPinnedInline(_ entries: [DictionaryEntry]) -> [DictionaryEntry] {
+        entries.compactMap { entry in
+            guard entry.snippet == nil, looksLikeSnippet(entry.written) else { return nil }
+            var pinned = entry
+            pinned.snippet = false
+            return pinned
+        }
+    }
 
     public init(
         id: UUID = UUID(),
@@ -33,7 +66,8 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
         isEnabled: Bool = true,
         createdAt: Date = .init(timeIntervalSince1970: 0),
         lastAppliedAt: Date? = nil,
-        applyCount: Int = 0
+        applyCount: Int = 0,
+        snippet: Bool? = nil
     ) {
         self.id = id
         self.spoken = spoken
@@ -49,6 +83,44 @@ public struct DictionaryEntry: Codable, Sendable, Hashable, Identifiable {
         self.createdAt = createdAt
         self.lastAppliedAt = lastAppliedAt
         self.applyCount = applyCount
+        self.snippet = snippet
+    }
+}
+
+extension Array where Element == DictionaryEntry {
+    /// Written forms that are vocabulary — recognizer bias terms and
+    /// cleanup's protected terms. Snippets are expansions, not words.
+    ///
+    /// Most-used first (docs/17 F10): Whisper's prompt keeps only the first
+    /// 24 terms, and Parakeet's boost list is capped, so the words you say
+    /// most must lead. Ranked by `applyCount`, then `lastAppliedAt`; ties
+    /// keep the stored order. A written form listed twice is one term;
+    /// different casings stay distinct, because cleanup protects each exact
+    /// spelling (the recognizer lists fold case themselves).
+    public var vocabularyTerms: [String] {
+        let ranked = enumerated()
+            .filter { !$0.element.isSnippet }
+            .sorted { lhs, rhs in
+                let left = lhs.element
+                let right = rhs.element
+                if left.applyCount != right.applyCount {
+                    return left.applyCount > right.applyCount
+                }
+                switch (left.lastAppliedAt, right.lastAppliedAt) {
+                case let (leftDate?, rightDate?) where leftDate != rightDate:
+                    return leftDate > rightDate
+                case (.some, .none):
+                    return true
+                case (.none, .some):
+                    return false
+                default:
+                    return lhs.offset < rhs.offset
+                }
+            }
+        var seen = Set<String>()
+        return ranked.compactMap { item in
+            seen.insert(item.element.written).inserted ? item.element.written : nil
+        }
     }
 }
 

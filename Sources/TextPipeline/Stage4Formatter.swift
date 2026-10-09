@@ -65,9 +65,45 @@ public enum Stage4Formatter: Sendable {
     private static let sentenceTerminators: Set<Character> = [".", "!", "?", "。", "！", "？"]
 
     /// "!!" → "!", "?." → "?": a run of terminal marks keeps its first mark.
-    /// Single marks ("U.S.", "3.14") are runs of one and never touched.
+    /// Single marks ("U.S.", "3.14") are runs of one and never touched, and
+    /// a run only collapses where a sentence can end — before a space, a
+    /// closing quote or bracket, or the end of the text — so "pages 1..5",
+    /// "cd ../config" and "git diff main..feature" are kept as written.
+    ///
+    /// A collapsed run ends a sentence, so the word after it takes a capital:
+    /// "Wait... are you serious?" → "Wait. Are you serious?", never a full
+    /// stop followed by a lowercase word (owner decision, docs/17 F3). Only
+    /// words after a *collapsed* run are capitalized — "e.g. this" keeps the
+    /// speaker's casing — and a word spelled with an inner capital
+    /// ("iPhone") keeps it.
     private static func collapseDuplicateTerminalPunctuation(_ text: String) -> String {
-        PipelineRegex.replacing(pattern: "([.!?])[.!?]+", in: text, with: "$1")
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: "([.!?])[.!?]+(?=[\\s\"'”’)\\]]|$)(?:(\\s+)(\\p{Ll}[\\p{L}\\p{N}]*))?"
+            )
+        else { return text }
+        let nsText = text as NSString
+        var result = ""
+        var cursor = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+            result += nsText.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            cursor = match.range.location + match.range.length
+            result += nsText.substring(with: match.range(at: 1))
+            if match.range(at: 3).location != NSNotFound {
+                result += nsText.substring(with: match.range(at: 2))
+                result += Stage1Normalizer.capitalizedFirstLetter(nsText.substring(with: match.range(at: 3)))
+            }
+        }
+        result += nsText.substring(from: cursor)
+        return result
+    }
+
+    /// Spacing only, never casing: a snippet's written form is authoritative
+    /// ("joseph@example.com" must not become "Joseph@example.com" after a
+    /// full stop), but it still needs a separating space after a word.
+    public static func spacedOnly(_ text: String, precedingContext: String?) -> String {
+        guard !text.isEmpty, let context = precedingContext else { return text }
+        return smartSpaced(text, against: context, capitalize: false)
     }
 
     // Capitalization keys off the last non-whitespace character so "Done. "

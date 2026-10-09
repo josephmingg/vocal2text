@@ -39,7 +39,17 @@ enum AXInserter {
         // Insist on verifiability BEFORE writing (see type comment): an
         // element with no readable value cannot confirm the write, and a
         // paste after an unconfirmed-but-landed write duplicates the text.
-        guard readableValue(of: element) != nil else { return false }
+        guard let before = readableValue(of: element) else { return false }
+        // Replacing a selection with identical text leaves the value as it
+        // was — that is success, not a silent no-op, and falling through to
+        // paste would insert a second copy (command mode's "fix the grammar"
+        // on text that was already fine).
+        var selectedRef: CFTypeRef?
+        var selectedBefore: String?
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedRef)
+            == .success {
+            selectedBefore = selectedRef as? String
+        }
 
         guard
             AXUIElementSetAttributeValue(
@@ -51,7 +61,15 @@ enum AXInserter {
         // single-line field may fold the newlines out of a multi-line
         // insertion, and reporting that landed-but-transformed write as a
         // failure would paste the text a second time.
+        //
+        // The value must also have *changed*: dictating "Thanks!" into a
+        // field that already says "Thanks!" passed containment even when the
+        // app ACKed the write and ignored it — reported as inserted, nothing
+        // pasted, text silently lost (docs/17 §4.4 #4).
         guard let after = readableValue(of: element) else { return false }
+        if after == before {
+            return selectedBefore == text
+        }
         let needle = text.filter { !$0.isWhitespace }
         if needle.isEmpty { return true }
         return after.filter { !$0.isWhitespace }.contains(needle)
@@ -59,10 +77,19 @@ enum AXInserter {
 
     // MARK: - Helpers
 
+    /// Bound for every AX message (docs/17 §4.4 #5). These calls run on the
+    /// main actor, and the system default (~6 s) let a beachballing target
+    /// freeze the HUD, menu and hotkey for that long. Long enough that a slow
+    /// but successful write is not misread as a failure and pasted twice.
+    static let messagingTimeout: Float = 1.0
+
     static func focusedElement() -> AXUIElement? {
         var focusedRef: CFTypeRef?
+        let systemWide = AXUIElementCreateSystemWide()
+        // On the system-wide element this sets the process-wide default.
+        _ = AXUIElementSetMessagingTimeout(systemWide, messagingTimeout)
         let result = AXUIElementCopyAttributeValue(
-            AXUIElementCreateSystemWide(),
+            systemWide,
             kAXFocusedUIElementAttribute as CFString,
             &focusedRef
         )
@@ -92,10 +119,11 @@ extension AXInserter {
     /// and joining real (FR-3.3). nil where AX exposes no value or selection
     /// — the caller falls back or formats for a fresh insertion point.
     static func precedingContext(maxLength: Int = 64) -> String? {
-        guard
-            let element = focusedElement(),
-            let value = readableValue(of: element)
-        else { return nil }
+        guard let element = focusedElement() else { return nil }
+        // A read-only lookup that only refines spacing: a slow target should
+        // cost a quarter second, not the whole messaging budget.
+        _ = AXUIElementSetMessagingTimeout(element, 0.25)
+        guard let value = readableValue(of: element) else { return nil }
         var rangeRef: CFTypeRef?
         guard
             AXUIElementCopyAttributeValue(
@@ -112,6 +140,74 @@ extension AXInserter {
         let caret = min(max(0, cfRange.location), haystack.length)
         let start = max(0, caret - maxLength)
         return haystack.substring(with: NSRange(location: start, length: caret - start))
+    }
+}
+
+extension AXInserter {
+    /// The focused element's selected text, for command mode (docs/17 G4):
+    /// what "make this shorter" acts on. nil when nothing is selected, the
+    /// element is a secure field, or AX exposes no selection.
+    static func selectedText() -> String? {
+        guard !SecureInputProbe.isSecureInputActive(), let element = focusedElement() else {
+            return nil
+        }
+        _ = AXUIElementSetMessagingTimeout(element, 0.25)
+        var subroleRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+            == .success,
+            let subrole = subroleRef as? String,
+            subrole == (kAXSecureTextFieldSubrole as String) {
+            return nil
+        }
+        var selectedRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXSelectedTextAttribute as CFString, &selectedRef
+            ) == .success,
+            let selected = selectedRef as? String,
+            !selected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return selected
+    }
+
+    /// The text around the caret for opt-in context-aware cleanup (docs/17
+    /// G3.2): up to `before` UTF-16 units before the selection and `after`
+    /// beyond it. nil for secure fields, while secure input is on, or where
+    /// AX exposes no value and selection. The caller holds it for one cleanup
+    /// request; nothing here stores it.
+    static func surroundingText(before: Int = 240, after: Int = 80) -> (before: String, after: String)? {
+        guard !SecureInputProbe.isSecureInputActive(), let element = focusedElement() else {
+            return nil
+        }
+        _ = AXUIElementSetMessagingTimeout(element, 0.25)
+        var subroleRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef)
+            == .success,
+            let subrole = subroleRef as? String,
+            subrole == (kAXSecureTextFieldSubrole as String) {
+            return nil
+        }
+        guard let value = readableValue(of: element) else { return nil }
+        var rangeRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString, &rangeRef
+            ) == .success,
+            let rangeRef,
+            CFGetTypeID(rangeRef) == AXValueGetTypeID()
+        else { return nil }
+        var cfRange = CFRange()
+        guard AXValueGetValue(unsafeBitCast(rangeRef, to: AXValue.self), .cfRange, &cfRange)
+        else { return nil }
+        let haystack = value as NSString
+        let selectionStart = min(max(0, cfRange.location), haystack.length)
+        let selectionEnd = min(max(selectionStart, cfRange.location + cfRange.length), haystack.length)
+        let start = max(0, selectionStart - before)
+        let end = min(haystack.length, selectionEnd + after)
+        return (
+            haystack.substring(with: NSRange(location: start, length: selectionStart - start)),
+            haystack.substring(with: NSRange(location: selectionEnd, length: end - selectionEnd))
+        )
     }
 }
 

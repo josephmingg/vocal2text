@@ -108,6 +108,7 @@ final class IOSAppState: ObservableObject {
 
         let database = Self.makeDatabase()
         let profiles = Self.loadProfiles(database: database)
+        DictionaryMigration.pinLegacyEntriesInlineOnce(database: database)
         let engine = WhisperKitEngine()
         let config = IOSSessionConfig(database: database)
         let deliverer = ClipboardDelivering()
@@ -128,7 +129,7 @@ final class IOSAppState: ObservableObject {
             prewarmCleanup = { await provider.prewarm() }
         }
         #endif
-        let dependencies = DictationSession.Dependencies(
+        var dependencies = DictationSession.Dependencies(
             audio: IOSCaptureAdapter(microphone: MicrophoneCapture()),
             engine: engine,
             cleanup: cleanup,
@@ -162,6 +163,21 @@ final class IOSAppState: ObservableObject {
                 )
             }
         )
+
+        // docs/17 F5: a snippet's {clipboard} tag, read only when present.
+        dependencies.readClipboard = {
+            await MainActor.run { () -> String? in
+                // Auto-copy puts every dictation on the clipboard; that copy
+                // is Vocal's own, not something the user copied, so a
+                // {clipboard} snippet must not paste the last dictation back
+                // (docs/17 §11). Checked before reading, which also spares
+                // the paste-permission prompt in that case.
+                if OwnClipboardWrite.changeCount == UIPasteboard.general.changeCount {
+                    return nil
+                }
+                return UIPasteboard.general.string
+            }
+        }
 
         self.database = database
         self.profiles = profiles
@@ -298,9 +314,14 @@ final class IOSAppState: ObservableObject {
     /// profile IDs stay stable across launches, matching the Mac app. iOS has
     /// no profile editor yet — the seeded set is effectively read-only here.
     private static func loadProfiles(database: DatabaseStore?) -> [Profile] {
-        ProfileBootstrap.loadOrSeed(
-            load: { try database?.profiles() ?? [] },
-            save: { try database?.save($0) }
+        ProfileBootstrap.loadSeedingAndUpgrading(
+            load: {
+                guard let database else { throw ProfileBootstrap.StoreUnavailable() }
+                return try database.profiles()
+            },
+            save: { try database?.save($0) },
+            storedVersion: UserDefaults.standard.integer(forKey: "profiles.builtInVersion"),
+            recordVersion: { UserDefaults.standard.set($0, forKey: "profiles.builtInVersion") }
         )
     }
 
@@ -338,6 +359,12 @@ private struct IOSCaptureAdapter: AudioCapturing {
     }
 }
 
+/// The pasteboard generation of Vocal's last automatic copy.
+@MainActor
+private enum OwnClipboardWrite {
+    static var changeCount: Int?
+}
+
 /// Mode D1 delivery: the transcript lands on the clipboard (when auto-copy is
 /// on) and the result card offers Share (docs/02 FR-i2.1).
 private final class ClipboardDelivering: TextDelivering, @unchecked Sendable {
@@ -349,7 +376,14 @@ private final class ClipboardDelivering: TextDelivering, @unchecked Sendable {
         let language = context.language
         await MainActor.run { [weak appState] in
             if appState?.autoCopy ?? true {
-                UIPasteboard.general.string = text
+                // Local only: an automatic copy of every dictation must not
+                // ride Universal Clipboard to the user's other devices
+                // (docs/17 §4.4 #22). The explicit Copy buttons stay normal.
+                UIPasteboard.general.setItems(
+                    [["public.utf8-plain-text": text]],
+                    options: [.localOnly: true]
+                )
+                OwnClipboardWrite.changeCount = UIPasteboard.general.changeCount
             }
             appState?.showResult(text)
             // After the result is on screen, so anything reacting to this sees
@@ -405,5 +439,10 @@ private final class IOSSessionConfig: SessionConfiguring, @unchecked Sendable {
     func enabledDictionaryEntries() async -> [DictionaryEntry] {
         guard let database else { return [] }
         return (try? database.dictionaryEntries().filter(\.isEnabled)) ?? []
+    }
+
+    /// docs/17 F10: count what a delivered take used.
+    func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async {
+        try? database?.recordDictionaryUse(entryIDs, at: date)
     }
 }

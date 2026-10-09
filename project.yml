@@ -1,7 +1,8 @@
 # XcodeGen manifest — `make generate` produces Vocal.xcodeproj (gitignored).
 #
-# NOTE: regenerating resets the Xcode signing Team. After `make generate`,
-# re-select your team once per target in Signing & Capabilities (docs/14).
+# NOTE: regenerating resets the Xcode signing Team. `make install` / `make mac`
+# pass it to xcodebuild themselves (scripts/signing-team.sh, docs/10); for
+# Xcode builds, re-select your team per target in Signing & Capabilities (docs/14).
 name: Vocal
 options:
   bundleIdPrefix: com.vocal

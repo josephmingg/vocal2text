@@ -76,6 +76,38 @@ public actor FoundationModelsProvider: CleanupProvider {
         }
     }
 }
+
+/// Command mode on Apple's on-device model (docs/17 G4): the zero-install
+/// path on Apple-Intelligence Macs, used when Ollama is not answering.
+@available(macOS 26.0, iOS 26.0, *)
+extension FoundationModelsProvider: CommandRunning {
+    public func runCommand(
+        system: String, user: String, maxTokens: Int, timeout: Duration
+    ) async throws -> CleanupResponse {
+        guard await isAvailable() else {
+            throw CleanupError.providerUnavailable("Apple Intelligence model unavailable")
+        }
+        let session = LanguageModelSession(instructions: system)
+        do {
+            let response = try await session.respond(to: user)
+            return CleanupResponse(
+                text: response.content.trimmingCharacters(in: .whitespacesAndNewlines),
+                modelName: "apple-foundation-3b"
+            )
+        } catch let error as LanguageModelSession.GenerationError {
+            switch error {
+            case .guardrailViolation:
+                throw CleanupError.guardrailRefusal
+            case .unsupportedLanguageOrLocale:
+                throw CleanupError.unsupportedLanguage
+            default:
+                throw CleanupError.transport(String(describing: error))
+            }
+        } catch {
+            throw CleanupError.transport(String(describing: error))
+        }
+    }
+}
 #else
 /// Pre-26 SDKs / non-Apple platforms compile this stub.
 public enum FoundationModelsProviderInfo {

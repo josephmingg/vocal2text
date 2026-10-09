@@ -124,3 +124,149 @@ private struct StoreError: Error {}
     #expect(ProfileBootstrap.uniqueName(base: "New Profile", among: profiles) == "New Profile 3")
     #expect(ProfileBootstrap.uniqueName(base: "Meeting Notes", among: profiles) == "Meeting Notes")
 }
+
+// MARK: - docs/17: built-in upgrades reach existing installs once
+
+/// The v1 built-in set as an install seeded before docs/17 holds it.
+private func versionOneProfiles() -> [Profile] {
+    var profiles = BuiltInProfiles.makeAll().filter { $0.name != "AI Prompt" }
+    let laterTerminals: Set<String> = [
+        "io.alacritty", "net.kovidgoyal.kitty", "com.github.wez.wezterm", "dev.warp.Warp-Stable",
+    ]
+    for index in profiles.indices {
+        profiles[index].routes.removeAll {
+            if case .app(let bundleID) = $0 { return laterTerminals.contains(bundleID) }
+            return false
+        }
+    }
+    return profiles
+}
+
+@Test func upgradeAddsTerminalRoutesAndTheAIPromptProfileOnce() {
+    var saved: [Profile] = []
+    let upgraded = ProfileBootstrap.applyingUpgrades(
+        to: versionOneProfiles(), fromVersion: 1, save: { saved.append($0) }
+    )
+    let resolver = ProfileResolver(profiles: upgraded)
+    #expect(
+        resolver.resolve(frontmostBundleID: "net.kovidgoyal.kitty", tabHostname: nil, manualPinProfileID: nil)
+            .profile.name == "Terminal / Code"
+    )
+    #expect(
+        resolver.resolve(frontmostBundleID: "com.apple.Safari", tabHostname: "claude.ai", manualPinProfileID: nil)
+            .profile.name == "AI Prompt"
+    )
+    #expect(saved.map(\.name).sorted() == ["AI Prompt", "Terminal / Code"])
+    // Idempotent: a second pass (or a fresh install) changes nothing.
+    var savedAgain: [Profile] = []
+    let again = ProfileBootstrap.applyingUpgrades(to: upgraded, fromVersion: 1, save: { savedAgain.append($0) })
+    #expect(again == upgraded)
+    #expect(savedAgain.isEmpty)
+}
+
+@Test func upgradeNeverStealsARouteTheUserGaveAnotherProfile() {
+    var profiles = versionOneProfiles()
+    profiles.append(Profile(name: "My Kitty", routes: [.app(bundleID: "net.kovidgoyal.kitty")]))
+    profiles.append(Profile(name: "My Claude", routes: [.app(bundleID: "com.anthropic.claudefordesktop")]))
+    let upgraded = ProfileBootstrap.applyingUpgrades(to: profiles, fromVersion: 1, save: { _ in })
+    let resolver = ProfileResolver(profiles: upgraded)
+    #expect(
+        resolver.resolve(frontmostBundleID: "net.kovidgoyal.kitty", tabHostname: nil, manualPinProfileID: nil)
+            .profile.name == "My Kitty"
+    )
+    // The user already routes an AI app themselves: no AI Prompt profile.
+    #expect(!upgraded.contains { $0.name == "AI Prompt" })
+}
+
+@Test func upgradeIsSkippedAtTheCurrentVersion() {
+    let profiles = versionOneProfiles()
+    let upgraded = ProfileBootstrap.applyingUpgrades(
+        to: profiles, fromVersion: ProfileBootstrap.builtInVersion, save: { _ in Issue.record("saved") }
+    )
+    #expect(upgraded == profiles)
+}
+
+@Test func anUnreadableStoreGetsNoUpgradeWritesAndNoRecordedVersion() {
+    struct Unreadable: Error {}
+    var recorded: Int?
+    let profiles = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { throw Unreadable() },
+        save: { _ in Issue.record("must not write to an unreadable store") },
+        storedVersion: 0,
+        recordVersion: { recorded = $0 }
+    )
+    #expect(profiles.count == BuiltInProfiles.makeAll().count)
+    #expect(recorded == nil)
+}
+
+@Test func aFreshInstallSeedsTheCurrentSetAndRecordsTheVersion() {
+    var saved: [Profile] = []
+    var recorded: Int?
+    let profiles = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { [] },
+        save: { saved.append($0) },
+        storedVersion: 0,
+        recordVersion: { recorded = $0 }
+    )
+    #expect(profiles.count == BuiltInProfiles.makeAll().count)
+    #expect(saved.count == profiles.count)
+    #expect(recorded == ProfileBootstrap.builtInVersion)
+}
+
+@Test func aFailedUpgradeWriteIsRetriedNextLaunch() {
+    struct WriteFailed: Error {}
+    var recorded: Int?
+    let stored = versionOneProfiles()
+    let profiles = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { stored },
+        save: { _ in throw WriteFailed() },
+        storedVersion: 1,
+        recordVersion: { recorded = $0 }
+    )
+    // The change still applies in memory for this launch…
+    #expect(profiles.contains { $0.name == "AI Prompt" })
+    // …but the version stays unrecorded, so the next launch tries again.
+    #expect(recorded == nil)
+}
+
+/// docs/17 §11: website routes outrank app routes, so the upgrade must not
+/// hand claude.ai to AI Prompt when the user has their own browser profile.
+@Test func upgradeDoesNotOutrankTheUsersOwnBrowserProfile() {
+    var profiles = versionOneProfiles()
+    profiles.append(Profile(name: "My Browser", routes: [.app(bundleID: "com.google.Chrome")]))
+    let upgraded = ProfileBootstrap.applyingUpgrades(to: profiles, fromVersion: 1, save: { _ in })
+    let resolver = ProfileResolver(profiles: upgraded)
+    #expect(
+        resolver.resolve(frontmostBundleID: "com.google.Chrome", tabHostname: "claude.ai", manualPinProfileID: nil)
+            .profile.name == "My Browser"
+    )
+    // AI Prompt still arrives, for the desktop apps.
+    #expect(
+        resolver.resolve(frontmostBundleID: "com.anthropic.claudefordesktop", tabHostname: nil, manualPinProfileID: nil)
+            .profile.name == "AI Prompt"
+    )
+}
+
+@Test func aFreshInstallWhoseSeedWriteFailedRecordsNoVersion() {
+    struct WriteFailed: Error {}
+    var recorded: Int?
+    _ = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { [] },
+        save: { profile in if profile.name == "AI Prompt" { throw WriteFailed() } },
+        storedVersion: 0,
+        recordVersion: { recorded = $0 }
+    )
+    #expect(recorded == nil)
+}
+
+@Test func aMissingDatabaseIsNotAFreshInstall() {
+    var recorded: Int?
+    let profiles = ProfileBootstrap.loadSeedingAndUpgrading(
+        load: { throw ProfileBootstrap.StoreUnavailable() },
+        save: { _ in Issue.record("no store to write to") },
+        storedVersion: 1,
+        recordVersion: { recorded = $0 }
+    )
+    #expect(profiles.count == BuiltInProfiles.makeAll().count)
+    #expect(recorded == nil)
+}

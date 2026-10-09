@@ -90,6 +90,11 @@ final class HotkeyMonitor {
         generation += 1
         machine?.stopTap()
         machine = nil
+        // A stopped monitor stays stopped: a recorder sheet that suspended it
+        // and resumes it after it was replaced (the command monitor is
+        // rebuilt whenever either key changes) must not revive it as an
+        // orphan tap that swallows its key with nobody listening.
+        wasArmedBeforeSuspend = false
     }
 
     /// Tear down and recreate the tap — call on wake/unlock (docs/03 §3.4:
@@ -106,8 +111,9 @@ final class HotkeyMonitor {
     /// real dictation behind the recorder sheet. `resume()` restores exactly
     /// the previous state, armed or not.
     func suspend() {
-        wasArmedBeforeSuspend = machine != nil
+        let wasArmed = machine != nil
         stop()
+        wasArmedBeforeSuspend = wasArmed
     }
 
     func resume() {

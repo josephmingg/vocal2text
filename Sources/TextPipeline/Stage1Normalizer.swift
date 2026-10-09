@@ -69,6 +69,11 @@ public enum Stage1Normalizer: Sendable {
         let first = text[index]
         let upper = String(first).uppercased()
         guard upper != String(first) else { return text }
+        // "iPhone", "eBay", "macOS": a word with a capital after its first
+        // letter is a brand or identifier spelled that way on purpose —
+        // "IPhone" is a typo the pipeline would be introducing.
+        let word = text[text.index(after: index)...].prefix { $0.isLetter || $0.isNumber }
+        guard !word.contains(where: \.isUppercase) else { return text }
         return String(text[..<index]) + upper + String(text[text.index(after: index)...])
     }
 
@@ -172,6 +177,13 @@ public enum Stage1Normalizer: Sendable {
     /// canonical Whisper zh decoding loop has no spaces, so the token-based
     /// collapse never sees it. Repeated units of 2–20 characters shrink to one
     /// occurrence; shorter runs stay (可以可以 is legitimate speech).
+    ///
+    /// Only units containing a non-ASCII letter (Han, Myanmar, …) collapse.
+    /// Unspaced loops are a property of unspaced scripts — English decoding
+    /// loops are spaced and belong to the token pass — while ASCII-only runs
+    /// are overwhelmingly real content: "100000000" is a number, "1212121212"
+    /// a PIN, "========" a divider, and collapsing them corrupted delivered
+    /// text on every profile (docs/17 F1).
     private static func collapseUnspacedRepetitionLoops(_ text: String) -> String {
         guard
             // \S only: the unit must itself be unspaced, or this pass would
@@ -180,10 +192,27 @@ public enum Stage1Normalizer: Sendable {
             // carefully treats as run breaks (G6).
             let regex = try? NSRegularExpression(pattern: "(\\S{2,20}?)\\1{3,}")
         else { return text }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.stringByReplacingMatches(
-            in: text, options: [], range: range, withTemplate: "$1"
+        let nsText = text as NSString
+        let matches = regex.matches(
+            in: text, options: [], range: NSRange(location: 0, length: nsText.length)
         )
+        guard !matches.isEmpty else { return text }
+        var result = ""
+        var cursor = 0
+        for match in matches {
+            let unit = nsText.substring(with: match.range(at: 1))
+            let collapses = unit.unicodeScalars.contains {
+                !$0.isASCII && $0.properties.isAlphabetic
+            }
+            guard collapses else { continue }
+            result += nsText.substring(
+                with: NSRange(location: cursor, length: match.range.location - cursor)
+            )
+            result += unit
+            cursor = match.range.location + match.range.length
+        }
+        result += nsText.substring(from: cursor)
+        return result
     }
 
     /// Punctuation that cannot legitimately start an utterance. Opening quotes,

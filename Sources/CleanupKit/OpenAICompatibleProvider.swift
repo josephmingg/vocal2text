@@ -146,7 +146,16 @@ public actor OpenAICompatibleProvider: CleanupProvider {
     public func cleanup(
         _ request: CleanupRequest, timeout: Duration
     ) async throws -> CleanupResponse {
-        var body = makeRequestBody(for: request)
+        try await complete(makeRequestBody(for: request), timeout: timeout)
+    }
+
+    /// Posts one chat-completion body and decodes the answer — shared by
+    /// dictation cleanup and command mode so both get the same retry and
+    /// error reporting.
+    private func complete(
+        _ requestBody: ChatCompletionRequest, timeout: Duration
+    ) async throws -> CleanupResponse {
+        var body = requestBody
         var reply = try await perform(makeURLRequest(body: body, timeout: timeout))
         // An Ollama release older than the "none" effort answers 400 naming
         // the reasoning value; retry once the way those releases expect.
@@ -177,6 +186,28 @@ public actor OpenAICompatibleProvider: CleanupProvider {
             throw CleanupError.malformedOutput("response contained no choices")
         }
         return CleanupResponse(text: content, modelName: decoded.model ?? model)
+    }
+
+    // MARK: - Command mode (docs/17 G4)
+
+    nonisolated func makeCommandBody(
+        system: String, user: String, maxTokens: Int
+    ) -> ChatCompletionRequest {
+        ChatCompletionRequest(
+            model: model,
+            messages: [
+                ChatCompletionRequest.Message(
+                    role: "system", content: disablesThinking ? system + "\n/no_think" : system
+                ),
+                ChatCompletionRequest.Message(role: "user", content: user),
+            ],
+            // A little variety reads better for rewrites; still near-greedy.
+            temperature: 0.3,
+            maxTokens: max(1024, maxTokens),
+            stream: false,
+            keepAlive: keepAliveValue,
+            reasoningEffort: reasoningEffortValue
+        )
     }
 
     // MARK: - Request building (internal for tests)
@@ -456,4 +487,14 @@ struct ChatCompletionResponse: Codable, Sendable {
 
     var choices: [Choice]
     var model: String?
+}
+
+extension OpenAICompatibleProvider: CommandRunning {
+    public func runCommand(
+        system: String, user: String, maxTokens: Int, timeout: Duration
+    ) async throws -> CleanupResponse {
+        try await complete(
+            makeCommandBody(system: system, user: user, maxTokens: maxTokens), timeout: timeout
+        )
+    }
 }

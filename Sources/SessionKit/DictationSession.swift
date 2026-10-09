@@ -40,10 +40,19 @@ public actor DictationSession {
     public struct CleanupSelection: Sendable {
         public var pipeline: CleanupPipeline
         public var providerID: CleanupProviderID
+        /// True when this provider sends text off the device (a remote
+        /// OpenAI-compatible URL). The opt-in surrounding-text context is
+        /// never sent to such a provider (docs/17 G3.2: "never leaves this
+        /// Mac"). Required, with no default: a caller that forgot it would
+        /// otherwise fail open and ship the document text off the device.
+        public var leavesDevice: Bool
 
-        public init(pipeline: CleanupPipeline, providerID: CleanupProviderID) {
+        public init(
+            pipeline: CleanupPipeline, providerID: CleanupProviderID, leavesDevice: Bool
+        ) {
             self.pipeline = pipeline
             self.providerID = providerID
+            self.leavesDevice = leavesDevice
         }
     }
 
@@ -74,12 +83,14 @@ public actor DictationSession {
     /// never cost the user the transcript.
     public typealias AudioArchiving = @Sendable (PCMChunk, UUID) async -> String?
 
-    /// Produces the current hypothesis for the audio captured so far (docs/15
+    /// Produces the current hypothesis for a window of the live audio (docs/15
     /// step 22 streaming preview), or nil when preview is unavailable for the
     /// current configuration (engine not loaded, route not preview-capable).
+    /// Word timings in `segments`, relative to the chunk's first sample, let
+    /// the window slide (docs/17 G2.3); without them only silence slides.
     /// Called serially, at most one in flight; must be cheap enough that a
     /// release landing mid-call waits a fraction of a second at worst.
-    public typealias PreviewTranscribing = @Sendable (PCMChunk) async -> String?
+    public typealias PreviewTranscribing = @Sendable (PCMChunk) async -> TranscriptionResult?
 
     /// Preserves a failed take's audio for later recovery (docs/15 step 35):
     /// invoked only when transcription fails, with the exact samples the take
@@ -122,6 +133,8 @@ public actor DictationSession {
         public var onPartial: (@Sendable (String) -> Void)?
         /// Cadence of the preview decode loop; tests shorten it.
         public var previewInterval: Duration
+        /// The preview's decode window (docs/17 G2.3); tests shrink it.
+        public var previewWindow = TrailingWindowPreview()
         /// Fired fire-and-forget at hotkey press so the model is hot at
         /// release (docs/03 §2). Wire to `CleanupProvider.prewarm`; defaults
         /// to a no-op.
@@ -139,6 +152,28 @@ public actor DictationSession {
         /// Wall-clock source for `TranscriptRecord.createdAt`; injectable so
         /// tests pin timestamps.
         public var now: @Sendable () -> Date
+        /// Reads the pasteboard's plain text for a snippet's `{clipboard}` tag
+        /// (docs/17 F5). Called only when the matched snippet carries that
+        /// tag; nil expands it to nothing. Set after init, like the other
+        /// optional platform hooks below.
+        public var readClipboard: (@Sendable () async -> String?)?
+        /// Reads a bounded slice of the text around the insertion point, with
+        /// `CleanupRequest.cursorMarker` at the caret (docs/17 G3.2). Called
+        /// only when cleanup is about to run *and* the user opted in; nil
+        /// results or a nil hook mean no context. Never persisted.
+        /// Takes the press-time app: a queued take may be processed after
+        /// the user switched apps, and the context must come from the app
+        /// the dictation was spoken into or not at all (docs/17 §11).
+        public var readSurroundingContext: (@Sendable (_ pressTimeBundleID: String?) async -> String?)?
+        /// Receives command takes (docs/17 G4). Must return promptly — the
+        /// pipeline queue waits on it — so platforms start their own work
+        /// (model call, preview) and return. nil disables command mode: a
+        /// `.command` press then behaves as dictation.
+        public var handleCommand: (@Sendable (VoiceCommand) async -> Void)?
+        /// Reads the current selection at press time, for commands. Called at
+        /// every command press, and at dictation presses only while the wake
+        /// word is enabled (the take might turn out to be a command).
+        public var captureSelection: (@Sendable () async -> String?)?
 
         /// Fixed-pipeline form: every take uses the same provider. Used by
         /// tests and by platforms with a single built-in provider; the Mac app
@@ -170,7 +205,11 @@ public actor DictationSession {
                 audio: audio,
                 engine: engine,
                 selectCleanup: { _ in
-                    cleanup.map { CleanupSelection(pipeline: $0, providerID: cleanupProviderID) }
+                    // A fixed pipeline's provider is opaque here, so it is
+                    // treated as leaving the device: no surrounding context.
+                    cleanup.map {
+                        CleanupSelection(pipeline: $0, providerID: cleanupProviderID, leavesDevice: true)
+                    }
                 },
                 archiveAudio: archiveAudio,
                 analyzeSpeech: analyzeSpeech,
@@ -244,6 +283,10 @@ public actor DictationSession {
 
     private struct ActiveTake {
         var resolution: PendingResolution
+        var kind: TakeKind
+        var serial: Int
+        /// Press-time selection read, for commands (docs/17 G4).
+        var selection: Task<String?, Never>?
         var capture: CaptureSession
         var pressedAt: ContinuousClock.Instant
         /// Press → mic open (docs/15 step 47) — speech lost at take start.
@@ -253,6 +296,9 @@ public actor DictationSession {
     /// Everything the detached processing pipeline needs once capture ended.
     private struct PendingTake {
         var resolution: PendingResolution
+        var kind: TakeKind
+        var serial: Int
+        var selection: Task<String?, Never>?
         var audio: PCMChunk
         var captureSeconds: Double
         var armSeconds: Double
@@ -276,6 +322,11 @@ public actor DictationSession {
     /// leave the mic running — NFR-1).
     private var pendingRelease: PendingRelease?
     private var pendingCancel = false
+    /// Numbers presses, so an error belongs to the press that produced it: a
+    /// queued older take's pipeline must not erase a newer press's failure
+    /// (a microphone that would not open) before the HUD has shown it.
+    private var pressSerial = 0
+    private var lastErrorPress = 0
     /// Pipelines queued or running (the live press path and `recover` both
     /// count). Capture phases always win the display; this only decides
     /// whether an ended capture settles to `.transcribing` (work still in
@@ -396,7 +447,7 @@ public actor DictationSession {
     /// prewarm both run concurrently beside it, because either can block on
     /// platform I/O and any millisecond spent before the mic opens is speech
     /// the user already spoke and will never get back.
-    public func pressBegan() async {
+    public func pressBegan(kind: TakeKind = .dictation) async {
         // Accepted whenever no capture is active — a previous take may still
         // be processing on the detached pipeline (docs/15 W3).
         switch phaseValue {
@@ -409,10 +460,24 @@ public actor DictationSession {
         lastTimings = nil
         pendingRelease = nil
         pendingCancel = false
+        pressSerial += 1
+        let serial = pressSerial
         transition(to: .arming)
 
         let resolve = deps.profileResolution
         let resolution = PendingResolution { await resolve() }
+
+        // docs/17 G4: the selection a command acts on is the one at press
+        // time — read concurrently, like the profile, never before the mic.
+        var selection: Task<String?, Never>?
+        if deps.handleCommand != nil, let capture = deps.captureSelection {
+            let config = deps.config
+            selection = Task {
+                if kind == .command { return await capture() }
+                guard await config.wakeWordCommandsEnabled else { return nil }
+                return await capture()
+            }
+        }
 
         let prewarm = deps.prewarmCleanup
         prewarmTask = Task { await prewarm() }
@@ -422,6 +487,9 @@ public actor DictationSession {
             let capture = try await deps.audio.start()
             take = ActiveTake(
                 resolution: resolution,
+                kind: kind,
+                serial: serial,
+                selection: selection,
                 capture: capture,
                 pressedAt: pressedAt,
                 armSeconds: Self.seconds(pressedAt.duration(to: clock.now))
@@ -452,6 +520,7 @@ public actor DictationSession {
             pendingCancel = false
             resolution.cancel()
             lastError = .audioUnreadable("capture failed to start: \(error)")
+            lastErrorPress = serial
             settleAfterCaptureEnd()
         }
     }
@@ -512,7 +581,14 @@ public actor DictationSession {
         take = nil
         stopPreview()
         active.resolution.cancel()
-        await active.capture.cancel()
+        // A cancelled command leaves nothing to recover — whatever cancelled
+        // it (Escape, sleep, a chord): "Recover" re-runs takes as dictation,
+        // which would type the spoken instruction into the document.
+        if active.kind == .command, let discard = active.capture.discard {
+            await discard()
+        } else {
+            await active.capture.cancel()
+        }
         transition(to: .cancelled)
         settleAfterCaptureEnd()
     }
@@ -520,18 +596,22 @@ public actor DictationSession {
     // MARK: - Streaming preview (docs/15 step 22)
 
     /// Consumes the live chunk stream and periodically re-transcribes the
-    /// audio captured so far, pushing a prefix-committed line to `onPartial`.
-    /// Display-only per FR-4.1: nothing here touches the take's audio path or
-    /// the batch pass that produces the delivered text.
+    /// trailing window of the audio captured so far, pushing a
+    /// prefix-committed line to `onPartial`. Display-only per FR-4.1: nothing
+    /// here touches the take's audio path or the batch pass that produces
+    /// the delivered text.
     ///
     /// Two children: a reader that drains the stream promptly (the capture
     /// layer's buffer is bounded, so a slow consumer would drop chunks) into
     /// a private accumulator, and a decoder that wakes on `previewInterval`,
     /// re-decodes once at least a second of new audio exists, and commits
-    /// the stable prefix so the display never flickers.
+    /// the stable prefix so the display never flickers. The decoder only
+    /// decodes `TrailingWindowPreview`'s window (docs/17 G2.3), so a long
+    /// take costs the same per tick as a short one.
     private func startPreview(chunks: AsyncStream<PCMChunk>) {
         guard let preview = deps.previewTranscribe, let onPartial = deps.onPartial else { return }
         let interval = deps.previewInterval
+        let window = deps.previewWindow
         previewTask = Task {
             let buffer = PreviewSampleBuffer()
             await withTaskGroup(of: Void.self) { group in
@@ -541,21 +621,29 @@ public actor DictationSession {
                     }
                 }
                 group.addTask {
-                    var committer = PrefixCommitter()
+                    var windowState = window
                     var decodedSampleCount = 0
                     while !Task.isCancelled {
                         try? await Task.sleep(for: interval)
                         if Task.isCancelled { break }
-                        let samples = await buffer.snapshot()
-                        guard samples.count - decodedSampleCount >= PCMChunk.sampleRate else {
+                        let total = await buffer.totalCount
+                        guard total - decodedSampleCount >= PCMChunk.sampleRate else {
                             continue
                         }
-                        decodedSampleCount = samples.count
+                        decodedSampleCount = total
+                        // Audio before the window is never decoded again.
+                        await buffer.discard(before: windowState.windowStart)
+                        let samples = await buffer.samples(from: windowState.windowStart)
                         guard
+                            !samples.isEmpty,
                             let hypothesis = await preview(PCMChunk(samples: samples)),
                             !Task.isCancelled
                         else { continue }
-                        let line = committer.ingest(hypothesis)
+                        let line = windowState.ingest(
+                            text: hypothesis.text,
+                            words: hypothesis.segments,
+                            windowSampleCount: samples.count
+                        )
                         if !line.isEmpty {
                             onPartial(line)
                         }
@@ -612,6 +700,9 @@ public actor DictationSession {
 
         let pending = PendingTake(
             resolution: active.resolution,
+            kind: active.kind,
+            serial: active.serial,
+            selection: active.selection,
             audio: audio,
             captureSeconds: captureSeconds,
             armSeconds: active.armSeconds,
@@ -642,7 +733,10 @@ public actor DictationSession {
                 isLockMode: pending.isLockMode,
                 captureSeconds: pending.captureSeconds,
                 armSeconds: pending.armSeconds,
-                source: .dictation
+                source: .dictation,
+                serial: pending.serial,
+                kind: pending.kind,
+                selection: pending.selection
             )
         }
     }
@@ -672,7 +766,8 @@ public actor DictationSession {
             isLockMode: false,
             captureSeconds: audio.durationSeconds,
             armSeconds: 0,
-            source: .recovered
+            source: .recovered,
+            serial: pressSerial
         )
     }
 
@@ -696,9 +791,21 @@ public actor DictationSession {
         isLockMode: Bool,
         captureSeconds: Double,
         armSeconds: Double,
-        source: TranscriptSource
+        source: TranscriptSource,
+        serial: Int,
+        kind: TakeKind = .dictation,
+        selection: Task<String?, Never>? = nil
     ) async -> Bool {
         let profile = resolved.profile
+        // Pipelines run strictly in press order, so the error the platform
+        // reads at idle must belong to the most recent one: an earlier take
+        // that failed while this one was recording would otherwise surface
+        // its error after this take delivered fine (docs/17 §4.4 #13). A
+        // newer press's own failure (the mic would not open) is not ours to
+        // clear.
+        if lastErrorPress <= serial {
+            lastError = nil
+        }
 
         let languageMode: LanguageMode
         if let override = profile.languageOverride {
@@ -707,7 +814,9 @@ public actor DictationSession {
             languageMode = await deps.config.globalLanguageMode
         }
         let entries = await deps.config.enabledDictionaryEntries()
-        let writtenForms = entries.map(\.written)
+        // Vocabulary only: a snippet's expansion is neither a word for the
+        // recognizer to listen for nor a term cleanup must protect.
+        let writtenForms = entries.vocabularyTerms
 
         // docs/15 step 16: the VAD gate runs inside the transcription timing
         // window — it is part of release-to-text, not free. The engine only
@@ -739,6 +848,7 @@ public actor DictationSession {
         } catch {
             lastError =
                 (error as? TranscriptionError) ?? .engineUnavailable(String(describing: error))
+            lastErrorPress = max(lastErrorPress, serial)
             Diagnostics.shared.increment(.transcriptionFailures)
             // docs/15 step 35: a failure must leave the recording behind.
             // The capture layer's crash sidecar died with the successful
@@ -746,7 +856,9 @@ public actor DictationSession {
             // platform's recovery store so the menu can offer them back.
             // Recovery re-runs (source == .recovered) skip this: the caller
             // still holds the original file and keeps it on a false return.
-            if source == .dictation, let preserve = deps.preserveFailedAudio {
+            // A failed *command* is not kept: "Recover" re-runs takes as
+            // dictation, which would type the spoken instruction.
+            if source == .dictation, kind == .dictation, let preserve = deps.preserveFailedAudio {
                 await preserve(audio)
             }
             finishPipeline()
@@ -755,14 +867,85 @@ public actor DictationSession {
         let transcriptionSeconds = Self.seconds(transcriptionStart.duration(to: clock.now))
 
         let language = result.detectedLanguage
-        let formatting = profile.formatting
+        // docs/17 §5: the one-click style. Profiles that ignore the global
+        // style (Terminal / Code) are untouched; Raw runs the pipeline
+        // verbatim — artifacts and dictionary only — and skips cleanup.
+        let style: DictationStyle =
+            profile.ignoresGlobalStyle ? .standard : await deps.config.dictationStyle
+        var formatting = profile.formatting
+        if style == .raw {
+            var raw = FormattingOptions.verbatim
+            raw.smartSpacing = profile.formatting.smartSpacing
+            formatting = raw
+        }
 
         let dictionaryStart = clock.now
         let normalized = Stage1Normalizer.normalize(
             result.text, language: language, formatting: formatting
         )
-        let stage2Text = DictionaryEngine.apply(normalized, entries: entries, language: language)
-            .text
+
+        // docs/17 G4: a command take — from the command key, or a dictation
+        // that opened with the opt-in wake word — goes to the platform's
+        // command handler instead of being typed. Nothing is delivered or
+        // saved here; the handler shows a preview and inserts on Enter.
+        if let handleCommand = deps.handleCommand {
+            var spoken: String?
+            var viaWakeWord = false
+            if kind == .command {
+                spoken = normalized
+            } else if await deps.config.wakeWordCommandsEnabled,
+                let instruction = VoiceCommandParser.instruction(afterWakeWordIn: normalized) {
+                spoken = instruction
+                viaWakeWord = true
+            }
+            if let spoken {
+                let instruction = DictionaryEngine.apply(spoken, entries: entries, language: language)
+                    .text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !instruction.isEmpty {
+                    let selected = await selection?.value
+                    await handleCommand(
+                        VoiceCommand(
+                            instruction: instruction,
+                            selectedText: selected,
+                            language: language,
+                            pressTimeBundleID: resolved.pressTimeBundleID,
+                            viaWakeWord: viaWakeWord
+                        )
+                    )
+                }
+                finishPipeline()
+                return true
+            }
+        }
+        // docs/17 F5: a snippet fires only when it is the whole take, and
+        // then its written form *is* the text — tags expanded, no cleanup,
+        // no reformatting beyond a separating space.
+        let snippet = DictionaryEngine.snippet(
+            matching: normalized, entries: entries, language: language
+        )
+        let stage2Text: String
+        // What History keeps for a take whose delivered text holds the
+        // clipboard: the snippet with the tag shown, not the contents — the
+        // clipboard is often a password or token copied a moment ago, and
+        // the history database is searchable (docs/17 §11).
+        var historyText: String?
+        // What this take used from the Dictionary, counted once it lands.
+        var appliedEntryIDs: [UUID] = []
+        if let snippet {
+            appliedEntryIDs = [snippet.id]
+            var clipboard: String?
+            if SnippetTemplate.needsClipboard(snippet.written), let read = deps.readClipboard {
+                clipboard = await read()
+                historyText = SnippetTemplate.expand(
+                    snippet.written, clipboard: "[clipboard]", now: deps.now()
+                )
+            }
+            stage2Text = SnippetTemplate.expand(snippet.written, clipboard: clipboard, now: deps.now())
+        } else {
+            let applied = DictionaryEngine.apply(normalized, entries: entries, language: language)
+            stage2Text = applied.text
+            appliedEntryIDs = applied.appliedEntryIDs
+        }
         let dictionarySeconds = Self.seconds(dictionaryStart.duration(to: clock.now))
 
         // Nothing left to say: the transcript was only noise tags, a
@@ -785,6 +968,11 @@ public actor DictationSession {
             cleanupOutcome = .skipped(reason: .masterSwitchOff)
         } else if !profile.cleanupEnabled {
             cleanupOutcome = .skipped(reason: .profileDisabled)
+        } else if snippet != nil {
+            // The user wrote this text themselves; a model may only damage it.
+            cleanupOutcome = .skipped(reason: .notNeeded)
+        } else if style == .raw {
+            cleanupOutcome = .skipped(reason: .rawStyle)
         } else if !Self.cleanupAllowed(for: language, profile: profile) {
             cleanupOutcome = .skipped(reason: .languageOptOut)
         } else if await cleanupHasNothingToDo(stage2Text, language: language, profile: profile) {
@@ -811,12 +999,19 @@ public actor DictationSession {
             let timeout = Self.cleanupBudget(
                 base: await deps.config.cleanupTimeout, characterCount: stage2Text.count
             )
+            var surrounding = ""
+            if !selection.leavesDevice,
+                await deps.config.cleanupUsesSurroundingText,
+                let read = deps.readSurroundingContext {
+                surrounding = await read(resolved.pressTimeBundleID) ?? ""
+            }
             let request = CleanupRequest(
                 text: stage2Text,
                 language: language,
                 profilePrompt: profile.promptText,
                 stylePrompt: stylePrompt,
-                protectedTerms: writtenForms
+                protectedTerms: writtenForms,
+                context: surrounding
             )
             let cleanupStart = clock.now
             let outcome = await pipeline.run(request, timeout: timeout)
@@ -856,12 +1051,22 @@ public actor DictationSession {
                 precedingContext = last.suffix
             }
         }
-        let formatted = Stage4Formatter.format(
-            deliveryText,
-            language: language,
-            formatting: formatting,
-            precedingContext: precedingContext
-        )
+        let formatted: String
+        if snippet != nil {
+            formatted = Stage4Formatter.spacedOnly(deliveryText, precedingContext: precedingContext)
+        } else {
+            formatted = StyleFormatter.apply(
+                Stage4Formatter.format(
+                    deliveryText,
+                    language: language,
+                    formatting: formatting,
+                    precedingContext: precedingContext
+                ),
+                style: style,
+                language: language,
+                protectedTerms: writtenForms
+            )
+        }
 
         transitionIfNoCaptureActive(.delivering)
         let context = DeliveryContext(
@@ -905,7 +1110,7 @@ public actor DictationSession {
             source: source,
             language: language,
             rawText: result.text,
-            deliveredText: formatted,
+            deliveredText: historyText ?? formatted,
             durationSeconds: audio.durationSeconds,
             targetAppBundleID: targetBundleID,
             profileName: profile.name,
@@ -931,6 +1136,9 @@ public actor DictationSession {
         // PersistenceKit, not here).
         let archive = deps.archiveAudio
         let store = deps.store
+        let config = deps.config
+        let usedAt = record.createdAt
+        let usedEntryIDs = appliedEntryIDs
         let previousPersist = persistenceTask
         persistenceTask = Task {
             await previousPersist?.value
@@ -939,6 +1147,9 @@ public actor DictationSession {
                 record.audioPath = await archive(audio, transcriptID)
             }
             try? await store.save(record)
+            if !usedEntryIDs.isEmpty {
+                await config.recordDictionaryUse(usedEntryIDs, at: usedAt)
+            }
         }
         finishPipeline()
         return true
@@ -1018,14 +1229,32 @@ public actor DictationSession {
 /// Accumulates the live capture for the preview decoder (docs/15 step 22).
 /// Deliberately separate from the capture layer's own accumulation: the
 /// preview must never touch the take's authoritative audio path.
+///
+/// Indexed by absolute sample position from the start of the take; audio
+/// before the preview window is dropped, so a long take holds only the
+/// window in memory, not the whole recording twice.
 private actor PreviewSampleBuffer {
     private var samples: [Float] = []
+    /// Absolute index of `samples[0]`.
+    private var offset = 0
+
+    var totalCount: Int { offset + samples.count }
 
     func append(_ newSamples: [Float]) {
         samples.append(contentsOf: newSamples)
     }
 
-    func snapshot() -> [Float] {
-        samples
+    /// The samples from absolute index `start` to the end.
+    func samples(from start: Int) -> [Float] {
+        let local = min(max(0, start - offset), samples.count)
+        return Array(samples[local...])
+    }
+
+    /// Drops the samples before absolute index `start`.
+    func discard(before start: Int) {
+        let count = min(max(0, start - offset), samples.count)
+        guard count > 0 else { return }
+        samples.removeFirst(count)
+        offset += count
     }
 }

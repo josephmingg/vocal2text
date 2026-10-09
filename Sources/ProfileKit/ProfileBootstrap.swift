@@ -5,6 +5,15 @@ import Foundation
 /// (docs/11 G17). Closure-based rather than depending on PersistenceKit so
 /// the logic tests on Linux and both apps share one bootstrap path.
 public enum ProfileBootstrap: Sendable {
+    /// Thrown by an app's `load` closure when it has no store at all (the
+    /// database did not open) — distinct from an empty store, which is a
+    /// fresh install. Treating "no database" as "fresh install" would record
+    /// the built-in version against nothing, and the real store, opening on
+    /// a later launch, would never get the upgrades (docs/17 §11).
+    public struct StoreUnavailable: Error, Sendable {
+        public init() {}
+    }
+
     /// Returns the persisted profile set, seeding the built-in starter
     /// profiles through `save` when the store is empty.
     ///
@@ -36,6 +45,129 @@ public enum ProfileBootstrap: Sendable {
             try? save(profile)
         }
         return seeded
+    }
+
+    /// `loadOrSeed` plus the built-in upgrades, for the apps' launch path.
+    /// Upgrades run only against a store that actually loaded — an
+    /// unreadable store gets in-memory built-ins and no writes (the same
+    /// posture as `loadOrSeed`), and its version stays unrecorded so the
+    /// upgrade retries on a launch where the store reads.
+    public static func loadSeedingAndUpgrading(
+        load: () throws -> [Profile],
+        save: (Profile) throws -> Void,
+        storedVersion: Int,
+        recordVersion: (Int) -> Void
+    ) -> [Profile] {
+        let stored: [Profile]
+        do {
+            stored = try load()
+        } catch {
+            return BuiltInProfiles.makeAll()
+        }
+        var profiles = stored
+        var seededAll = true
+        if profiles.isEmpty {
+            profiles = BuiltInProfiles.makeAll()
+            for profile in profiles {
+                do {
+                    try save(profile)
+                } catch {
+                    seededAll = false
+                }
+            }
+        }
+        let upgrade = upgrading(profiles, fromVersion: storedVersion, save: save)
+        // A failed seed or upgrade write keeps its change in memory for this
+        // launch and leaves the version unrecorded, so the next launch
+        // retries it (a seed that half-failed is retried as an upgrade:
+        // the missing built-in is re-added because no profile covers it).
+        if seededAll, upgrade.allSaved {
+            recordVersion(builtInVersion)
+        }
+        return upgrade.profiles
+    }
+
+    // MARK: - Built-in upgrades
+
+    /// Version of the built-in profile set. Seeding happens once, so a
+    /// built-in added or extended later never reaches an existing install on
+    /// its own; `applyingUpgrades` carries each version's additions there.
+    ///
+    /// - 1: the original five starter profiles.
+    /// - 2: every terminal emulator routes to Terminal / Code, and the AI
+    ///   Prompt profile exists (docs/17 §4.4 #7, §6 idea 5).
+    public static let builtInVersion = 2
+
+    /// Applies the built-in changes made after `version`, saving each
+    /// changed or added profile, and returns the updated set. Idempotent and
+    /// conservative: it adds only what no profile already covers, so it never
+    /// steals a route the user gave another profile, never re-adds a profile
+    /// the user already has, and never edits anything else. A failed save
+    /// keeps the change in memory for this launch.
+    public static func applyingUpgrades(
+        to profiles: [Profile],
+        fromVersion version: Int,
+        save: (Profile) throws -> Void
+    ) -> [Profile] {
+        upgrading(profiles, fromVersion: version, save: save).profiles
+    }
+
+    static func upgrading(
+        _ profiles: [Profile],
+        fromVersion version: Int,
+        save: (Profile) throws -> Void
+    ) -> (profiles: [Profile], allSaved: Bool) {
+        guard version < builtInVersion else { return (profiles, true) }
+        var updated = profiles
+        var changed: [UUID] = []
+
+        if version < 2 {
+            let routed = Set(updated.flatMap(\.routes))
+            if let terminalIndex = updated.firstIndex(where: {
+                $0.routes.contains(.app(bundleID: "com.apple.Terminal"))
+            }) {
+                let missing = BuiltInProfiles.terminalBundleIDs
+                    .map { Route.app(bundleID: $0) }
+                    .filter { !routed.contains($0) }
+                if !missing.isEmpty {
+                    updated[terminalIndex].routes.append(contentsOf: missing)
+                    changed.append(updated[terminalIndex].id)
+                }
+            }
+            let hasAIPrompt =
+                updated.contains { $0.name == BuiltInProfiles.aiPromptName }
+                || BuiltInProfiles.aiPromptRoutes.contains { routed.contains($0) }
+            if !hasAIPrompt {
+                var profile = BuiltInProfiles.aiPrompt()
+                // A website route outranks an app route (docs/05 §4), so
+                // adding claude.ai would quietly take those pages away from
+                // a profile the user made for their browser. Only when no
+                // profile of the user's own routes an app do the sites come
+                // along; otherwise AI Prompt starts with the desktop apps.
+                let builtInNames = Set(BuiltInProfiles.makeAll().map(\.name))
+                let userRoutesApps = updated.contains { profile in
+                    !builtInNames.contains(profile.name)
+                        && profile.routes.contains { if case .app = $0 { true } else { false } }
+                }
+                if userRoutesApps {
+                    profile.routes.removeAll { if case .website = $0 { true } else { false } }
+                }
+                updated.append(profile)
+                changed.append(profile.id)
+            }
+        }
+
+        var allSaved = true
+        for id in changed {
+            if let profile = updated.first(where: { $0.id == id }) {
+                do {
+                    try save(profile)
+                } catch {
+                    allSaved = false
+                }
+            }
+        }
+        return (updated, allSaved)
     }
 
     /// Moves the `.defaultRoute` to the profile with `id`, removing it from

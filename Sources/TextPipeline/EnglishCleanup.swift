@@ -55,10 +55,11 @@ public enum EnglishCleanup: Sendable {
         // because the filler was carrying the sentence start.
         result = replace(
             "(^|[.!?\\n][\"”’)]?\\s+|\\n)" + startWord + fillerTail
-                + "(?:\\s+" + startWord + fillerTail + ")*\\s+(\\p{L})",
+                + "(?:\\s+" + startWord + fillerTail + ")*\\s+(\\p{L}[\\p{L}\\p{N}]*)",
             in: result
         ) { groups in
-            groups[1] + groups[2].uppercased()
+            // The whole word, so "Um, eBay sold it" keeps "eBay".
+            groups[1] + Stage1Normalizer.capitalizedFirstLetter(groups[2])
         }
 
         // Sentence-final: "I think, um." → "I think."; "yes uh" → "yes";
@@ -84,12 +85,16 @@ public enum EnglishCleanup: Sendable {
     /// Function words people stutter on. Words where a doubled form is
     /// grammatical ("that that", "had had", "is is", "do do") or expressive
     /// ("very very", "no no", "so so", "my my", "he he") are deliberately
-    /// absent.
+    /// absent — and so are the ones docs/17 F2 caught doubling legitimately:
+    /// "was was" / "are are" ("what it was was amazing") and the prepositions
+    /// a phrasal verb meets ("check in in five minutes", "turn it on on
+    /// Monday", "look at at least"), plus "a" ("vitamin A a day"). Those
+    /// stutters are left to the cleanup model, which can read the sentence.
     private static let stutterWords = [
         "i", "i'm", "i’m", "i'll", "i’ll", "i've", "i’ve", "i'd", "i’d",
-        "a", "an", "the", "to", "and", "but", "or", "we", "you", "she",
-        "it", "it's", "it’s", "they", "our", "your", "their", "in", "on", "at",
-        "of", "for", "with", "this", "what", "if", "can", "just", "are", "was",
+        "an", "the", "to", "and", "but", "or", "we", "you", "she",
+        "it", "it's", "it’s", "they", "our", "your", "their",
+        "of", "for", "with", "this", "what", "if", "can", "just",
     ]
 
     /// "I I think" / "I, I think" / "the the the" → one occurrence. Runs of

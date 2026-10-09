@@ -143,6 +143,11 @@ public struct HotkeyDecisionCore: Sendable {
     private var lastShortTapDownTime: TimeInterval?
     private var lastDownEdgeTime: TimeInterval = -1
     private var lastUpEdgeTime: TimeInterval = -1
+    /// True when the current press, made during a hands-free take, turned
+    /// out to be a shortcut (right-⌘+Tab, Fn+arrow). Its release must neither
+    /// cancel nor finish the locked take — the user was switching apps, not
+    /// talking to Vocal (docs/17 §4.4 #1).
+    private var pressIsShortcutDuringLock = false
 
     public init(spec: HotkeySpec, timings: Timings = .default) {
         self.spec = spec
@@ -236,6 +241,15 @@ public struct HotkeyDecisionCore: Sendable {
             // are the user typing, not aborting (docs/13 §4).
             return Outcome()
         }
+        if isLockActive {
+            // A shortcut typed with the hotkey's modifier while a hands-free
+            // take runs — however long the modifier was held first (right-⌘
+            // held, then Tab): aborting would discard minutes of dictation,
+            // and treating the release as the finishing tap would deliver it
+            // mid-thought. Ignore the whole press.
+            pressIsShortcutDuringLock = true
+            return Outcome()
+        }
         if event.timestamp - pressStartTime < timings.chordAbort {
             // Chord (e.g. Fn+arrow, right-⌘+C): the user wanted a shortcut, not
             // dictation → abort-before-start (docs/03 §3.1). The event itself
@@ -297,6 +311,7 @@ public struct HotkeyDecisionCore: Sendable {
         }
         isPressed = true
         pressStartTime = now
+        pressIsShortcutDuringLock = false
         return .pressBegan
     }
 
@@ -309,6 +324,11 @@ public struct HotkeyDecisionCore: Sendable {
             return nil
         }
         isPressed = false
+        if pressIsShortcutDuringLock {
+            // The shortcut's modifier came back up; the locked take runs on.
+            pressIsShortcutDuringLock = false
+            return nil
+        }
         let heldDuration = now - pressStartTime
         if heldDuration >= timings.hold {
             lastShortTapDownTime = nil
@@ -327,7 +347,12 @@ public struct HotkeyDecisionCore: Sendable {
             // release (the app stops the take on its pressEnded), so the
             // Escape watch disarms with it. No provisional hold: ending a
             // hands-free take must not lag the double-tap window.
-            lastShortTapDownTime = pressStartTime
+            //
+            // It also must not seed a double-tap: users leave hands-free the
+            // way they entered it, and a second tap pairing with this one
+            // would start a fresh locked take that records until the cap
+            // (docs/17 §4.4 #2).
+            lastShortTapDownTime = nil
             isLockActive = false
             return .pressEnded
         }

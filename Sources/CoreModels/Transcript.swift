@@ -25,6 +25,9 @@ public enum CleanupOutcome: Codable, Sendable, Hashable {
         /// — no fillers, no correction cues, punctuation already sane
         /// (docs/15 step 20).
         case notNeeded
+        /// The Raw dictation style is in effect: the recognizer's words are
+        /// delivered as heard (docs/17 §5).
+        case rawStyle
     }
 }
 

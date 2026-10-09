@@ -136,13 +136,11 @@ final class HUDPanelController {
             panel.orderOut(nil)
             return
         }
-        // Click-through except while listening (FR-4.2); the nonactivating
-        // style means even interactive clicks never move focus.
-        if case .listening = currentState.mode {
-            panel.ignoresMouseEvents = false
-        } else {
-            panel.ignoresMouseEvents = true
-        }
+        // Always click-through: neither HUD skin has a control to click, so
+        // an interactive panel only swallowed clicks meant for whatever sits
+        // under it — a Send button, a terminal prompt — for the whole take
+        // (docs/17 §4.4 #3). FR-4.2's cancel button would re-enable it.
+        panel.ignoresMouseEvents = true
         reposition()
         panel.orderFrontRegardless()
     }

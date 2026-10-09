@@ -28,11 +28,14 @@ struct SettingsView: View {
                 .tabItem { Label("Profiles", systemImage: "person.2") }
             ModelsPane(settings: settings)
                 .tabItem { Label("Models", systemImage: "cpu") }
+            // docs/17 G0: measure this Mac with your voice.
+            SpeedCheckPane(appState: appState)
+                .tabItem { Label("Speed Check", systemImage: "speedometer") }
             CleanupPane(settings: settings)
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
             DictionaryPane(database: appState.database)
                 .tabItem { Label("Dictionary", systemImage: "character.book.closed") }
-            HistoryPrivacyPane(settings: settings, database: appState.database)
+            HistoryPrivacyPane(settings: settings, database: appState.database, appState: appState)
                 .tabItem { Label("History & Privacy", systemImage: "clock.arrow.circlepath") }
             AboutPane(database: appState.database)
                 .tabItem { Label("About", systemImage: "info.circle") }
@@ -58,6 +61,48 @@ private struct GeneralPane: View {
             Section("Push-to-talk key") {
                 // Same control onboarding shows, so the two cannot drift.
                 HotkeyPickerView(appState: appState)
+            }
+            Section("Dictation style") {
+                // docs/17 §5: one click, applies to every profile that uses
+                // the global style (Terminal / Code stays verbatim).
+                Picker("Style", selection: $settings.dictationStyle) {
+                    ForEach(DictationStyle.allCases) { style in
+                        Text(style.displayName).tag(style)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(settings.dictationStyle.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Commands") {
+                // docs/17 G4 (after Glaido's Commands): select text, hold the
+                // command key, say what to do — a preview shows the result,
+                // Return inserts it. Runs on the local model only.
+                Picker("Command key", selection: $settings.commandHotkeySpec) {
+                    Text("Off").tag(Optional<HotkeySpec>.none)
+                    ForEach(
+                        HotkeySpec.presets.filter { $0.kind != settings.hotkeySpec.kind },
+                        id: \.self
+                    ) { spec in
+                        Text(spec.label).tag(Optional(spec))
+                    }
+                }
+                Toggle("Wake word: start a dictation with “Vocal, …”", isOn: $settings.wakeWordCommandsEnabled)
+                Text(
+                    """
+                    Hold the command key and say an instruction — "make this \
+                    shorter", "fix the grammar", "turn this into bullet points", \
+                    "what's 15% of 240". With text selected it acts on the \
+                    selection; otherwise it writes or answers. The result shows in \
+                    a preview: Return inserts it, Escape dismisses. Uses Ollama or \
+                    Apple's on-device model — nothing leaves this Mac. With the \
+                    wake word on, a dictation that begins "Vocal, …" or "Hey \
+                    Vocal" becomes a command too.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Section("Microphone") {
                 // docs/15 step 36 remainder: capture from a specific device
@@ -209,17 +254,43 @@ private struct ModelsPane: View {
             }
             Section("English fast path") {
                 Toggle(
-                    "Use Parakeet v2 for pinned English",
+                    "Use Parakeet v2 for English",
                     isOn: $settings.parakeetEnglishEnabled
                 )
                 Text(
                     """
-                    Parakeet TDT runs on the Neural Engine at roughly 100× \
-                    real time — the docs/15 raw-speed lever — and enables the \
-                    live text preview in the HUD while you speak. Applies to \
-                    the next dictation with the language pinned to English; \
-                    Auto, 中文, and မြန်မာ keep their engines. First use \
-                    downloads ~600 MB (FluidAudio manages its own files).
+                    Parakeet TDT runs on the Neural Engine at over 100× real \
+                    time, and shows your words in the HUD while you speak. It \
+                    handles dictation with the language set to English; Auto, \
+                    中文, and မြန်မာ keep their engines. It downloads ~600 MB \
+                    once, in the background; English uses Whisper until it is \
+                    ready, and whenever Parakeet fails.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                if settings.parakeetEnglishEnabled, settings.languageMode == .auto {
+                    // Auto routes to Whisper so mixed-language speech works;
+                    // an English speaker gains Parakeet's speed by pinning.
+                    HStack {
+                        Text("The language is set to Auto, so Whisper is used.")
+                            .font(.caption)
+                        Spacer()
+                        Button("Use English") { settings.languageMode = .pinned(.english) }
+                            .controlSize(.small)
+                    }
+                }
+                Toggle(
+                    "Listen for Dictionary words",
+                    isOn: $settings.parakeetVocabularyBoost
+                )
+                .disabled(!settings.parakeetEnglishEnabled)
+                Text(
+                    """
+                    A small second model checks each take for the words in \
+                    your Dictionary and fixes one Parakeet misheard, only when \
+                    the audio supports it. Downloads once, the first time your \
+                    Dictionary has a word to listen for.
                     """
                 )
                 .font(.caption)
@@ -352,6 +423,23 @@ private struct CleanupPane: View {
                     the AI, so short ones take a little longer. Turn off for maximum \
                     speed. For mistakes that keep recurring, a Dictionary entry is \
                     faster and always exact.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Use nearby text as context", isOn: $settings.cleanupUsesSurroundingText)
+                    .disabled(!settings.cleanupMasterSwitch)
+                Text(
+                    """
+                    Off by default. When on, the AI reads up to about 300 \
+                    characters around your cursor, so a dictation that continues \
+                    a sentence keeps its lowercase start, names are spelled the \
+                    way the document spells them, and the tone matches. Read at \
+                    the moment of cleanup, kept only for that one request, never \
+                    saved, never sent off this Mac, and never read from password \
+                    fields.
                     """
                 )
                 .font(.caption)
@@ -509,7 +597,14 @@ private struct DictionaryPane: View {
                                 .foregroundStyle(.secondary)
                             Text(entry.written)
                                 .bold()
+                                .lineLimit(2)
                             Spacer()
+                            // docs/17 F5: a snippet fires only when it is the
+                            // whole dictation; a word fix applies anywhere.
+                            Toggle("Snippet", isOn: snippetBinding(for: entry))
+                                .toggleStyle(.checkbox)
+                                .controlSize(.small)
+                                .help("Snippet: expands only when you say just this phrase. Tags: {date} {time} {clipboard}")
                             Button {
                                 remove(entry)
                             } label: {
@@ -542,6 +637,10 @@ private struct DictionaryPane: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                Text("Snippets expand only when the phrase is the whole dictation, so \"my address\" never fires inside \"I changed my address\". Multi-line or long written forms are snippets by default. Tags: {date}, {time}, {clipboard}.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let errorText {
                     Text(errorText)
                         .font(.caption)
@@ -585,6 +684,23 @@ private struct DictionaryPane: View {
         } catch {
             errorText = "Could not save entry: \(error.localizedDescription)"
         }
+    }
+
+    private func snippetBinding(for entry: DictionaryEntry) -> Binding<Bool> {
+        Binding(
+            get: { entry.isSnippet },
+            set: { isOn in
+                guard let database else { return }
+                var updated = entry
+                updated.snippet = isOn
+                do {
+                    try database.save(updated)
+                    reload()
+                } catch {
+                    errorText = "Could not save entry: \(error.localizedDescription)"
+                }
+            }
+        )
     }
 
     private func remove(_ entry: DictionaryEntry) {
@@ -670,6 +786,7 @@ private struct DictionaryPane: View {
 private struct HistoryPrivacyPane: View {
     @ObservedObject var settings: SettingsStore
     let database: DatabaseStore?
+    let appState: AppState
     @State private var confirmingDeleteAll = false
     @State private var statusText: String?
 
@@ -727,6 +844,11 @@ private struct HistoryPrivacyPane: View {
             if let directory = AppState.audioDirectory() {
                 AudioArchive.deleteAll(in: directory)
             }
+            // So are cancelled and failed takes waiting in the recovery
+            // window — unencrypted recordings the menu would still offer
+            // back (docs/17 §4.4 #6).
+            RecoveryStore.discardAll()
+            appState.refreshRecoverableTake()
             // Deleting rows only unlinks them: the transcript text stays
             // readable in the file's free pages until it is overwritten.
             // Compacting is what makes "permanently removes" true, and it is

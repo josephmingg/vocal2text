@@ -24,6 +24,32 @@ public struct PrefixCommitter: Sendable {
 
     public init() {}
 
+    /// Starts with `words` already committed. The trailing-window preview
+    /// hands the committed words still inside its new window to a fresh
+    /// committer, so sliding the window never un-commits them on screen.
+    public init(committedWords words: [String]) {
+        committedWords = words
+        previousWords = words
+    }
+
+    /// The committed words, in order.
+    public var committedWordList: [String] { committedWords }
+
+    /// Two hypotheses spell the same word differently at the edges: Parakeet
+    /// capitalizes and punctuates, so "Seven," and "seven" are one word.
+    /// Compared without case and without surrounding punctuation; a token
+    /// that is only punctuation is compared as written.
+    public static func sameWord(_ lhs: String, _ rhs: String) -> Bool {
+        let left = core(lhs)
+        let right = core(rhs)
+        if left.isEmpty, right.isEmpty { return lhs == rhs }
+        return left == right
+    }
+
+    private static func core(_ word: String) -> String {
+        word.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.symbols))
+    }
+
     /// The words committed so far, joined — never shrinks.
     public var committedText: String {
         committedWords.joined(separator: " ")
@@ -41,7 +67,7 @@ public struct PrefixCommitter: Sendable {
         // simply takes over after the committed prefix.
         var agreed = 0
         while agreed < words.count, agreed < previousWords.count,
-            words[agreed] == previousWords[agreed] {
+            Self.sameWord(words[agreed], previousWords[agreed]) {
             agreed += 1
         }
         if agreed > committedWords.count {

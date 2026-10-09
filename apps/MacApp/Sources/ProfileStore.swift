@@ -24,11 +24,20 @@ final class ProfileStore: ObservableObject {
 
     init(database: DatabaseStore?) {
         self.database = database
-        self.profiles = ProfileBootstrap.loadOrSeed(
-            load: { try database?.profiles() ?? [] },
-            save: { try database?.save($0) }
+        // docs/17: built-ins added after first run (AI Prompt, the full
+        // terminal list) reach existing installs exactly once.
+        self.profiles = ProfileBootstrap.loadSeedingAndUpgrading(
+            load: {
+                guard let database else { throw ProfileBootstrap.StoreUnavailable() }
+                return try database.profiles()
+            },
+            save: { try database?.save($0) },
+            storedVersion: UserDefaults.standard.integer(forKey: Self.builtInVersionKey),
+            recordVersion: { UserDefaults.standard.set($0, forKey: Self.builtInVersionKey) }
         )
     }
+
+    private static let builtInVersionKey = "profiles.builtInVersion"
 
     func profile(id: UUID) -> Profile? {
         profiles.first { $0.id == id }

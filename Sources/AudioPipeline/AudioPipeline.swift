@@ -6,6 +6,16 @@ import Foundation
 /// it compiles — and is tested — on every platform.
 public enum RecoveryFileReaper {
     public static let recoveryFilePrefix = "vocal-capture-"
+    /// Crash sidecars of measurement captures (Speed Check). Swept and
+    /// deleted like recovery files, but never offered back by "Recover":
+    /// a read-aloud test passage is not a dictation.
+    public static let measurementFilePrefix = "vocal-measure-"
+
+    static func isSidecar(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        return url.pathExtension == "pcmf32"
+            && (name.hasPrefix(recoveryFilePrefix) || name.hasPrefix(measurementFilePrefix))
+    }
 
     /// How long a cancelled take's raw audio stays recoverable (FR-1.6).
     public static let recoveryRetention: TimeInterval = 24 * 60 * 60
@@ -32,9 +42,7 @@ public enum RecoveryFileReaper {
             )
         else { return }
 
-        for entry in entries where entry.lastPathComponent.hasPrefix(recoveryFilePrefix)
-            && entry.pathExtension == "pcmf32"
-        {
+        for entry in entries where isSidecar(entry) {
             let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate
             // An unreadable timestamp is treated as expired: the file is
@@ -130,6 +138,29 @@ public enum RecoveryStore {
     /// recording is never offered twice.
     public static func discard(at url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// Removes every recovery sidecar regardless of age — "Keep audio: Never"
+    /// and "Delete All History" (FR-1.6, docs/17 §4.4 #6). Returns how many
+    /// files were removed. A capture still in flight keeps writing to its
+    /// open handle; only its crash-recovery copy is lost.
+    @discardableResult
+    public static func discardAll(
+        in directory: URL = FileManager.default.temporaryDirectory
+    ) -> Int {
+        let fileManager = FileManager.default
+        guard
+            let entries = try? fileManager.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            )
+        else { return 0 }
+        var removed = 0
+        for entry in entries where RecoveryFileReaper.isSidecar(entry) {
+            if (try? fileManager.removeItem(at: entry)) != nil {
+                removed += 1
+            }
+        }
+        return removed
     }
 
     /// Writes a failed take's samples back as a recovery sidecar (docs/15
@@ -246,11 +277,13 @@ public enum DiskSpaceGuard {
 
 #if canImport(AVFoundation)
 import AVFoundation
+// VocalLog — used on every platform (the mid-take resampler rebuild), not
+// just the macOS device-selection path.
+import CoreModels
 #if os(macOS)
 // AudioUnitSetProperty + kAudioOutputUnitProperty_CurrentDevice for the
 // input-device selection below (docs/15 step 36 remainder).
 import AudioToolbox
-import CoreModels
 #endif
 
 /// Platform capability probe: true where AVFoundation-backed capture compiles.
@@ -408,12 +441,6 @@ public enum AudioArchive {
     }
 }
 
-/// AVAudioEngine microphone capture (docs/03 §4): tap the input node at its
-/// native hardware format (tap format requests are ignored), convert with
-/// AVAudioConverter to 16 kHz mono Float32, and stream `PCMChunk`s.
-///
-/// v1 skeleton: no `AVAudioEngineConfigurationChange` converter rebuild yet, and
-/// converter-internal tail frames (a few ms) are not flushed at finish.
 /// One tapped buffer's channel-0 samples plus the rate they were recorded
 /// at, so conversion follows the hardware even when it changes mid-take.
 struct NativeChunk: Sendable {
@@ -421,6 +448,10 @@ struct NativeChunk: Sendable {
     let sampleRate: Double
 }
 
+/// AVAudioEngine microphone capture (docs/03 §4): tap the input node at its
+/// native hardware format (tap format requests are ignored), convert with
+/// AVAudioConverter to 16 kHz mono Float32, and stream `PCMChunk`s. A
+/// configuration change mid-take reopens the input and keeps recording.
 public actor MicrophoneCapture {
     private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
@@ -446,11 +477,19 @@ public actor MicrophoneCapture {
     /// Per-chunk microphone level for the HUD waveform (FR-4.1), ~12×/second.
     private var levelHandler: (@Sendable (Float) -> Void)?
     /// docs/15 step 36: fired when the engine's configuration changes
-    /// mid-take (AirPods connect, input device switch). The composition root
-    /// finishes the take through the normal stop path — captured audio is
-    /// delivered, not lost to a silently dead tap.
+    /// mid-take and capture could not reopen the input. The composition
+    /// root finishes the take through the normal stop path — captured audio
+    /// is delivered, not lost to a silently dead tap.
     private var configurationChangeHandler: (@Sendable () -> Void)?
     private var configurationObserver: (any NSObjectProtocol)?
+    /// The running take's tap, kept so a reopened input feeds the same take.
+    private var tapBlock: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?
+    /// Inputs reopened in this take (see `reopenInputAfterConfigurationChange`).
+    private var reopenedInputs = 0
+    /// A Bluetooth headset reconfigures once or twice as its microphone
+    /// opens; more than this in one take is a device that keeps changing,
+    /// and the take ends instead of looping.
+    static let maxReopensPerTake = 3
     /// docs/15 step 36 remainder: capture from this device instead of the
     /// system default. Stored as the stable hardware UID; nil/empty follows
     /// the default input like before. A UID that no longer resolves (device
@@ -469,7 +508,14 @@ public actor MicrophoneCapture {
     private var lastDiskProbe: (at: Date, availableBytes: Int64?)?
     private static let diskProbeMaxAge: TimeInterval = 60
 
-    public init() {}
+    /// The sidecar's file-name prefix: `RecoveryFileReaper.recoveryFilePrefix`
+    /// for dictation (offered back by "Recover"), `measurementFilePrefix`
+    /// for captures that must never be (Speed Check).
+    private let sidecarPrefix: String
+
+    public init(sidecarPrefix: String = RecoveryFileReaper.recoveryFilePrefix) {
+        self.sidecarPrefix = sidecarPrefix
+    }
 
     /// Builds and prepares the next take's engine, and refreshes the disk
     /// probe — everything capture start needs that can be paid for while no
@@ -628,7 +674,7 @@ public actor MicrophoneCapture {
         // which runs on the processing task, off the press path — is the
         // earliest moment anything needs the file to exist.
         let recoveryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(RecoveryFileReaper.recoveryFilePrefix + UUID().uuidString + ".pcmf32")
+            .appendingPathComponent(sidecarPrefix + UUID().uuidString + ".pcmf32")
 
         let (nativeStream, nativeContinuation) = AsyncStream.makeStream(of: NativeChunk.self)
         // The live-chunk stream feeds the streaming preview (docs/15 step 22);
@@ -652,6 +698,7 @@ public actor MicrophoneCapture {
         self.chunkContinuation = chunkContinuation
         self.accumulated = []
         self.isCapturing = true
+        self.reopenedInputs = 0
 
         // The tap runs on an audio thread: extract a Sendable [Float] payload
         // and hand it to the actor through an ordered AsyncStream. Explicitly
@@ -670,6 +717,7 @@ public actor MicrophoneCapture {
         // and a failed assertion is an uncatchable exception that kills the
         // app; buffers carry their own rate, and `ingest` follows it.
         input.installTap(onBus: 0, bufferSize: 4_096, format: nil, block: tap)
+        tapBlock = tap
 
         processingTask = Task.detached { [weak self] in
             for await chunk in nativeStream {
@@ -677,18 +725,15 @@ public actor MicrophoneCapture {
             }
         }
 
-        // docs/15 step 36: a route change (AirPods connecting, an interface
-        // unplugged) reconfigures the engine under the tap; the take must end
-        // gracefully instead of recording silence. Registered before start so
-        // an immediate change is not missed; removed in stopEngineAndDrain.
-        let changeHandler = configurationChangeHandler
-        configurationObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: nil
-        ) { _ in
-            changeHandler?()
-        }
+        // A route change reconfigures the engine under the tap and stops it.
+        // The commonest case is the take's own start: opening an AirPods
+        // microphone switches the headset to its call profile, which changes
+        // the input's format a moment after `engine.start()`. Ending the take
+        // there (the old behaviour) meant AirPods never dictated at all, so
+        // the input is reopened and the take carries on. Registered before
+        // start so an immediate change is not missed; removed in
+        // stopEngineAndDrain.
+        observeConfigurationChanges(of: engine)
 
         engine.prepare()
         do {
@@ -718,6 +763,75 @@ public actor MicrophoneCapture {
     }
 
     // MARK: - Private
+
+    private func observeConfigurationChanges(of engine: AVAudioEngine) {
+        if let observer = configurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        let engineID = ObjectIdentifier(engine)
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            Task { await self?.reopenInputAfterConfigurationChange(engineID: engineID) }
+        }
+    }
+
+    /// The input changed under a live take: move the tap to a fresh engine
+    /// on the input as it is now, and keep recording. `ingest` already
+    /// follows a new sample rate. Audio spoken while the device switched is
+    /// lost (typically well under a second). When the input cannot be
+    /// reopened, or keeps changing, the take ends normally with what was
+    /// captured.
+    private func reopenInputAfterConfigurationChange(engineID: ObjectIdentifier) {
+        // A notification from an engine already replaced, or a take already
+        // over, is stale.
+        guard isCapturing, let old = engine, ObjectIdentifier(old) == engineID else { return }
+        reopenedInputs += 1
+        if reopenedInputs <= Self.maxReopensPerTake, let tap = tapBlock {
+            old.inputNode.removeTap(onBus: 0)
+            old.stop()
+            let fresh = AVAudioEngine()
+            applyPreferredInputDevice(to: fresh)
+            let input = fresh.inputNode
+            let format = input.outputFormat(forBus: 0)
+            let rate = format.sampleRate
+            // Same guard as `start`: installTap on a node whose format
+            // disagrees with its hardware raises an uncatchable exception.
+            if Self.formatsAgree(node: format, hardware: input.inputFormat(forBus: 0)) {
+                input.installTap(onBus: 0, bufferSize: 4_096, format: nil, block: tap)
+                observeConfigurationChanges(of: fresh)
+                engine = fresh
+                fresh.prepare()
+                do {
+                    try fresh.start()
+                    VocalLog.audio.notice(
+                        "input reconfigured mid-take — reopened at \(rate, privacy: .public) Hz (\(self.reopenedInputs, privacy: .public)/\(Self.maxReopensPerTake, privacy: .public))"
+                    )
+                    return
+                } catch {
+                    VocalLog.audio.error(
+                        "reopening the input failed: \(String(describing: error), privacy: .public)"
+                    )
+                }
+            } else if reopenedInputs < Self.maxReopensPerTake {
+                // The new route can take a moment to settle (a headset
+                // switching profile); look again shortly, still counted.
+                VocalLog.audio.notice("input still settling after a reconfiguration — retrying")
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    await self?.reopenInputAfterConfigurationChange(engineID: engineID)
+                }
+                return
+            } else {
+                VocalLog.audio.error("input reconfigured mid-take to an unusable format")
+            }
+        } else {
+            VocalLog.audio.error("input keeps reconfiguring mid-take — ending the take")
+        }
+        configurationChangeHandler?()
+    }
 
     /// Opens the crash-recovery sidecar on first use (docs/15 step 50). A
     /// failed create degrades to "no crash recovery for this take" — losing
@@ -857,6 +971,7 @@ public actor MicrophoneCapture {
         recoveryHandle = nil
         engine = nil
         converter = nil
+        tapBlock = nil
     }
 
     private func finishCapture() async -> PCMChunk {

@@ -5,6 +5,7 @@ import ASREngineWhisperKit
 import AVFoundation
 import AppKit
 import AudioPipeline
+import BenchKit
 import CleanupKit
 import Combine
 import CoreModels
@@ -66,6 +67,36 @@ final class AppState: ObservableObject {
     /// pressing the current key in the recorder starts a real dictation behind
     /// the sheet.
     weak var hotkeyMonitor: HotkeyMonitor?
+    /// The command key's monitor (docs/17 G4), when one is configured.
+    weak var commandHotkeyMonitor: HotkeyMonitor?
+    /// True between an accepted command-key press and its release, so the
+    /// release of a press that never started a command (a dictation was
+    /// already recording) cannot end that dictation.
+    private var commandPressActive = false
+    /// The dictation key's mirror of `commandPressActive`: set at an
+    /// accepted dictation press, cleared when its take ends. Gating on it
+    /// (not on the HUD, which lags the session) keeps a command-key press
+    /// right after a dictation press from ending that dictation.
+    private var dictationPressActive = false
+    /// Whether the session has reported this press's own take starting.
+    /// Only then may an `.idle` / `.cancelled` clear the press flags — a
+    /// late event from the previous take, mirrored after the new press,
+    /// would otherwise wipe them and leave the mic open (docs/17 §11).
+    private var pressTakeStarted = false
+    /// A released command whose result has not arrived: a take that ends
+    /// without one (too short, silence) says so instead of vanishing.
+    private var commandAwaitingResult = false
+    /// When the last command result was inserted. Undo acts on dictations;
+    /// a command insertion after it makes that record stale.
+    private var commandInsertedAt: Date?
+    /// The model call for the visible preview, cancelled when it is
+    /// dismissed or replaced.
+    private var commandTask: Task<Void, Never>?
+    /// Created on the first command; reused after.
+    private var commandPreview: CommandPreviewController?
+
+    /// True while the command key holds the microphone.
+    var isCommandPressActive: Bool { commandPressActive }
 
     /// Bumped on every accepted hotkey down-edge, so a "press it now" tester can
     /// confirm the key works without knowing anything about the event tap.
@@ -146,6 +177,7 @@ final class AppState: ObservableObject {
         let settings = SettingsStore()
         let database = AppState.makeDatabase()
         settings.database = database
+        DictionaryMigration.pinLegacyEntriesInlineOnce(database: database)
 
         let profileStore = ProfileStore(database: database)
         let frontmost = FrontmostContext()
@@ -164,11 +196,18 @@ final class AppState: ObservableObject {
         // straight from defaults so a Settings flip applies to the next
         // dictation; auto mode and pinned ZH stay on WhisperKit, so
         // code-switching accuracy is untouched.
-        let parakeetEngine = ParakeetEngine()
+        let parakeetEngine = ParakeetEngine(
+            boostEnabled: { SettingsStore.parakeetVocabularyBoostIsOn() }
+        )
+        // Parakeet takes a take only once its models are on disk, and a
+        // Parakeet failure falls back to Whisper (docs/17 G2.1): a default
+        // that changed under an existing install must never cost a take,
+        // offline or mid-download.
         let englishRoute = SwitchedEngine(
-            isOn: { UserDefaults.standard.bool(forKey: SettingsStore.parakeetEnglishDefaultsKey) },
+            isOn: { SettingsStore.parakeetEnglishIsOn() && ParakeetEngine.modelsAreOnDisk() },
             on: parakeetEngine,
-            off: engine
+            off: engine,
+            fallsBackOnFailure: true
         )
         let routedEngine = LanguageRoutingEngine(
             primary: engine,
@@ -179,7 +218,7 @@ final class AppState: ObservableObject {
         // silence delivers nothing instead of hallucinated text, and the
         // engine only decodes the speech envelope.
         let speechDetector = SileroVoiceActivityDetector()
-        let dependencies = DictationSession.Dependencies(
+        var dependencies = DictationSession.Dependencies(
             audio: MicrophoneCaptureAdapter(microphone: microphone),
             engine: routedEngine,
             // Built per take, only when the session has already decided stage 3
@@ -210,7 +249,8 @@ final class AppState: ObservableObject {
                 }
                 return DictationSession.CleanupSelection(
                     pipeline: CleanupPipeline(provider: provider),
-                    providerID: .ollama(model: model)
+                    providerID: .ollama(model: model),
+                    leavesDevice: provider.leavesDevice
                 )
             },
             // FR-5.1 (docs/11 G9): "Keep audio" in Settings → History & Privacy
@@ -238,6 +278,12 @@ final class AppState: ObservableObject {
             // ordinary 24-hour recovery window — the same menu offer as a
             // cancelled take, so zero silent losses.
             preserveFailedAudio: { audio in
+                // "Keep audio: Never" means never — a failed take's recording
+                // is not exempt from the user's privacy choice (docs/17 §4.4 #6).
+                let retentionDays = await MainActor.run { settings.audioRetentionDays }
+                guard AudioRetentionPolicy.keepsAudio(retentionDays: retentionDays) else {
+                    return
+                }
                 RecoveryStore.preserve(samples: audio.samples)
             },
             // Streaming preview (docs/15 step 22), display-only per FR-4.1.
@@ -255,9 +301,11 @@ final class AppState: ObservableObject {
                 // Never trigger the ~600 MB download from a preview tick; the
                 // preload and the take's own path own that moment.
                 guard await parakeetEngine.isModelLoaded else { return nil }
+                // No dictionary terms: the boost is for the delivered text,
+                // and the preview must stay as cheap as one decode.
                 return try? await parakeetEngine.transcribe(
                     audio, languageMode: .pinned(.english), dictionaryTerms: []
-                ).text
+                )
             },
             onPartial: { text in
                 Task { @MainActor in
@@ -291,7 +339,7 @@ final class AppState: ObservableObject {
                 )
                 // Shaped like the take's real request so the server's prompt
                 // cache holds the reusable system-prompt prefix, not a "hi".
-                let terms = await settings.enabledDictionaryEntries().map(\.written)
+                let terms = await settings.enabledDictionaryEntries().vocabularyTerms
                 await provider.prewarm(
                     for: CleanupRequest(
                         text: "",
@@ -337,6 +385,46 @@ final class AppState: ObservableObject {
             }
         )
 
+        // docs/17 F5: a snippet's {clipboard} tag. Read only for a snippet
+        // that carries the tag; Vocal's own transient transcript writes are
+        // restored before a take settles, so this is the user's clipboard.
+        dependencies.readClipboard = {
+            await MainActor.run { () -> String? in
+                // Password managers mark what they copy concealed or
+                // transient (nspasteboard.org); such an item is never typed
+                // by a snippet, and never reaches History (docs/17 §11).
+                let pasteboard = NSPasteboard.general
+                let markers: Set<String> = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"]
+                if let types = pasteboard.types, types.contains(where: { markers.contains($0.rawValue) }) {
+                    return nil
+                }
+                return pasteboard.string(forType: .string)
+            }
+        }
+        // docs/17 G3.2, opt-in (Settings → Cleanup): the text around the
+        // caret for this one cleanup request. The session asks only when
+        // cleanup will run and the setting is on; secure fields read as nil.
+        // docs/17 G4: command mode. The handler only opens the preview and
+        // starts the model call, so the pipeline queue is never held.
+        dependencies.handleCommand = { command in
+            await relay.noteCommand(command)
+        }
+        dependencies.captureSelection = {
+            await MainActor.run { AXInserter.selectedText() }
+        }
+        dependencies.readSurroundingContext = { pressTimeBundleID in
+            await MainActor.run { () -> String? in
+                // A queued take processed after the user switched apps must
+                // not read (or send to cleanup) another app's document.
+                guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == pressTimeBundleID,
+                    let slice = AXInserter.surroundingText()
+                else { return nil }
+                let joined = slice.before + CleanupRequest.cursorMarker + slice.after
+                return joined.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == CleanupRequest.cursorMarker ? nil : joined
+            }
+        }
+
         self.settings = settings
         self.database = database
         self.engine = engine
@@ -376,8 +464,9 @@ final class AppState: ObservableObject {
                 }
             }
             // docs/15 step 36: an AirPods connect or input switch mid-take
-            // reconfigures the engine under the tap; end the take through the
-            // normal stop path so the audio captured so far is delivered.
+            // reconfigures the engine under the tap. Capture reopens the input
+            // itself; this fires only when it could not recover, and ends the
+            // take through the normal stop path so the audio so far is kept.
             await microphone.setConfigurationChangeHandler {
                 Task { @MainActor in
                     relay.noteDeviceChange()
@@ -426,6 +515,19 @@ final class AppState: ObservableObject {
             .sink { [weak self] _ in
                 // Deferred one main-actor turn: @Published emits on willSet,
                 // and the router reads the defaults key that didSet writes.
+                Task { @MainActor [weak self] in
+                    guard let self, self.settings.languageMode == .pinned(.english) else { return }
+                    self.preloadEngineIfWarmedBefore()
+                }
+            }
+            .store(in: &settingsSinks)
+        // Turning the vocabulary boost on loads its model in the background
+        // (docs/17 G2.2), under the same gates as the Parakeet route.
+        settings.$parakeetVocabularyBoost
+            .dropFirst()
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self, self.settings.languageMode == .pinned(.english) else { return }
                     self.preloadEngineIfWarmedBefore()
@@ -572,6 +674,8 @@ final class AppState: ObservableObject {
         let engine = routedEngine
         let languageMode = mode ?? settings.languageMode
         let detector = speechDetector
+        let parakeetEngine = parakeetEngine
+        let settings = settings
         Task.detached(priority: .utility) {
             // The VAD's ~0.6 MB model first, so the very next take is gated;
             // then the big ASR load.
@@ -583,12 +687,39 @@ final class AppState: ObservableObject {
                     "background model preload failed: \(String(describing: error), privacy: .public)"
                 )
             }
+            guard languageMode == .pinned(.english), SettingsStore.parakeetEnglishIsOn() else {
+                return
+            }
+            // The router used Whisper above if Parakeet is not downloaded
+            // yet: fetch it now, in the background, so a later take is fast.
+            if !ParakeetEngine.modelsAreOnDisk() {
+                do {
+                    try await parakeetEngine.prepare(languageMode: languageMode)
+                } catch {
+                    VocalLog.engine.error(
+                        "background Parakeet download failed: \(String(describing: error), privacy: .public)"
+                    )
+                    return
+                }
+            }
+            // The vocabulary boost (docs/17 G2.2), only when it would be
+            // used: there are Dictionary words to listen for.
+            guard SettingsStore.parakeetVocabularyBoostIsOn() else { return }
+            let terms = await settings.enabledDictionaryEntries().vocabularyTerms
+            await parakeetEngine.prepareVocabularyBoost(terms: terms)
         }
     }
 
     // MARK: - Dictation controls
 
     func startDictation() {
+        dictationPressActive = true
+        pressTakeStarted = false
+        // An answer waiting in the preview holds the keyboard; dictating now
+        // means the user moved on, and the text must go to their app.
+        if commandPreview?.isKey == true {
+            commandPreview?.dismiss()
+        }
         hudState.partialText = ""
         hudState.levels = []
         hudState.languageLabel = Self.languageLabel(for: settings.languageMode)
@@ -601,17 +732,19 @@ final class AppState: ObservableObject {
         let engine = engine
         let burmeseEngine = burmeseEngine
         let parakeetEngine = parakeetEngine
-        let parakeetOn = settings.parakeetEnglishEnabled
+        // Routed exactly as the engine router decides: Parakeet only once
+        // its models are on disk; Whisper until then (docs/17 G2.1).
+        let parakeetRoutes = settings.parakeetEnglishEnabled && ParakeetEngine.modelsAreOnDisk()
         let mode = settings.languageMode
         hintGeneration += 1
         let generation = hintGeneration
         Task { [weak self] in
-            if mode == .pinned(.english), parakeetOn {
+            if mode == .pinned(.english), parakeetRoutes {
                 let loaded = await parakeetEngine.isModelLoaded
                 guard !loaded else { return }
                 guard let self, self.hintGeneration == generation else { return }
                 self.hudState.partialText =
-                    "First Parakeet run: downloading the fast English model (~600 MB) and preparing it — later dictations are instant."
+                    "Loading the fast English model — the first dictation after launch takes a moment longer."
             } else if mode == .pinned(.burmese) {
                 let loaded = await burmeseEngine.isModelLoaded
                 guard !loaded else { return }
@@ -636,7 +769,255 @@ final class AppState: ObservableObject {
         enqueueControl { session in await session.pressBegan() }
     }
 
+    // MARK: - Speed Check (docs/17 G0)
+
+    /// Decodes one recorded passage with each engine — the same audio, so
+    /// the comparison is fair — and scores it. Each engine is prepared first
+    /// (a download on first use) and, when `warmUp`, run once untimed so a
+    /// first-inference compile never lands in the numbers. Dictionary terms
+    /// are left out, so neither Whisper's prompt bias nor Parakeet's
+    /// vocabulary boost is measured: the check compares the engines alone.
+    func speedCheckDecode(
+        _ audio: PCMChunk, passageIndex: Int, includeParakeet: Bool, warmUp: Bool
+    ) async -> (measurements: [SpeedCheck.Measurement], failures: [String]) {
+        var engines: [(name: String, engine: any TranscriptionEngine)] = [
+            ("Whisper (\(settings.whisperKitModel))", engine)
+        ]
+        if includeParakeet {
+            engines.append(("Parakeet (English)", parakeetEngine))
+        }
+        let mode = LanguageMode.pinned(.english)
+        let clock = ContinuousClock()
+        var measurements: [SpeedCheck.Measurement] = []
+        var failures: [String] = []
+        for (name, engine) in engines {
+            do {
+                try await engine.prepare(languageMode: mode)
+                if warmUp {
+                    _ = try? await engine.transcribe(audio, languageMode: mode, dictionaryTerms: [])
+                }
+                let decodeStart = clock.now
+                let result = try await engine.transcribe(audio, languageMode: mode, dictionaryTerms: [])
+                let decodeSeconds = Self.seconds(decodeStart.duration(to: clock.now))
+                let pipelineStart = clock.now
+                let normalized = Stage1Normalizer.normalize(
+                    result.text, language: .english, formatting: FormattingOptions()
+                )
+                let formatted = Stage4Formatter.format(
+                    normalized, language: .english, formatting: FormattingOptions(),
+                    precedingContext: nil
+                )
+                let pipelineSeconds = Self.seconds(pipelineStart.duration(to: clock.now))
+                measurements.append(
+                    SpeedCheck.measure(
+                        engine: name,
+                        passageIndex: passageIndex,
+                        transcript: formatted,
+                        audioSeconds: audio.durationSeconds,
+                        decodeSeconds: decodeSeconds,
+                        pipelineSeconds: pipelineSeconds
+                    )
+                )
+            } catch {
+                failures.append("\(name) could not run: \(error.localizedDescription)")
+            }
+        }
+        return (measurements, failures)
+    }
+
+    // MARK: - Command mode (docs/17 G4)
+
+    /// Command-key press: record an instruction instead of dictation.
+    /// Ignored while a dictation is recording — that take owns the mic.
+    func startCommand() {
+        if case .listening = hudState.mode { return }
+        guard !dictationPressActive else { return }
+        commandPressActive = true
+        pressTakeStarted = false
+        commandAwaitingResult = false
+        // A new command replaces the preview; closing it first hands the
+        // keyboard back, so the press-time selection read sees the user's
+        // app rather than Vocal's panel.
+        commandPreview?.dismiss()
+        hudState.partialText = "Command — say what to do"
+        hudState.levels = []
+        // A command never leaves this Mac: no cloud badge carried over from
+        // the last dictation.
+        hudState.isRemoteCleanup = false
+        enqueueControl { session in await session.pressBegan(kind: .command) }
+    }
+
+    func stopCommand() {
+        guard commandPressActive else { return }
+        commandPressActive = false
+        commandAwaitingResult = true
+        // "Say what to do" is stale the moment the key comes up.
+        hudState.partialText = "Command — working on it"
+        DeliverySounds.playStop(enabled: settings.soundsEnabled)
+        enqueueControl { session in await session.pressEnded() }
+    }
+
+    func cancelCommand() {
+        guard commandPressActive else { return }
+        commandPressActive = false
+        // The session discards a cancelled command's recording itself
+        // (whatever cancelled it), so "Recover" never types an instruction.
+        enqueueControl { session in await session.cancel() }
+    }
+
+    /// A transcribed command: answer it locally when the deterministic tools
+    /// can (arithmetic, dates), otherwise ask the local model, and show the
+    /// result in the preview — inserted only when the user presses Return.
+    func handleCommand(_ command: VoiceCommand) {
+        commandAwaitingResult = false
+        commandTask?.cancel()
+        let preview = commandPreview ?? CommandPreviewController()
+        commandPreview = preview
+        let request = VoiceCommandRequest(
+            instruction: command.instruction,
+            selectedText: command.selectedText,
+            language: command.language
+        )
+        let target = command.pressTimeBundleID
+        let language = command.language
+        let selected = command.selectedText
+        let token = preview.begin(
+            instruction: command.instruction,
+            actsOnSelection: request.hasSelection,
+            onInsert: { [weak self] text in
+                self?.insertCommandResult(text, replacing: selected, into: target, language: language)
+            },
+            onDismiss: { [weak self] in
+                // Esc or a click away: stop the model, not just the spinner.
+                self?.commandTask?.cancel()
+            }
+        )
+        if !request.hasSelection,
+            let answer = LocalCommandTools.answer(command.instruction, now: Date()) {
+            preview.show(result: answer, for: token)
+            return
+        }
+        let baseURL = Self.ollamaBaseURL()
+        let model = settings.ollamaModel
+        commandTask = Task { [weak self] in
+            let runners = await Self.commandRunners(baseURL: baseURL, model: model)
+            guard !runners.isEmpty else {
+                let remote = OpenAICompatibleProvider(
+                    baseURL: baseURL, model: model, id: .ollama(model: model)
+                ).leavesDevice
+                self?.commandPreview?.show(
+                    failure: remote
+                        ? "Commands run only on this Mac, and your Ollama server is remote. Run Ollama on this Mac, or turn on Apple Intelligence."
+                        : "No local AI model is available. Start Ollama, or turn on Apple Intelligence.",
+                    for: token
+                )
+                return
+            }
+            // Ollama first; if it fails (model not pulled, server stopped
+            // mid-way), Apple's on-device model gets the same request.
+            for (index, runner) in runners.enumerated() {
+                do {
+                    // A hard deadline whatever the provider does with its
+                    // own timeout (Apple's model takes none).
+                    let response = try await Deadline.run(.seconds(30)) {
+                        try await runner.runCommand(
+                            system: VoiceCommandPrompt.system(for: request),
+                            user: VoiceCommandPrompt.user(for: request),
+                            maxTokens: VoiceCommandPrompt.maxTokens(for: request),
+                            timeout: .seconds(30)
+                        )
+                    }
+                    guard !Task.isCancelled else { return }
+                    if let text = VoiceCommandPrompt.sanitized(response.text, request: request) {
+                        self?.commandPreview?.show(result: text, for: token)
+                    } else {
+                        self?.commandPreview?.show(
+                            failure: "The model returned nothing. Try rephrasing.", for: token
+                        )
+                    }
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    VocalLog.cleanup.error(
+                        "command failed: \(String(describing: error), privacy: .public)"
+                    )
+                    if index == runners.count - 1 {
+                        self?.commandPreview?.show(
+                            failure: error as? CleanupError == .timedOut
+                                ? "The local model took too long. Try a shorter request."
+                                : "The local model could not answer. Try again.",
+                            for: token
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return in the preview: insert into the app the command was spoken
+    /// in, replacing the selection it acted on (AX-first, paste fallback —
+    /// the same ladder as dictation).
+    private func insertCommandResult(
+        _ text: String, replacing selected: String?, into bundleID: String?, language: Language
+    ) {
+        // Nothing to change: say so rather than re-typing the same words.
+        if let selected, selected == text {
+            showNotice("Already fine — nothing changed")
+            return
+        }
+        let overrides = settings.insertionStrategyOverrides
+        commandInsertedAt = Date()
+        Task { @MainActor in
+            // The preview just ordered out: give keyboard focus a beat to
+            // return to the target before a paste fallback's ⌘V is posted.
+            try? await Task.sleep(for: .milliseconds(120))
+            if let bundleID,
+                NSWorkspace.shared.frontmostApplication?.bundleIdentifier != bundleID,
+                let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+                _ = app.activate()
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            let deliverer = TextDeliverer(strategies: InsertionStrategyTable(overrides: overrides))
+            let context = DeliveryContext(
+                pressTimeAppBundleID: bundleID,
+                isLockMode: false,
+                formatting: FormattingOptions(),
+                language: language
+            )
+            let outcome = await deliverer.deliver(text, context: context)
+            self.showDelivery(outcome: outcome)
+        }
+    }
+
+    /// The local models a command may use, in order: Ollama when it
+    /// answers on this Mac (the user's configured model), then Apple's
+    /// on-device model on macOS 26 with Apple Intelligence. A remote Ollama
+    /// URL is skipped: a command carries the user's selection, and Settings
+    /// promises nothing leaves this Mac.
+    nonisolated static func commandRunners(baseURL: URL, model: String) async -> [any CommandRunning] {
+        var runners: [any CommandRunning] = []
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let ollama = OpenAICompatibleProvider(
+                baseURL: baseURL, model: trimmed, id: .ollama(model: trimmed)
+            )
+            if !ollama.leavesDevice, await ollama.isAvailable() {
+                runners.append(ollama)
+            }
+        }
+        #if canImport(FoundationModels) && compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let apple = FoundationModelsProvider()
+            if await apple.isAvailable() {
+                runners.append(apple)
+            }
+        }
+        #endif
+        return runners
+    }
+
     func stopDictation(isLockMode: Bool) {
+        dictationPressActive = false
         DeliverySounds.playStop(enabled: settings.soundsEnabled)
         enqueueControl { session in await session.pressEnded(isLockMode: isLockMode) }
     }
@@ -646,6 +1027,7 @@ final class AppState: ObservableObject {
     /// AppDelegate's commit / discard calls) so the first tap of a lock
     /// gesture never pastes.
     func endDictationProvisionally() {
+        dictationPressActive = false
         DeliverySounds.playStop(enabled: settings.soundsEnabled)
         enqueueControl { session in await session.pressEndedProvisionally() }
     }
@@ -659,7 +1041,22 @@ final class AppState: ObservableObject {
     }
 
     func cancelDictation() {
-        enqueueControl { session in await session.cancel() }
+        // FR-1.6: with retention "Never", cancelled audio is discarded at
+        // once — no 24-hour recovery window (docs/17 §4.4 #6).
+        let discardRecording = !AudioRetentionPolicy.keepsAudio(
+            retentionDays: settings.audioRetentionDays
+        )
+        commandPressActive = false
+        dictationPressActive = false
+        enqueueControl { [weak self] session in
+            await session.cancel()
+            if discardRecording {
+                RecoveryStore.discardAll()
+                // The `.cancelled` phase already rescanned — before the files
+                // were gone. Rescan so the menu stops offering them.
+                await self?.refreshRecoverableTake()
+            }
+        }
     }
 
     // MARK: - Cancelled-take recovery (FR-1.6, docs/11 G9)
@@ -769,7 +1166,7 @@ final class AppState: ObservableObject {
                     let clock = ContinuousClock()
                     let start = clock.now
                     let result = try await engine.transcribe(
-                        decoded.audio, languageMode: mode, dictionaryTerms: entries.map(\.written)
+                        decoded.audio, languageMode: mode, dictionaryTerms: entries.vocabularyTerms
                     )
                     let elapsed = start.duration(to: clock.now)
                     let language = result.detectedLanguage
@@ -909,6 +1306,9 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// How long after delivery "Undo last insertion" stays offered.
+    private static let undoWindowSeconds: TimeInterval = 10 * 60
+
     /// The undo safety net (docs/15 step 28, Part 2b form): replace the last
     /// insertion with the raw transcription, or remove it entirely. AX-only —
     /// where the focused element can't be read and edited, nothing changes
@@ -918,9 +1318,28 @@ final class AppState: ObservableObject {
             showNotice("Nothing to undo yet")
             return
         }
+        // Undo edits whatever field is focused, so it must be the field the
+        // text went into: an hour later in another app, "Undo" would delete
+        // the last matching "Thanks!" in an unrelated email (docs/17 §4.4 #16).
+        guard Date().timeIntervalSince(record.createdAt) <= Self.undoWindowSeconds else {
+            showNotice("The last insertion is too old to undo")
+            return
+        }
+        // A command result went in after this dictation: its words may no
+        // longer exist, and an identical copy elsewhere would be deleted
+        // instead. The target app's own Undo (⌘Z) reverts a command.
+        if let commandInsertedAt, commandInsertedAt > record.createdAt {
+            showNotice("The last insertion was a command — use ⌘Z in that app to undo it")
+            return
+        }
         NSApp.deactivate()
         Task { @MainActor in
             await Self.yieldFocusToPreviousApp()
+            if let target = record.targetAppBundleID,
+                NSWorkspace.shared.frontmostApplication?.bundleIdentifier != target {
+                self.showNotice("Switch back to the app you dictated into to undo")
+                return
+            }
             let replacement = replaceWithRaw ? record.rawText : ""
             if AXUndo.replaceLastOccurrence(of: record.deliveredText, with: replacement) {
                 self.showNotice(
@@ -998,6 +1417,7 @@ final class AppState: ObservableObject {
             // A press is live again — a scheduled idle unload must not pull
             // the model out from under it.
             idleUnloadTask?.cancel()
+            pressTakeStarted = true
             hudState.mode = .listening(startedAt: Date())
         case .recording:
             // Keep the arming timestamp: resetting it here visibly restarted
@@ -1016,6 +1436,15 @@ final class AppState: ObservableObject {
             hudState.mode = .processing(stage: .delivering)
         case .cancelled:
             hintGeneration += 1
+            // Whatever ended the take, a later command-key release must not
+            // end a dictation it never started (docs/17 review #5) — but
+            // only this press's take may clear it, not a late event from
+            // the previous one.
+            if pressTakeStarted {
+                commandPressActive = false
+                dictationPressActive = false
+            }
+            commandAwaitingResult = false
             pendingLowDiskNotice = false
             // A device change queued its notice for a take the user then
             // cancelled — the flag must not survive to caption the next take.
@@ -1032,6 +1461,12 @@ final class AppState: ObservableObject {
             // The take is over: any first-run hint still in flight is stale
             // (docs/11 G16).
             hintGeneration += 1
+            if pressTakeStarted {
+                commandPressActive = false
+                dictationPressActive = false
+            }
+            let commandProducedNothing = commandAwaitingResult
+            commandAwaitingResult = false
             // The session clears lastError at every pressBegan, so any error
             // visible when it returns to idle belongs to this take. The error
             // outranks the guards' pending notices — a take a guard ended
@@ -1046,6 +1481,10 @@ final class AppState: ObservableObject {
                 // docs/15 step 35: a failed take just preserved its audio;
                 // surface the recovery offer without waiting for a relaunch.
                 refreshRecoverableTake()
+            } else if commandProducedNothing {
+                // A tap, or a hold with nothing said: no preview opened, so
+                // say why instead of letting "working on it" just vanish.
+                showNotice("No command heard — hold the key and say what to do")
             } else if pendingLowDiskNotice {
                 pendingLowDiskNotice = false
                 showNotice("Disk almost full — take saved before recording stopped")
@@ -1215,7 +1654,10 @@ final class AppState: ObservableObject {
         if #available(macOS 26.0, *) {
             let apple = FoundationModelsProvider()
             guard await apple.isAvailable() else { return nil }
-            return .init(pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels)
+            return .init(
+                pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels,
+                leavesDevice: false
+            )
         }
         #endif
         return nil
@@ -1230,14 +1672,20 @@ final class AppState: ObservableObject {
             guard await apple.isAvailable() else { return nil }
             let pinned = profile.providerOverride == .appleFoundationModels
             if pinned {
-                return .init(pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels)
+                return .init(
+                    pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels,
+                    leavesDevice: false
+                )
             }
             if case .ollama? = profile.providerOverride {
                 // An explicit Ollama pin is honoured even when it is down.
                 return nil
             }
             if await !ollama.isAvailable() {
-                return .init(pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels)
+                return .init(
+                    pipeline: CleanupPipeline(provider: apple), providerID: .appleFoundationModels,
+                    leavesDevice: false
+                )
             }
         }
         #endif
@@ -1365,6 +1813,10 @@ private final class ResolutionRelay {
     func noteLevel(_ level: Float) {
         appState?.appendLevel(level)
     }
+
+    func noteCommand(_ command: VoiceCommand) {
+        appState?.handleCommand(command)
+    }
 }
 
 /// `MicrophoneSession` mirrors SessionKit's `CaptureSession` field-for-field;
@@ -1375,10 +1827,16 @@ private struct MicrophoneCaptureAdapter: AudioCapturing {
 
     func start() async throws -> CaptureSession {
         let session = try await microphone.start()
+        let recoveryFile = session.recoveryFileURL
+        let cancel = session.cancel
         return CaptureSession(
             chunks: session.chunks,
             finish: session.finish,
-            cancel: session.cancel
+            cancel: cancel,
+            discard: {
+                await cancel()
+                RecoveryStore.discard(at: recoveryFile)
+            }
         )
     }
 }

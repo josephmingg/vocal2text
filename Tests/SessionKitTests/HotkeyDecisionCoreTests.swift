@@ -704,3 +704,72 @@ private let f13 = HotkeySpec(kind: .key(keyCode: HotkeyKeyCode.f13, requiredFlag
     driver.advance(2.0)
     #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == .cancelled)
 }
+
+// MARK: - docs/17 §4.4: hands-free takes survive shortcuts and lock-exit taps
+
+@Test func aShortcutDuringAHandsFreeTakeNeitherCancelsNorFinishesIt() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(5)
+    // Fn+arrow / right-⌘+Tab while the locked take records.
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.1)
+    #expect(driver.send(.keyDown, keyCode: cKey, flags: HotkeyFlagMask.function) == nil)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == nil)
+    // The lock is intact: Escape still discards it, and only once.
+    driver.advance(1)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == .cancelled)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == nil)
+}
+
+/// docs/17 §11: the modifier held a while before the shortcut key (right-⌘
+/// held, then Tab) is still a shortcut, not the finishing hold.
+@Test func aSlowShortcutDuringAHandsFreeTakeDoesNotFinishIt() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(5)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(1.5)
+    #expect(driver.send(.keyDown, keyCode: cKey, flags: HotkeyFlagMask.function) == nil)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == nil)
+    driver.advance(1)
+    #expect(driver.send(.keyDown, keyCode: HotkeyKeyCode.escape) == .cancelled)
+}
+
+@Test func aShortcutDuringALockedTakeStillLetsATapFinishIt() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(5)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.1)
+    #expect(driver.send(.keyDown, keyCode: cKey, flags: HotkeyFlagMask.function) == nil)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == nil)
+    driver.advance(2)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == .pressEnded)
+}
+
+@Test func doubleTappingOutOfHandsFreeDoesNotStartANewLock() {
+    var driver = Driver(spec: .fnGlobe)
+    driver.lock()
+    driver.advance(5)
+    // Leave the way you came in: tap, tap.
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == .pressEnded)
+    driver.advance(0.1)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.1)
+    #expect(driver.fnUp() == .shortTap)
+}
+
+@Test func aChordOutsideHandsFreeStillAbortsBeforeStart() {
+    var driver = Driver(spec: .fnGlobe)
+    #expect(driver.fnDown() == .pressBegan)
+    driver.advance(0.1)
+    #expect(driver.send(.keyDown, keyCode: cKey, flags: HotkeyFlagMask.function) == .cancelled)
+}

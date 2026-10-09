@@ -7,9 +7,11 @@ import SessionKit
 actor CaptureLog {
     private(set) var finishCount = 0
     private(set) var cancelCount = 0
+    private(set) var discardCount = 0
 
     func recordFinish() { finishCount += 1 }
     func recordCancel() { cancelCount += 1 }
+    func recordDiscard() { discardCount += 1 }
 }
 
 /// A one-shot gate: `waitForOpen` suspends until someone calls `open`.
@@ -65,6 +67,9 @@ struct ScriptedAudioCapturing: AudioCapturing {
             },
             cancel: {
                 await log.recordCancel()
+            },
+            discard: {
+                await log.recordDiscard()
             }
         )
     }
@@ -125,6 +130,18 @@ actor ScriptedHypotheses {
         last = value
         return value
     }
+
+    /// The next hypothesis as the preview seam returns it: text, no timings.
+    func nextResult() -> TranscriptionResult? {
+        next().map { TranscriptionResult(text: $0, detectedLanguage: .english) }
+    }
+}
+
+/// Records the sample count of every preview decode.
+actor DecodedLengths {
+    private(set) var values: [Int] = []
+
+    func record(_ count: Int) { values.append(count) }
 }
 
 /// Thread-safe string recorder for synchronous callback seams (`onPartial`).
@@ -194,16 +211,38 @@ actor InMemoryStore: TranscriptStoring {
 }
 
 /// `SessionConfiguring` fake with fixed values.
+/// Records `recordDictionaryUse` calls.
+actor DictionaryUsageLog {
+    private(set) var calls: [[UUID]] = []
+
+    func record(_ ids: [UUID]) { calls.append(ids) }
+}
+
 struct StaticConfig: SessionConfiguring {
+    var usage: DictionaryUsageLog?
     var masterSwitch = false
     var languageMode = LanguageMode.auto
     var stylePrompt = ""
     var timeout = Duration.seconds(5)
     var entries: [DictionaryEntry] = []
     var runsOnCleanTakes = false
+    var style = DictationStyle.standard
+    var usesSurroundingText = false
 
     var cleanupRunsOnCleanTakes: Bool {
         get async { runsOnCleanTakes }
+    }
+
+    func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async {
+        await usage?.record(entryIDs)
+    }
+
+    var dictationStyle: DictationStyle {
+        get async { style }
+    }
+
+    var cleanupUsesSurroundingText: Bool {
+        get async { usesSurroundingText }
     }
 
     var cleanupMasterSwitch: Bool {

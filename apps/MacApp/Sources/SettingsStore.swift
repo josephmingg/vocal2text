@@ -38,6 +38,43 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         didSet { Self.defaults.set(fixMisheardWords, forKey: Keys.fixMisheardWords) }
     }
 
+    /// The one-click output style (docs/17 §5) — Standard / Casual /
+    /// Lowercase / Raw. Satisfies `SessionConfiguring.dictationStyle`.
+    @Published var dictationStyle: DictationStyle {
+        didSet { Self.defaults.set(dictationStyle.rawValue, forKey: Keys.dictationStyle) }
+    }
+
+    /// Opt-in, ships OFF (owner decision, docs/17 G3.2): cleanup may read a
+    /// bounded slice of the text around the cursor. Satisfies
+    /// `SessionConfiguring.cleanupUsesSurroundingText`.
+    @Published var cleanupUsesSurroundingText: Bool {
+        didSet {
+            Self.defaults.set(cleanupUsesSurroundingText, forKey: Keys.cleanupUsesSurroundingText)
+        }
+    }
+
+    /// The command key (docs/17 G4): hold it, speak an instruction ("make
+    /// this shorter"), and the result appears in a preview. nil = off, the
+    /// shipping default. Persisted as JSON like the dictation key.
+    @Published var commandHotkeySpec: HotkeySpec? {
+        didSet {
+            if let commandHotkeySpec, let data = try? JSONEncoder().encode(commandHotkeySpec) {
+                Self.defaults.set(data, forKey: Keys.commandHotkeySpec)
+            } else {
+                Self.defaults.removeObject(forKey: Keys.commandHotkeySpec)
+            }
+        }
+    }
+
+    /// Opt-in (docs/17 G4.4): "Vocal, …" / "Hey Vocal …" at the start of a
+    /// dictation runs it as a command. Satisfies
+    /// `SessionConfiguring.wakeWordCommandsEnabled`.
+    @Published var wakeWordCommandsEnabled: Bool {
+        didSet {
+            Self.defaults.set(wakeWordCommandsEnabled, forKey: Keys.wakeWordCommandsEnabled)
+        }
+    }
+
     /// The push-to-talk binding — a preset or a recorded custom combination
     /// (docs/13). Persisted as JSON so the shape can grow without another
     /// migration.
@@ -118,16 +155,32 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     }
 
     /// docs/15 step 14: route pinned-English dictations to Parakeet TDT v2
-    /// on the Neural Engine. Ships OFF until the owner benchmarks it with
-    /// vocal-bench; the routing seam reads the defaults key directly (see
-    /// `parakeetEnglishDefaultsKey`) so a flip applies to the next dictation.
+    /// on the Neural Engine. ON by default since the owner's Speed Check
+    /// (docs/benchmarks/M0-results.md: 77 ms vs Whisper's 693 ms at the same
+    /// accuracy, docs/17 G2.1); an explicit OFF is kept. The routing seam
+    /// reads defaults directly (`parakeetEnglishIsOn`) so a flip applies to
+    /// the next dictation.
     @Published var parakeetEnglishEnabled: Bool {
         didSet { Self.defaults.set(parakeetEnglishEnabled, forKey: Keys.parakeetEnglish) }
     }
 
-    /// The raw defaults key behind `parakeetEnglishEnabled`, read by the
-    /// engine router off the main actor (UserDefaults is thread-safe).
-    nonisolated static var parakeetEnglishDefaultsKey: String { Keys.parakeetEnglish }
+    /// The engine router's read of `parakeetEnglishEnabled`, off the main
+    /// actor (UserDefaults is thread-safe). One definition of the default,
+    /// so the router and the toggle cannot disagree.
+    nonisolated static func parakeetEnglishIsOn() -> Bool {
+        UserDefaults.standard.object(forKey: Keys.parakeetEnglish) as? Bool ?? true
+    }
+
+    /// docs/17 G2.2: let Parakeet listen for Dictionary words (a small CTC
+    /// keyword spotter, downloaded once on first need). ON by default.
+    @Published var parakeetVocabularyBoost: Bool {
+        didSet { Self.defaults.set(parakeetVocabularyBoost, forKey: Keys.parakeetVocabularyBoost) }
+    }
+
+    /// The Parakeet engine's per-take read of `parakeetVocabularyBoost`.
+    nonisolated static func parakeetVocabularyBoostIsOn() -> Bool {
+        UserDefaults.standard.object(forKey: Keys.parakeetVocabularyBoost) as? Bool ?? true
+    }
 
     /// Set by the composition root once the database opens; dictionary lookups
     /// degrade to empty when the store is unavailable.
@@ -150,6 +203,18 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         languageMode = Self.languageMode(from: defaults.string(forKey: Keys.languageMode))
         stylePrompt = defaults.string(forKey: Keys.stylePrompt) ?? ""
         fixMisheardWords = defaults.object(forKey: Keys.fixMisheardWords) as? Bool ?? true
+        dictationStyle =
+            defaults.string(forKey: Keys.dictationStyle).flatMap(DictationStyle.init(rawValue:))
+            ?? .standard
+        cleanupUsesSurroundingText =
+            defaults.object(forKey: Keys.cleanupUsesSurroundingText) as? Bool ?? false
+        // Validated like the dictation key: a hand-edited or rolled-back
+        // value binding Escape or Caps Lock would be swallowed system-wide.
+        commandHotkeySpec = defaults.data(forKey: Keys.commandHotkeySpec)
+            .flatMap { try? JSONDecoder().decode(HotkeySpec.self, from: $0) }
+            .flatMap { HotkeySpec.validationError(for: $0.kind) == nil ? $0 : nil }
+        wakeWordCommandsEnabled =
+            defaults.object(forKey: Keys.wakeWordCommandsEnabled) as? Bool ?? false
         let hotkey = Self.loadHotkeySpec(from: defaults)
         hotkeySpec = hotkey.spec
         audioRetentionDays = defaults.object(forKey: Keys.audioRetentionDays) as? Int ?? 30
@@ -167,7 +232,8 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         ollamaModel = defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b-instruct"
         whisperKitModel =
             defaults.string(forKey: Keys.whisperKitModel) ?? WhisperKitEngine.defaultModelName
-        parakeetEnglishEnabled = defaults.object(forKey: Keys.parakeetEnglish) as? Bool ?? false
+        parakeetEnglishEnabled = Self.parakeetEnglishIsOn()
+        parakeetVocabularyBoost = Self.parakeetVocabularyBoostIsOn()
 
         // Settle the legacy hotkey migration on first launch so later reads are
         // plain decodes. `didSet` does not fire from `init`, hence the explicit
@@ -196,6 +262,13 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
     /// MainActor, but the entry read does not. The store serves it from its
     /// in-memory cache after the first take (docs/15 step 48), so this is a
     /// SQLite read only immediately after launch or a dictionary edit.
+    /// docs/17 F10: count what a delivered take used, so the most-used
+    /// words lead the recognizer's bias list.
+    nonisolated func recordDictionaryUse(_ entryIDs: [UUID], at date: Date) async {
+        let database = await MainActor.run { self.database }
+        try? database?.recordDictionaryUse(entryIDs, at: date)
+    }
+
     nonisolated func enabledDictionaryEntries() async -> [DictionaryEntry] {
         let database = await MainActor.run { self.database }
         guard let database else { return [] }
@@ -252,6 +325,10 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let languageMode = "settings.languageMode"
         static let stylePrompt = "settings.stylePrompt"
         static let fixMisheardWords = "settings.fixMisheardWords"
+        static let dictationStyle = "settings.dictationStyle"
+        static let cleanupUsesSurroundingText = "settings.cleanupUsesSurroundingText"
+        static let commandHotkeySpec = "settings.commandHotkeySpec"
+        static let wakeWordCommandsEnabled = "settings.wakeWordCommandsEnabled"
         static let hotkeySpec = "settings.hotkeySpec"
         /// Pre-spec key, read once by the migration and never written again.
         /// Left in the domain so downgrading to an older build still works.
@@ -269,6 +346,7 @@ final class SettingsStore: ObservableObject, SessionConfiguring {
         static let ollamaModel = "settings.ollamaModel"
         static let whisperKitModel = "settings.whisperKitModel"
         static let parakeetEnglish = "settings.parakeetEnglish"
+        static let parakeetVocabularyBoost = "settings.parakeetVocabularyBoost"
         static let modelWarmedOnce = "settings.modelWarmedOnce"
     }
 }

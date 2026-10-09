@@ -187,3 +187,27 @@ struct OpenAICompatibleProviderTests {
         #expect(OpenAICompatibleProvider.maxTokens(forInputCharacterCount: 500) == 2_000)
     }
 }
+
+// MARK: - docs/17 G4: command requests
+
+@Test func commandBodyCarriesTheInstructionWithOllamaExtrasAndNoThinking() {
+    let qwen3 = OpenAICompatibleProvider(
+        baseURL: URL(string: "http://localhost:11434")!, model: "qwen3:4b", id: .ollama(model: "qwen3:4b")
+    )
+    let body = qwen3.makeCommandBody(system: "SYSTEM", user: "USER", maxTokens: 10)
+    #expect(body.messages.map(\.role) == ["system", "user"])
+    #expect(body.messages[0].content == "SYSTEM\n/no_think")
+    #expect(body.messages[1].content == "USER")
+    #expect(body.maxTokens >= 1024)
+    #expect(body.keepAlive == OpenAICompatibleProvider.ollamaKeepAlive)
+    #expect(body.reasoningEffort == "none")
+    #expect(!body.stream)
+}
+
+@Test func commandBodyForAPlainOpenAIServerSendsNoOllamaExtras() {
+    let plain = OpenAICompatibleProvider(baseURL: URL(string: "http://localhost:1234")!, model: "local")
+    let body = plain.makeCommandBody(system: "SYSTEM", user: "USER", maxTokens: 10)
+    #expect(body.messages[0].content == "SYSTEM")
+    #expect(body.keepAlive == nil)
+    #expect(body.reasoningEffort == nil)
+}

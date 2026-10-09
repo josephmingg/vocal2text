@@ -1,5 +1,12 @@
 # Next Steps & Goals (handoff, 2026-08-17)
 
+> **Latest (2026-10-06):** [docs/17](17-glaido-study-and-english-plan.md) is the current plan:
+> a Glaido study, an English cold review, and phases G0–G5. Its §9 lists what landed (English
+> text fixes, app-layer fixes, dictation styles, the AI Prompt profile, opt-in cursor
+> context, command mode, Speed Check) and the **hardware checklist to run first**. Then run
+> Settings → Speed Check; its report decides whether Parakeet becomes the English default
+> (G2).
+
 Status at handoff: **v0.1 shipped and field-verified.** Mac app installed and dictating
 daily on two machines (owner's Mac + spouse's M2/Sonoma); iOS main app CI-green; all five
 CI jobs green on `main`. Evidence: CI runs 32004944289 (all targets) and 32011357060

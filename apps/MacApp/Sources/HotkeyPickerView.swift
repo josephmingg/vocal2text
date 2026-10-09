@@ -100,7 +100,8 @@ struct HotkeyPickerView: View {
         .sheet(isPresented: $isRecordingHotkey) {
             HotkeyRecorderSheet(
                 currentBinding: settings.hotkeySpec,
-                hotkeyMonitor: appState.hotkeyMonitor
+                hotkeyMonitor: appState.hotkeyMonitor,
+                commandMonitor: appState.commandHotkeyMonitor
             ) { spec in
                 settings.hotkeySpec = spec
             }

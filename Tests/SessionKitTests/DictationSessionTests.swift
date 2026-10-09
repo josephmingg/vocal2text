@@ -82,6 +82,123 @@ private actor FailThenSucceedEngine: TranscriptionEngine {
     }
 }
 
+/// Blocks its first transcription until released, then fails it; later
+/// calls succeed — a take that fails while the next one is recording.
+private actor GatedFailFirstEngine: TranscriptionEngine {
+    nonisolated let id = "gated-fail-first"
+    nonisolated let displayName = "Gated Fail First"
+
+    private let result: TranscriptionResult
+    private var calls = 0
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(result: TranscriptionResult) {
+        self.result = result
+    }
+
+    func release() {
+        released = true
+        let waiting = waiters
+        waiters = []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    func availability(for language: Language) async -> EngineAvailability { .ready }
+    func prepare(languageMode: LanguageMode) async throws {}
+    func unload() async {}
+
+    func transcribe(
+        _ audio: PCMChunk,
+        languageMode: LanguageMode,
+        dictionaryTerms: [String]
+    ) async throws -> TranscriptionResult {
+        calls += 1
+        guard calls == 1 else { return result }
+        if !released {
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        throw TranscriptionError.engineUnavailable("first take fails")
+    }
+
+    nonisolated func transcribeStream(
+        _ audio: AsyncStream<PCMChunk>,
+        languageMode: LanguageMode,
+        dictionaryTerms: [String]
+    ) -> AsyncThrowingStream<TranscriptionUpdate, Error> {
+        AsyncThrowingStream<TranscriptionUpdate, Error> { continuation in
+            continuation.finish()
+        }
+    }
+}
+
+/// Records each cleanup request it receives and echoes the text back.
+private actor CapturingCleanupProvider: CleanupProvider {
+    nonisolated let id: CleanupProviderID = .openAICompatible(name: "Capturing")
+    nonisolated let leavesDevice = false
+    private(set) var requests: [CleanupRequest] = []
+
+    func isAvailable() async -> Bool { true }
+    func prewarm() async {}
+
+    func cleanup(_ request: CleanupRequest, timeout: Duration) async throws -> CleanupResponse {
+        requests.append(request)
+        return CleanupResponse(text: request.text, modelName: "capturing")
+    }
+}
+
+/// Counts reads of the surrounding text, so a test can prove the opt-in gate.
+private actor ReadCounter {
+    private(set) var count = 0
+    func read() -> String? {
+        count += 1
+        return "We met Siobhan yesterday" + CleanupRequest.cursorMarker
+    }
+}
+
+/// Collects the commands a session hands to the platform.
+private actor CommandSink {
+    private(set) var commands: [VoiceCommand] = []
+    func receive(_ command: VoiceCommand) { commands.append(command) }
+}
+
+/// A session wired for command mode, with a scripted transcript.
+private func makeCommandSession(
+    transcript: String,
+    wakeWord: Bool,
+    sink: CommandSink,
+    deliverer: RecordingTextDeliverer,
+    store: InMemoryStore = InMemoryStore()
+) -> DictationSession {
+    var dependencies = DictationSession.Dependencies(
+        audio: ScriptedAudioCapturing(
+            chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+            log: CaptureLog()
+        ),
+        engine: FakeTranscriptionEngine(
+            result: TranscriptionResult(text: transcript, detectedLanguage: .english)
+        ),
+        deliverer: deliverer,
+        store: store,
+        config: WakeWordConfig(enabled: wakeWord),
+        profileResolution: { (Profile(name: "Default"), .app, "com.example.mail") },
+        now: { fixedNow }
+    )
+    dependencies.handleCommand = { await sink.receive($0) }
+    dependencies.captureSelection = { "The meeting moved to Friday." }
+    return DictationSession(dependencies: dependencies)
+}
+
+private struct WakeWordConfig: SessionConfiguring {
+    var enabled: Bool
+    var cleanupMasterSwitch: Bool { get async { false } }
+    var globalLanguageMode: LanguageMode { get async { .auto } }
+    var globalStylePrompt: String { get async { "" } }
+    var cleanupTimeout: Duration { get async { .seconds(5) } }
+    var wakeWordCommandsEnabled: Bool { get async { enabled } }
+    func enabledDictionaryEntries() async -> [DictionaryEntry] { [] }
+}
+
 private let fixedNow = Date(timeIntervalSince1970: 1_723_000_000)
 
 /// One-shot latch for scripting suspension points (e.g. a profile resolution
@@ -163,7 +280,7 @@ private func makeHarness(
             ?? { _ in
                 cleanup.map {
                     DictationSession.CleanupSelection(
-                        pipeline: $0, providerID: cleanupProviderID
+                        pipeline: $0, providerID: cleanupProviderID, leavesDevice: false
                     )
                 }
             },
@@ -394,12 +511,14 @@ struct DictationSessionTests {
                 guard case .ollama(let model)? = profile.providerOverride else {
                     return DictationSession.CleanupSelection(
                         pipeline: CleanupPipeline(provider: provider),
-                        providerID: .ollama(model: "global-default")
+                        providerID: .ollama(model: "global-default"),
+                        leavesDevice: false
                     )
                 }
                 return DictationSession.CleanupSelection(
                     pipeline: CleanupPipeline(provider: provider),
-                    providerID: .ollama(model: model)
+                    providerID: .ollama(model: model),
+                    leavesDevice: false
                 )
             }
         )
@@ -683,6 +802,42 @@ struct DictationSessionTests {
         #expect(delivered == ["Let's meet on saturday.", "Let's meet on saturday."])
     }
 
+    // MARK: - Dictionary use counts (docs/17 F10)
+
+    @Test func aDeliveredTakeCountsEveryDictionaryReplacement() async throws {
+        let cube = DictionaryEntry(spoken: "cube", written: "Kubernetes")
+        let unused = DictionaryEntry(spoken: "vee ess code", written: "VS Code")
+        let usage = DictionaryUsageLog()
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "deploy cube then restart cube", detectedLanguage: .english
+            ),
+            config: StaticConfig(usage: usage, entries: [cube, unused])
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered.first?.contains("Kubernetes") == true)
+        // One ID per replacement, and nothing for the entry that never fired.
+        #expect(await usage.calls == [[cube.id, cube.id]])
+    }
+
+    @Test func aTakeThatDoesNotLandCountsNothing() async throws {
+        let cube = DictionaryEntry(spoken: "cube", written: "Kubernetes")
+        let usage = DictionaryUsageLog()
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "deploy cube", detectedLanguage: .english),
+            config: StaticConfig(usage: usage, entries: [cube]),
+            deliveryOutcome: .blockedSecureField(culpritApp: nil)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        #expect(await usage.calls.isEmpty)
+    }
+
     // MARK: - Streaming preview (docs/15 step 22)
 
     @Test func streamingPreviewCommitsThePrefixAcrossHypotheses() async throws {
@@ -708,7 +863,7 @@ struct DictationSessionTests {
                         text: "hello there friend", detectedLanguage: .english
                     )
                 ),
-                previewTranscribe: { _ in await script.next() },
+                previewTranscribe: { _ in await script.nextResult() },
                 onPartial: { partials.append($0) },
                 previewInterval: .milliseconds(10),
                 deliverer: deliverer,
@@ -755,7 +910,7 @@ struct DictationSessionTests {
                 engine: FakeTranscriptionEngine(
                     result: TranscriptionResult(text: "hello", detectedLanguage: .english)
                 ),
-                previewTranscribe: { _ in await script.next() },
+                previewTranscribe: { _ in await script.nextResult() },
                 onPartial: { partials.append($0) },
                 previewInterval: .milliseconds(10),
                 deliverer: RecordingTextDeliverer(),
@@ -774,6 +929,90 @@ struct DictationSessionTests {
         await feed.push(PCMChunk(samples: [Float](repeating: 0, count: PCMChunk.sampleRate)))
         try await Task.sleep(for: .milliseconds(60))
         #expect(partials.snapshot().isEmpty)
+    }
+
+    @Test func previewDecodesATrailingWindowNotTheWholeTake() async throws {
+        // docs/17 G2.3: a long take must not re-decode everything said so
+        // far. Each half-second of audio carries its own index as its sample
+        // value, and the fake engine "hears" one word per half-second run,
+        // so a wrong window start, offset, or a word lost or repeated across
+        // a slide shows up in the final line.
+        let feed = ChunkFeed()
+        let partials = LockedStrings()
+        let decodedLengths = DecodedLengths()
+        let half = PCMChunk.sampleRate / 2
+
+        var dependencies = DictationSession.Dependencies(
+            audio: StreamingAudioCapturing(
+                finishChunk: PCMChunk(
+                    samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)
+                ),
+                feed: feed
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "done", detectedLanguage: .english)
+            ),
+            previewTranscribe: { chunk in
+                await decodedLengths.record(chunk.samples.count)
+                return Self.wordsPerRun(chunk)
+            },
+            onPartial: { partials.append($0) },
+            previewInterval: .milliseconds(5),
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(),
+            profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+            now: { fixedNow }
+        )
+        dependencies.previewWindow = TrailingWindowPreview(maxWindowSeconds: 3, keepSeconds: 1)
+        let session = DictationSession(dependencies: dependencies)
+
+        await session.pressBegan()
+        let seconds = 12
+        for second in 0..<seconds {
+            let samples = [Float](repeating: Float(2 * second), count: half)
+                + [Float](repeating: Float(2 * second + 1), count: half)
+            await feed.push(PCMChunk(samples: samples))
+            try await waitUntil("partial for second \(second)") {
+                partials.snapshot().count >= second + 1
+            }
+        }
+        await session.pressEnded()
+        if let task = await session.pipelineTask { await task.value }
+
+        let lengths = await decodedLengths.values
+        #expect(lengths.count == seconds)
+        // Never more than the window plus the second that arrived since.
+        #expect(lengths.allSatisfy { $0 <= 4 * PCMChunk.sampleRate })
+        // Every half-second, once, in order: frozen words plus the window.
+        // The newest word is still tail-only, so the last line holds all 24.
+        let expected = (0..<(2 * seconds)).map { "w\($0)" }.joined(separator: " ")
+        #expect(partials.snapshot().last == expected)
+    }
+
+    /// One word per run of equal samples at least a quarter second long,
+    /// named after the run's value and timed like a real engine: relative
+    /// to the chunk, ending a little before the next run.
+    private static func wordsPerRun(_ chunk: PCMChunk) -> TranscriptionResult {
+        let rate = Double(PCMChunk.sampleRate)
+        var words: [TranscriptionResult.TimedSegment] = []
+        var runStart = 0
+        let samples = chunk.samples
+        for index in 1...samples.count where index == samples.count || samples[index] != samples[runStart] {
+            if index - runStart >= PCMChunk.sampleRate / 4 {
+                words.append(.init(
+                    text: "w\(Int(samples[runStart]))",
+                    start: Double(runStart) / rate,
+                    end: Double(index) / rate - 0.05
+                ))
+            }
+            runStart = index
+        }
+        return TranscriptionResult(
+            text: words.map(\.text).joined(separator: " "),
+            detectedLanguage: .english,
+            segments: words
+        )
     }
 
     // MARK: - VAD gate + trim (docs/15 step 16)
@@ -852,6 +1091,411 @@ struct DictationSessionTests {
         #expect(terms == ["Claude Code"])
     }
 
+    /// docs/17 F5: a whole-take snippet delivers its written form verbatim —
+    /// no cleanup call, no stage-4 reshaping — and never biases the engine.
+    @Test func wholeTakeSnippetDeliversVerbatimAndSkipsCleanup() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let snippet = DictionaryEntry(spoken: "sign off", written: "Best,\nJoseph")
+        let fix = DictionaryEntry(spoken: "cloud code", written: "Claude Code")
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "Sign off.", detectedLanguage: .english),
+            profile: Profile(name: "Email", cleanupEnabled: true, promptText: "Tidy this."),
+            config: StaticConfig(masterSwitch: true, entries: [snippet, fix]),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Best,\nJoseph"])
+        let cleanupCallCount = await provider.cleanupCallCount
+        #expect(cleanupCallCount == 0)
+        let terms = await harness.engine.lastDictionaryTerms
+        #expect(terms == ["Claude Code"])
+        let record = try #require(await harness.store.records.first)
+        #expect(record.cleanup == .skipped(reason: .notNeeded))
+    }
+
+    /// docs/17 §11: the clipboard a snippet pastes is delivered but never
+    /// written to History — it is often a password copied a moment ago.
+    @Test func aClipboardSnippetKeepsTheClipboardOutOfHistory() async throws {
+        let snippet = DictionaryEntry(spoken: "paste it", written: "Token: {clipboard}", snippet: true)
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate))
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "Paste it.", detectedLanguage: .english)
+            ),
+            deliverer: deliverer,
+            store: store,
+            config: StaticConfig(entries: [snippet]),
+            profileResolution: { (Profile(name: "Default"), .app, "com.example.notes") },
+            now: { fixedNow }
+        )
+        dependencies.readClipboard = { "hunter2-PASSWORD" }
+        let session = DictationSession(dependencies: dependencies)
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        if let persistence = await session.persistenceTask { await persistence.value }
+
+        #expect(await deliverer.deliveredTexts == ["Token: hunter2-PASSWORD"])
+        let record = try #require(await store.records.first)
+        #expect(record.deliveredText == "Token: [clipboard]")
+        #expect(!record.deliveredText.contains("hunter2"))
+    }
+
+    /// docs/17 §11: the context reader is told which app the take was spoken
+    /// in, so a queued take never reads whatever app is frontmost later.
+    @Test func surroundingTextIsReadForThePressTimeApp() async throws {
+        let provider = CapturingCleanupProvider()
+        let apps = LockedStrings()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate))
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "and she said yes", detectedLanguage: .english)
+            ),
+            selectCleanup: { _ in
+                DictationSession.CleanupSelection(
+                    pipeline: CleanupPipeline(provider: provider),
+                    providerID: .ollama(model: "local"),
+                    leavesDevice: false
+                )
+            },
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(masterSwitch: true, usesSurroundingText: true),
+            profileResolution: {
+                (Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."), .app, "com.example.notes")
+            },
+            now: { fixedNow }
+        )
+        dependencies.readSurroundingContext = { app in
+            apps.append(app ?? "nil")
+            return nil
+        }
+        let session = DictationSession(dependencies: dependencies)
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        #expect(apps.snapshot() == ["com.example.notes"])
+    }
+
+    @Test func snippetPhraseInsideASentenceStaysProse() async {
+        let snippet = DictionaryEntry(spoken: "sign off", written: "Best,\nJoseph")
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(
+                text: "please sign off on the budget", detectedLanguage: .english
+            ),
+            config: StaticConfig(entries: [snippet])
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["Please sign off on the budget."])
+    }
+
+    // MARK: - docs/17 §5 styles and G3.2 context
+
+    @Test func rawStyleDeliversTheRecognizerTextAndSkipsCleanup() async throws {
+        let provider = ScriptedCleanupProvider(script: .uppercase)
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "um so the the plan works", detectedLanguage: .english),
+            profile: Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."),
+            config: StaticConfig(masterSwitch: true, style: .raw),
+            cleanup: CleanupPipeline(provider: provider)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+
+        // Verbatim: no filler removal, no capital, no full stop, no model.
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["um so the the plan works"])
+        let calls = await provider.cleanupCallCount
+        #expect(calls == 0)
+        let records = await harness.store.records
+        let record = try #require(records.first)
+        #expect(record.cleanup == .skipped(reason: .rawStyle))
+    }
+
+    @Test func lowercaseStyleRestylesTheDeliveredText() async {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "Sounds good to me", detectedLanguage: .english),
+            config: StaticConfig(style: .lowercase)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["sounds good to me"])
+    }
+
+    @Test func profilesThatIgnoreTheGlobalStyleAreUntouched() async {
+        let harness = makeHarness(
+            engineResult: TranscriptionResult(text: "git status", detectedLanguage: .english),
+            profile: Profile(name: "Terminal", formatting: .verbatim, ignoresGlobalStyle: true),
+            config: StaticConfig(style: .lowercase)
+        )
+        await harness.session.pressBegan()
+        await harness.session.pressEnded()
+        await harness.drainPipeline()
+        let delivered = await harness.deliverer.deliveredTexts
+        #expect(delivered == ["git status"])
+    }
+
+    @Test(arguments: [false, true])
+    func surroundingTextIsReadOnlyWhenTheUserOptedIn(optedIn: Bool) async throws {
+        let provider = CapturingCleanupProvider()
+        let counter = ReadCounter()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                log: CaptureLog()
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "and she said yes", detectedLanguage: .english)
+            ),
+            selectCleanup: { _ in
+                DictationSession.CleanupSelection(
+                    pipeline: CleanupPipeline(provider: provider),
+                    providerID: .ollama(model: "local"),
+                    leavesDevice: false
+                )
+            },
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(masterSwitch: true, usesSurroundingText: optedIn),
+            profileResolution: {
+                (Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."), .app, "com.example.notes")
+            },
+            now: { fixedNow }
+        )
+        dependencies.readSurroundingContext = { _ in await counter.read() }
+        let session = DictationSession(dependencies: dependencies)
+
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask {
+            await pipeline.value
+        }
+
+        let reads = await counter.count
+        #expect(reads == (optedIn ? 1 : 0))
+        let requests = await provider.requests
+        let request = try #require(requests.first)
+        #expect(request.context == (optedIn ? "We met Siobhan yesterday" + CleanupRequest.cursorMarker : ""))
+    }
+
+    // MARK: - docs/17 G4 command mode
+
+    @Test func aCommandKeyTakeGoesToTheHandlerWithThePressTimeSelection() async throws {
+        let sink = CommandSink()
+        let deliverer = RecordingTextDeliverer()
+        let store = InMemoryStore()
+        let session = makeCommandSession(
+            transcript: "make this shorter", wakeWord: false, sink: sink, deliverer: deliverer, store: store
+        )
+        await session.pressBegan(kind: .command)
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+
+        let commands = await sink.commands
+        let command = try #require(commands.first)
+        #expect(command.instruction == "Make this shorter.")
+        #expect(command.selectedText == "The meeting moved to Friday.")
+        #expect(command.pressTimeBundleID == "com.example.mail")
+        #expect(!command.viaWakeWord)
+        // Nothing typed, nothing saved — the preview owns the result.
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered.isEmpty)
+        let records = await store.records
+        #expect(records.isEmpty)
+    }
+
+    @Test(arguments: [true, false])
+    func theWakeWordTurnsADictationIntoACommandOnlyWhenEnabled(enabled: Bool) async {
+        let sink = CommandSink()
+        let deliverer = RecordingTextDeliverer()
+        let session = makeCommandSession(
+            transcript: "Vocal, make this shorter.", wakeWord: enabled, sink: sink, deliverer: deliverer
+        )
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+
+        let commands = await sink.commands
+        let delivered = await deliverer.deliveredTexts
+        if enabled {
+            #expect(commands.map(\.instruction) == ["Make this shorter."])
+            #expect(commands.first?.viaWakeWord == true)
+            #expect(delivered.isEmpty)
+        } else {
+            #expect(commands.isEmpty)
+            #expect(delivered == ["Vocal, make this shorter."])
+        }
+    }
+
+    @Test func anOrdinaryDictationIsTypedEvenWithTheWakeWordOn() async {
+        let sink = CommandSink()
+        let deliverer = RecordingTextDeliverer()
+        let session = makeCommandSession(
+            transcript: "Vocal cords need rest", wakeWord: true, sink: sink, deliverer: deliverer
+        )
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        let commands = await sink.commands
+        #expect(commands.isEmpty)
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered == ["Vocal cords need rest."])
+    }
+
+    /// docs/17 review #1: the opt-in context never goes to a provider that
+    /// sends text off the device, even with the setting on.
+    @Test func surroundingTextIsNeverReadForARemoteProvider() async throws {
+        let provider = CapturingCleanupProvider()
+        let counter = ReadCounter()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                log: CaptureLog()
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "and she said yes", detectedLanguage: .english)
+            ),
+            selectCleanup: { _ in
+                DictationSession.CleanupSelection(
+                    pipeline: CleanupPipeline(provider: provider),
+                    providerID: .openAICompatible(name: "remote.example.com"),
+                    leavesDevice: true
+                )
+            },
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(masterSwitch: true, usesSurroundingText: true),
+            profileResolution: {
+                (Profile(name: "Notes", cleanupEnabled: true, promptText: "Tidy this."), .app, "com.example.notes")
+            },
+            now: { fixedNow }
+        )
+        dependencies.readSurroundingContext = { _ in await counter.read() }
+        let session = DictationSession(dependencies: dependencies)
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+
+        let reads = await counter.count
+        #expect(reads == 0)
+        let requests = await provider.requests
+        #expect(requests.first?.context == "")
+    }
+
+    /// docs/17 §11: a *cancelled* command — Escape, sleep, a chord — deletes
+    /// its recording instead of leaving it for "Recover"; a cancelled
+    /// dictation keeps it (FR-1.6).
+    @Test func aCancelledCommandDiscardsItsRecordingButADictationKeepsIt() async {
+        let log = CaptureLog()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                log: log
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "x", detectedLanguage: .english)
+            ),
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(),
+            profileResolution: { (Profile(name: "Default"), .app, "com.example.notes") },
+            now: { fixedNow }
+        )
+        dependencies.handleCommand = { _ in }
+        let session = DictationSession(dependencies: dependencies)
+        await session.pressBegan(kind: .command)
+        await session.cancel()
+        #expect(await log.discardCount == 1)
+        #expect(await log.cancelCount == 0)
+
+        await session.pressBegan()
+        await session.cancel()
+        #expect(await log.discardCount == 1)
+        #expect(await log.cancelCount == 1)
+    }
+
+    /// docs/17 §11: an older take's pipeline starting late must not erase a
+    /// newer press's own failure before the platform has shown it.
+    @Test func anOlderPipelineDoesNotEraseANewerPressFailure() async throws {
+        let release = CaptureGate()
+        var dependencies = DictationSession.Dependencies(
+            audio: FailingThirdStartAudio(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate))
+            ),
+            engine: GatedEngine(gate: release),
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(),
+            profileResolution: { (Profile(name: "Default"), .app, "com.example.notes") },
+            now: { fixedNow }
+        )
+        dependencies.handleCommand = nil
+        let session = DictationSession(dependencies: dependencies)
+        // Take Z: recorded, its transcription held at the gate. Take A:
+        // recorded and queued behind Z, its pipeline not yet started.
+        await session.pressBegan()
+        await session.pressEnded()
+        await session.pressBegan()
+        await session.pressEnded()
+        // Press B: the microphone will not open.
+        await session.pressBegan()
+        #expect(await session.lastError != nil)
+        await release.open()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        #expect(await session.lastError != nil, "A's pipeline erased B's failure")
+    }
+
+    /// docs/17 review #6: a failed command is not kept for "Recover", which
+    /// would re-run it as dictation and type the spoken instruction.
+    @Test func aFailedCommandTakeIsNotPreservedForRecovery() async {
+        let preserved = LockedStrings()
+        var dependencies = DictationSession.Dependencies(
+            audio: ScriptedAudioCapturing(
+                chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                log: CaptureLog()
+            ),
+            engine: FakeTranscriptionEngine(
+                result: TranscriptionResult(text: "x", detectedLanguage: .english),
+                failure: .engineUnavailable("down")
+            ),
+            preserveFailedAudio: { _ in preserved.append("kept") },
+            deliverer: RecordingTextDeliverer(),
+            store: InMemoryStore(),
+            config: StaticConfig(),
+            profileResolution: { (Profile(name: "Default"), .app, "com.example.notes") },
+            now: { fixedNow }
+        )
+        dependencies.handleCommand = { _ in }
+        let session = DictationSession(dependencies: dependencies)
+        await session.pressBegan(kind: .command)
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        #expect(preserved.snapshot().isEmpty)
+
+        // A failed dictation still is.
+        await session.pressBegan()
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask { await pipeline.value }
+        #expect(preserved.snapshot() == ["kept"])
+    }
+
     /// Regression: profile resolution must never gate the microphone. On macOS
     /// it shells out to osascript for the frontmost browser's tab URL (up to
     /// 1.5 s), and every millisecond before capture opens is speech the user
@@ -923,6 +1567,49 @@ struct DictationSessionTests {
         #expect(record.routeKind == .app)
         let finishCount = await captureLog.finishCount
         #expect(finishCount == 1)
+    }
+
+    /// docs/17 §4.4 #13: an earlier take that fails while the next one is
+    /// recording must not leave its error behind for the next take's idle.
+    @Test func aFailedEarlierTakeDoesNotBlameTheNextOne() async {
+        let engine = GatedFailFirstEngine(
+            result: TranscriptionResult(text: "second take works", detectedLanguage: .english)
+        )
+        let deliverer = RecordingTextDeliverer()
+        let session = DictationSession(
+            dependencies: DictationSession.Dependencies(
+                audio: ScriptedAudioCapturing(
+                    chunk: PCMChunk(samples: [Float](repeating: 0, count: 2 * PCMChunk.sampleRate)),
+                    log: CaptureLog()
+                ),
+                engine: engine,
+                selectCleanup: { _ in nil },
+                deliverer: deliverer,
+                store: InMemoryStore(),
+                config: StaticConfig(),
+                profileResolution: { (Profile(name: "Default"), .app, "com.example.pressapp") },
+                now: { fixedNow }
+            )
+        )
+
+        await session.pressBegan()
+        await session.pressEnded()
+        let firstPipeline = await session.pipelineTask
+        // Take 2 starts recording while take 1 is still transcribing.
+        await session.pressBegan()
+        await engine.release()
+        await firstPipeline?.value
+        let errorWhileRecording = await session.lastError
+        #expect(errorWhileRecording != nil)
+
+        await session.pressEnded()
+        if let pipeline = await session.pipelineTask {
+            await pipeline.value
+        }
+        let delivered = await deliverer.deliveredTexts
+        #expect(delivered == ["Second take works."])
+        let errorAfterSuccess = await session.lastError
+        #expect(errorAfterSuccess == nil)
     }
 
     @Test func secureFieldBlockPersistsNothing() async {
@@ -1291,5 +1978,52 @@ struct EmptyTranscriptTests {
         await harness.session.pressEnded()
         #expect(await harness.deliverer.deliveredTexts.isEmpty)
         #expect(await harness.store.records.isEmpty)
+    }
+}
+
+/// Starts twice, then fails every later start — a microphone that went away.
+private actor StartCounter {
+    var starts = 0
+    func next() -> Int {
+        starts += 1
+        return starts
+    }
+}
+
+private struct FailingThirdStartAudio: AudioCapturing {
+    let chunk: PCMChunk
+    private let counter = StartCounter()
+
+    init(chunk: PCMChunk) { self.chunk = chunk }
+
+    func start() async throws -> CaptureSession {
+        guard await counter.next() <= 2 else { throw CancellationError() }
+        let chunk = chunk
+        return CaptureSession(
+            chunks: AsyncStream { $0.finish() },
+            finish: { chunk },
+            cancel: {}
+        )
+    }
+}
+
+/// Transcribes only once the test opens the gate.
+private struct GatedEngine: TranscriptionEngine {
+    let gate: CaptureGate
+    var id: String { "gated" }
+    var displayName: String { "Gated" }
+    func availability(for language: Language) async -> EngineAvailability { .ready }
+    func prepare(languageMode: LanguageMode) async throws {}
+    func unload() async {}
+    func transcribe(
+        _ audio: PCMChunk, languageMode: LanguageMode, dictionaryTerms: [String]
+    ) async throws -> TranscriptionResult {
+        await gate.waitForOpen()
+        return TranscriptionResult(text: "take a works", detectedLanguage: .english)
+    }
+    func transcribeStream(
+        _ audio: AsyncStream<PCMChunk>, languageMode: LanguageMode, dictionaryTerms: [String]
+    ) -> AsyncThrowingStream<TranscriptionUpdate, Error> {
+        AsyncThrowingStream { $0.finish() }
     }
 }

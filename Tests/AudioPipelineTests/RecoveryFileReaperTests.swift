@@ -76,3 +76,53 @@ struct RecoveryFileReaperTests {
         RecoveryFileReaper.reapExpiredRecoveryFiles(in: absent, now: now)
     }
 }
+
+// MARK: - docs/17 §4.4 #6: "Never" and "Delete All" leave no recordings
+
+@Test func discardAllRemovesEveryRecoverySidecarAndNothingElse() throws {
+    try withTemporaryDirectory { directory in
+        let now = Date()
+        let fresh = try makeFile(
+            in: directory, named: "vocal-capture-\(UUID().uuidString).pcmf32", modified: now
+        )
+        let old = try makeFile(
+            in: directory, named: "vocal-capture-\(UUID().uuidString).pcmf32",
+            modified: now.addingTimeInterval(-3 * 24 * 60 * 60)
+        )
+        let unrelated = try makeFile(in: directory, named: "notes.pcmf32", modified: now)
+        let otherExtension = try makeFile(
+            in: directory, named: "vocal-capture-keep.txt", modified: now
+        )
+        #expect(RecoveryStore.discardAll(in: directory) == 2)
+        #expect(!exists(fresh))
+        #expect(!exists(old))
+        #expect(exists(unrelated))
+        #expect(exists(otherExtension))
+        #expect(RecoveryStore.latestRecoverable(in: directory) == nil)
+    }
+}
+
+// MARK: - docs/17 §11: Speed Check recordings are swept, never recovered
+
+@Test func measurementSidecarsAreSweptAndDiscardedButNeverOfferedBack() throws {
+    try withTemporaryDirectory { directory in
+        let now = Date()
+        let measurement = try makeFile(
+            in: directory,
+            named: RecoveryFileReaper.measurementFilePrefix + "\(UUID().uuidString).pcmf32",
+            modified: now
+        )
+        // Newest file in the folder, yet "Recover" must not offer it.
+        #expect(RecoveryStore.latestRecoverable(in: directory, now: now, minimumSeconds: 0) == nil)
+        #expect(RecoveryStore.discardAll(in: directory) == 1)
+        #expect(!exists(measurement))
+
+        let stale = try makeFile(
+            in: directory,
+            named: RecoveryFileReaper.measurementFilePrefix + "\(UUID().uuidString).pcmf32",
+            modified: now.addingTimeInterval(-(RecoveryFileReaper.recoveryRetention + 60))
+        )
+        RecoveryFileReaper.reapExpiredRecoveryFiles(in: directory, now: now)
+        #expect(!exists(stale))
+    }
+}
